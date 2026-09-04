@@ -842,6 +842,35 @@ TEST_CASE("tiny Standard PBR probabilities keep support without throughput floor
     CHECK((coatSample.event_type & BSDF_EVENT_GLOSSY_REFLECTION) != 0u);
 }
 
+TEST_CASE("Standard PBR proposal masses are exact on the production lattice")
+{
+    SurfaceInteraction si = mixed_transmission_si(0.47f, 0.31f, 0.19f, 0.37f);
+    si.clearcoat = 0.23f;
+    si.sheen = 0.17f;
+    const PbrLobeWeights weights = pbr_lobe_weights(si);
+    const PbrLobeProbabilities p = pbr_lobe_probabilities(weights, false);
+
+    CHECK(p.diffuse + p.diffuseTransmission + p.specular + p.transmission + p.clearcoat == 1.0f);
+    CHECK(p.cdfDiffuse == discreteFloatLatticeCount(p.diffuse));
+    CHECK(p.cdfDiffuseTransmission - p.cdfDiffuse == discreteFloatLatticeCount(p.diffuseTransmission));
+    CHECK(p.cdfSpecular - p.cdfDiffuseTransmission == discreteFloatLatticeCount(p.specular));
+    CHECK(p.cdfTransmission - p.cdfSpecular == discreteFloatLatticeCount(p.transmission));
+    CHECK(STRELKA_FLOAT_LATTICE_STATES - p.cdfTransmission == discreteFloatLatticeCount(p.clearcoat));
+
+    const PbrLobeProbabilities exiting = pbr_lobe_probabilities(weights, true);
+    CHECK(exiting.diffuse == 0.0f);
+    CHECK(exiting.specular == 0.0f);
+    CHECK(exiting.clearcoat == 0.0f);
+    CHECK(exiting.diffuseTransmission + exiting.transmission == 1.0f);
+
+    constexpr float physicalFresnel = 0.1234567f;
+    const float represented = pbr_fresnel_proposal(physicalFresnel);
+    const uint32_t count = discreteFloatLatticeCount(physicalFresnel);
+    CHECK(represented == float(count) * 0x1p-23f);
+    CHECK(discreteFloatLatticeBernoulli(count - 1u, represented));
+    CHECK_FALSE(discreteFloatLatticeBernoulli(count, represented));
+}
+
 TEST_CASE("Standard PBR returns a sub-1e-10 marginal without flooring it")
 {
     SurfaceInteraction si = mixed_transmission_si(0.02f, 1.0f, 0.0f, 1.0f);

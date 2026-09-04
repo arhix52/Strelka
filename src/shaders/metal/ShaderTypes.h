@@ -722,7 +722,7 @@ struct UniformLight
     // Walker/Vose analytic-light distribution. The represented marginal PMF
     // lives in color.w (RGB consumers ignore it); these two fields replace the
     // old cumulative endpoint and PDF without growing the 128-byte ABI.
-    float selectionAliasProbability;
+    uint32_t selectionAliasThreshold;
     uint32_t selectionAlias;
 };
 static_assert(sizeof(UniformLight) == 128, "UniformLight host/Metal ABI changed");

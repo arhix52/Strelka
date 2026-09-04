@@ -19,7 +19,7 @@ namespace oka::metal
 // Host-side mirror of ShaderTypes.h EnvAliasEntry (layout must stay identical).
 struct EnvAliasEntry
 {
-    float prob = 1.0f;
+    uint32_t threshold = 0u;
     uint32_t alias = 0;
     float solidAnglePdf = 0.0f;
 };
@@ -93,7 +93,7 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
             const double theta0 = M_PI * static_cast<double>(y) / static_cast<double>(height);
             const double theta1 = M_PI * static_cast<double>(y + 1) / static_cast<double>(height);
             const double solidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
-            out.alias[i].prob = entry.aliasProbability;
+            out.alias[i].threshold = entry.aliasThreshold;
             out.alias[i].alias = entry.alias;
             out.alias[i].solidAnglePdf = static_cast<float>(static_cast<double>(entry.pdf) / solidAngle);
         }
@@ -102,7 +102,7 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
     {
         for (size_t i = 0; i < texelCount; ++i)
         {
-            out.alias[i].prob = 1.0f;
+            out.alias[i].threshold = 0u;
             out.alias[i].alias = (uint32_t)i;
         }
     }

@@ -501,12 +501,16 @@ __device__ __inline__ uint32_t nested_uniform_scramble(uint32_t value, uint32_t 
     return value;
 }
 
-__device__ __inline__ float sobol_scramble(uint32_t index, uint32_t dim, uint32_t seed)
+__device__ __inline__ uint32_t sobol_scramble_bits(uint32_t index, uint32_t dim, uint32_t seed)
 {
     seed = hash(seed);
     index = nested_uniform_scramble(index, seed);
-    uint32_t result = nested_uniform_scramble(sobol_uint(index, dim), hash_combine(seed, dim));
-    return min(result * 0x1p-32f, FloatOneMinusEpsilon);
+    return nested_uniform_scramble(sobol_uint(index, dim), hash_combine(seed, dim));
+}
+
+__device__ __inline__ float sobol_scramble(uint32_t index, uint32_t dim, uint32_t seed)
+{
+    return min(sobol_scramble_bits(index, dim, seed) * 0x1p-32f, FloatOneMinusEpsilon);
 }
 
 template <SampleDimension Dim>
@@ -526,4 +530,14 @@ __device__ __inline__ float random(SamplerState& state)
     // off it were the same number. Metal measured that as a plane 7.5% too
     // bright and 2% over the frame before fixing it the same way.
     return sobol_scramble(state.sampleIdx, dimension % 256u, state.seed + state.depth);
+}
+
+// Categorical decisions consume the unrounded Owen-scrambled word. Converting
+// it to float first would discard the low bits and makes tables larger than the
+// float mantissa impossible to cover.
+template <SampleDimension Dim>
+__device__ __inline__ uint32_t randomBits(SamplerState& state)
+{
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+    return sobol_scramble_bits(state.sampleIdx, dimension % 256u, state.seed + state.depth);
 }

@@ -19,7 +19,7 @@ struct EmissiveMeshLight
     unsigned int materialId;
     float selectionPdf;
 
-    float aliasProbability;
+    unsigned int aliasThreshold;
     unsigned int alias;
     unsigned int pad0;
     unsigned int pad1;
@@ -32,7 +32,7 @@ static_assert(sizeof(EmissiveMeshLight) == 48, "EmissiveMeshLight host/GPU ABI c
 struct EmissiveTriangleLight
 {
     float selectionPdf;
-    float aliasProbability;
+    unsigned int aliasThreshold;
     unsigned int alias;
     unsigned int pad;
 };

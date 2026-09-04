@@ -206,7 +206,8 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si, const MaterialParams& params,
 //   xi.z         -- lobe selection  (standard_pbr)
 //   xi.w         -- Fresnel coin-flip (dielectric, transmission)
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si, float4 xi)
+DEVICE_FUNC BsdfSampleResult bsdf_sample(
+    const THREAD_REF SurfaceInteraction& si, float4 xi, unsigned int lobeWord, unsigned int fresnelWord)
 {
     switch (si.material_type)
     {
@@ -217,15 +218,20 @@ DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si
         return conductor_sample(si, xi.x, xi.y);
 
     case MATERIAL_TYPE_DIELECTRIC:
-        return dielectric_sample(si, xi.x, xi.y, xi.z);
+        return dielectric_sample(si, xi.x, xi.y, lobeWord);
 
     case MATERIAL_TYPE_HAIR:
         return hair_chiang_sample(si, xi.x, xi.y, xi.z);
 
     case MATERIAL_TYPE_STANDARD_PBR:
     default:
-        return standard_pbr_sample(si, xi.x, xi.y, xi.z, xi.w);
+        return standard_pbr_sample(si, xi.x, xi.y, lobeWord, fresnelWord);
     }
+}
+
+DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si, float4 xi)
+{
+    return bsdf_sample(si, xi, discreteFloatLatticeWord(xi.z), discreteFloatLatticeWord(xi.w));
 }
 
 // ---------------------------------------------------------------------------

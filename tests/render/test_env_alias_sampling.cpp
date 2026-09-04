@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <utility>
 #include <vector>
@@ -72,11 +73,26 @@ std::vector<EnvAliasEntry> toDeviceTable(const std::vector<oka::metal::EnvAliasE
     std::vector<EnvAliasEntry> out(src.size());
     for (size_t i = 0; i < src.size(); ++i)
     {
-        out[i].prob = src[i].prob;
+        out[i].threshold = src[i].threshold;
         out[i].alias = src[i].alias;
         out[i].solidAnglePdf = src[i].solidAnglePdf;
     }
     return out;
+}
+
+uint32_t hashWord(uint32_t value)
+{
+    value ^= value >> 16u;
+    value *= 0x7feb352du;
+    value ^= value >> 15u;
+    value *= 0x846ca68bu;
+    return value ^ (value >> 16u);
+}
+
+uint32_t stratifiedWord(uint32_t sample, uint32_t count)
+{
+    constexpr uint64_t states = uint64_t{ 1 } << 32u;
+    return static_cast<uint32_t>((uint64_t(sample) * states + states / 2u) / count);
 }
 
 } // namespace
@@ -103,9 +119,8 @@ TEST_CASE("envAliasDraw reproduces the distribution the table was built from")
     std::vector<int> hits(n, 0);
     for (int s = 0; s < draws; ++s)
     {
-        const float bucketUniform = ((float)s + 0.5f) / (float)draws;
-        const float aliasUniform = std::fmod(((float)s + 0.5f) * 0.61803398875f, 1.0f);
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, bucketUniform, aliasUniform);
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, stratifiedWord(uint32_t(s), uint32_t(draws)),
+                                            hashWord(uint32_t(s)));
         REQUIRE(d.texel < n);
         hits[d.texel]++;
     }
@@ -136,25 +151,19 @@ TEST_CASE("envAliasDraw reproduces the distribution the table was built from")
 TEST_CASE("environment alias thresholds match the finite GPU random lattice")
 {
     constexpr uint32_t texelCount = 1u << 20u;
-    constexpr float threshold = 0x1p-22f;
-    const EnvAliasEntry table[] = { { threshold, 1u, 0.0f }, { 1.0f, 1u, 0.0f } };
+    constexpr uint32_t threshold = 1u << 10u;
+    const EnvAliasEntry table[] = { { threshold, 1u, 0.0f }, { 0u, 1u, 0.0f } };
 
     uint32_t legacyOwn = 0u;
     for (uint32_t fraction = 0u; fraction < 8u; ++fraction)
     {
-        legacyOwn += static_cast<float>(fraction) * 0x1p-23f < threshold ? 1u : 0u;
+        legacyOwn += static_cast<float>(fraction) * 0x1p-23f < 0x1p-22f ? 1u : 0u;
     }
-    CHECK(static_cast<double>(legacyOwn) / 8.0 != doctest::Approx(threshold).epsilon(1e-7));
+    CHECK(static_cast<double>(legacyOwn) / 8.0 != doctest::Approx(0x1p-22).epsilon(1e-7));
 
-    uint32_t own = 0u;
-    constexpr uint32_t randomValues = 1u << 23u;
-    for (uint32_t raw = 0u; raw < randomValues; ++raw)
-    {
-        const float aliasUniform = static_cast<float>(raw) * 0x1p-23f;
-        own += envAliasDraw(table, texelCount, 0.0f, aliasUniform).texel == 0u ? 1u : 0u;
-    }
-    const double representedConditionalMass = static_cast<double>(own) / static_cast<double>(randomValues);
-    CHECK(representedConditionalMass == doctest::Approx(threshold).epsilon(1e-7));
+    CHECK(envAliasDraw(table, texelCount, 0u, threshold - 1u).texel == 0u);
+    CHECK(envAliasDraw(table, texelCount, 0u, threshold).texel == 1u);
+    CHECK(static_cast<double>(threshold) / 4294967296.0 == doctest::Approx(0x1p-22).epsilon(1e-12));
 }
 
 TEST_CASE("environment solid-angle jitter excludes the coordinate singularities")
@@ -230,9 +239,8 @@ TEST_CASE("a zero-luminance texel is never drawn")
     const int draws = 100000;
     for (int s = 0; s < draws; ++s)
     {
-        const float bucketUniform = ((float)s + 0.5f) / (float)draws;
-        const float aliasUniform = std::fmod(((float)s + 0.5f) * 0.61803398875f, 1.0f);
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, bucketUniform, aliasUniform);
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, stratifiedWord(uint32_t(s), uint32_t(draws)),
+                                            hashWord(uint32_t(s)));
         const int y = (int)(d.texel / (uint32_t)w);
         CHECK(y != h / 2);
     }
@@ -292,11 +300,11 @@ TEST_CASE("solid-angle samples and evaluated PDFs use the same texel measure")
 
         for (uint32_t sample = 0; sample < 20000u; ++sample)
         {
-            const float bucketUniform = uniform(rng);
-            const float aliasUniform = uniform(rng);
+            const uint32_t bucketWord = rng();
+            const uint32_t aliasWord = rng();
             const float jitterU = uniform(rng);
             const float jitterV = uniform(rng);
-            const EnvAliasDraw draw = envAliasDraw(table.data(), (uint32_t)table.size(), bucketUniform, aliasUniform);
+            const EnvAliasDraw draw = envAliasDraw(table.data(), (uint32_t)table.size(), bucketWord, aliasWord);
             const uint32_t x = draw.texel % (uint32_t)w;
             const uint32_t y = draw.texel / (uint32_t)w;
             const float u = ((float)x + jitterU) / (float)w;
@@ -349,7 +357,8 @@ TEST_CASE("independent within-texel jitter stays inside the unit interval and sp
     for (int s = 0; s < draws; ++s)
     {
         const float jitter = ((float)s + 0.5f) / (float)draws;
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, jitter, 1.0f - jitter);
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, stratifiedWord(uint32_t(s), uint32_t(draws)),
+                                            hashWord(uint32_t(s)));
         CHECK(d.texel < n);
         CHECK(jitter >= 0.0f);
         CHECK(jitter < 1.0f);
@@ -371,22 +380,21 @@ TEST_CASE("a variate at the top of the range stays in the table")
     const auto table = toDeviceTable(built.alias);
     const uint32_t n = (uint32_t)table.size();
 
-    // 1 - 2^-24 is the largest float below one, and n * it rounds to n.
-    for (const float xi : { 0.0f, 0.99999994f, 1.0f })
+    for (const uint32_t word : { 0u, std::numeric_limits<uint32_t>::max() })
     {
-        const EnvAliasDraw d = envAliasDraw(table.data(), n, xi, 0.5f);
+        const EnvAliasDraw d = envAliasDraw(table.data(), n, word, 0x80000000u);
         CHECK(d.texel < n);
     }
 }
 
 TEST_CASE("envAliasDraw refuses an empty table instead of reading it")
 {
-    const EnvAliasDraw a = envAliasDraw(nullptr, 16, 0.5f, 0.5f);
+    const EnvAliasDraw a = envAliasDraw(nullptr, 16, 0u, 0u);
     CHECK(a.texel == 0u);
 
     std::vector<EnvAliasEntry> table(1);
-    table[0].prob = 1.0f;
+    table[0].threshold = 0u;
     table[0].alias = 0u;
-    const EnvAliasDraw b = envAliasDraw(table.data(), 0, 0.5f, 0.5f);
+    const EnvAliasDraw b = envAliasDraw(table.data(), 0, 0u, 0u);
     CHECK(b.texel == 0u);
 }

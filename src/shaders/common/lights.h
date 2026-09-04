@@ -27,7 +27,7 @@ struct UniformLight
     float pad1;
     // Walker/Vose analytic-light distribution. color.w stores the represented
     // marginal PMF, matching Metal's UniformLight convention.
-    float selectionAliasProbability;
+    unsigned int selectionAliasThreshold;
     unsigned int selectionAlias;
 };
 

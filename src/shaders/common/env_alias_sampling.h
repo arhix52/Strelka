@@ -21,6 +21,8 @@
 #    include <stdint.h>
 #endif
 
+#include <discrete_sampling.h>
+
 // Which address space the table lives in. Metal needs it spelled out on the
 // pointer; the other two compilers have one address space and want nothing.
 #if defined(__METAL_VERSION__)
@@ -44,7 +46,7 @@
 /// OptixRender.cpp static_asserts that the uploaded layout agrees with this one.
 struct EnvAliasEntry
 {
-    float prob;
+    uint32_t threshold;
     uint32_t alias;
     float solidAnglePdf;
 };
@@ -61,8 +63,8 @@ struct EnvAliasDraw
 /// Draw one texel using independent bucket and alias-coin variates.
 STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const EnvAliasEntry* table,
                                                   uint32_t texelCount,
-                                                  float bucketUniform,
-                                                  float aliasUniform)
+                                                  uint32_t bucketWord,
+                                                  uint32_t coinWord)
 {
     EnvAliasDraw out;
     out.texel = 0u;
@@ -72,31 +74,9 @@ STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const En
         return out;
     }
 
-    // The upper bound matters: xi is nominally below one, but a variate of
-    // 0.99999997 times a few million texels rounds to exactly texelCount in
-    // float, which would index one past the end of the table.
-    float scaled = bucketUniform * (float)texelCount;
-    const float limit = (float)texelCount - 1e-6f;
-    if (!(scaled >= 0.0f))
-    {
-        scaled = 0.0f; // also catches NaN
-    }
-    if (scaled > limit)
-    {
-        scaled = limit;
-    }
-
-    const uint32_t bucket = (uint32_t)scaled;
+    const uint32_t bucket = discreteUniformIndex(texelCount, bucketWord);
     const EnvAliasEntry entry = table[bucket];
-    if (!(aliasUniform >= 0.0f))
-    {
-        aliasUniform = 0.0f;
-    }
-    if (aliasUniform > 0.9999999f)
-    {
-        aliasUniform = 0.9999999f;
-    }
-    out.texel = aliasUniform < entry.prob ? bucket : entry.alias;
+    out.texel = discreteAliasSelect(texelCount, bucket, coinWord, entry.threshold, entry.alias);
     return out;
 }
 
@@ -105,9 +85,9 @@ STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const En
 // index for a larger table prevents accidental reuse of the old correlated draw.
 STRELKA_ENV_SAMPLING_FN EnvAliasDraw envAliasDraw(STRELKA_ENV_TABLE_PTR const EnvAliasEntry* table,
                                                   uint32_t texelCount,
-                                                  float bucketUniform)
+    float bucketUniform)
 {
-    EnvAliasDraw out = texelCount == 1u ? envAliasDraw(table, texelCount, bucketUniform, 0.0f) :
+    EnvAliasDraw out = texelCount == 1u ? envAliasDraw(table, texelCount, 0u, 0u) :
                                          EnvAliasDraw{ texelCount, 0.0f };
     if (texelCount == 1u)
     {

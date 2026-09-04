@@ -3,6 +3,7 @@
 #include <strelka/scene/light_desc.h>
 #include <strelka/scene/scene.h>
 #include <analytic_light.h>
+#include <discrete_sampling.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -16,7 +17,7 @@ namespace oka::metal
 
 struct LightSelectionEntry
 {
-    float aliasProbability = 0.0f;
+    uint32_t aliasThreshold = 0u;
     uint32_t alias = std::numeric_limits<uint32_t>::max();
     float pdf = 0.0f;
 };
@@ -62,7 +63,24 @@ inline float binaryPowerProbability(double firstPower, double secondPower)
     const double scale = std::max(first, second);
     const double probability = (first / scale) / (first / scale + second / scale);
     constexpr float minimumProbability = 0x1p-22f;
-    return std::clamp(static_cast<float>(probability), minimumProbability, 1.0f - minimumProbability);
+    const float clamped = std::clamp(static_cast<float>(probability), minimumProbability, 1.0f - minimumProbability);
+    const uint32_t threshold = discreteProbabilityThreshold(clamped);
+    return discreteThresholdProbability(threshold);
+}
+
+inline uint32_t aliasThreshold(double probability)
+{
+    if (!(probability > 0.0))
+    {
+        return 0u;
+    }
+    if (!(probability < 1.0))
+    {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    constexpr double stateCount = 4294967296.0;
+    const uint64_t rounded = static_cast<uint64_t>(std::llround(probability * stateCount));
+    return static_cast<uint32_t>(std::clamp<uint64_t>(rounded, 1u, uint64_t{ 0xffffffffu }));
 }
 
 inline double environmentLightPower(double mapIntegral, double sceneExtent, double intensity, double tintLuminance)
@@ -291,14 +309,14 @@ inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& p
         small.pop_back();
         const uint32_t great = large.back();
         large.pop_back();
-        table.entries[little].aliasProbability = static_cast<float>(std::clamp(scaled[little], 0.0, 1.0));
+        table.entries[little].aliasThreshold = aliasThreshold(std::clamp(scaled[little], 0.0, 1.0));
         table.entries[little].alias = great;
         scaled[great] = (scaled[great] + scaled[little]) - 1.0;
         (scaled[great] < 1.0 ? small : large).push_back(great);
     }
     for (const uint32_t i : large)
     {
-        table.entries[i].aliasProbability = 1.0f;
+        table.entries[i].aliasThreshold = 0u;
         table.entries[i].alias = i;
     }
     // Round-off can leave a nominally-small bucket after the last large one.
@@ -308,12 +326,12 @@ inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& p
     {
         if (i == fallback)
         {
-            table.entries[i].aliasProbability = 1.0f;
+            table.entries[i].aliasThreshold = 0u;
             table.entries[i].alias = i;
         }
         else
         {
-            table.entries[i].aliasProbability = static_cast<float>(std::clamp(scaled[i], 0.0, 1.0));
+            table.entries[i].aliasThreshold = aliasThreshold(std::clamp(scaled[i], 0.0, 1.0));
             table.entries[i].alias = fallback;
         }
     }
@@ -322,11 +340,14 @@ inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& p
     // PMF rather than uploading the unrounded target and silently disagreeing
     // with it in MIS.
     std::vector<double> represented(count, 0.0);
-    const double bucketMass = 1.0 / static_cast<double>(count);
+    constexpr double integerStateCount = 4294967296.0;
     for (size_t bucket = 0; bucket < count; ++bucket)
     {
         const LightSelectionEntry& entry = table.entries[bucket];
-        const double own = std::clamp(static_cast<double>(entry.aliasProbability), 0.0, 1.0);
+        const double bucketMass = static_cast<double>(
+                                      discreteBucketStateCount(static_cast<uint32_t>(count), static_cast<uint32_t>(bucket))) /
+                                  integerStateCount;
+        const double own = entry.alias == bucket ? 1.0 : static_cast<double>(entry.aliasThreshold) / integerStateCount;
         represented[bucket] += bucketMass * own;
         represented[entry.alias] += bucketMass * (1.0 - own);
     }

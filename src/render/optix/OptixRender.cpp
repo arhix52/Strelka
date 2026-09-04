@@ -4633,13 +4633,13 @@ void OptiXRender::createLightBuffer()
     const metal::LightSelectionTable selection = metal::buildLightSelectionAlias(powers);
     mAnalyticLightPower = selection.totalPower;
 
-    static_assert(sizeof(Scene::Light) == offsetof(UniformLight, selectionAliasProbability));
+    static_assert(sizeof(Scene::Light) == offsetof(UniformLight, selectionAliasThreshold));
     std::vector<UniformLight> gpuLights(lights.size());
     for (size_t i = 0; i < lights.size(); ++i)
     {
         std::memcpy(&gpuLights[i], &lights[i], sizeof(Scene::Light));
         gpuLights[i].color.w = selection.entries[i].pdf;
-        gpuLights[i].selectionAliasProbability = selection.entries[i].aliasProbability;
+        gpuLights[i].selectionAliasThreshold = selection.entries[i].aliasThreshold;
         gpuLights[i].selectionAlias = selection.entries[i].alias;
     }
     createOrUpdateBuffer(mLightBuffer, gpuLights);

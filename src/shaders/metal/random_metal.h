@@ -429,12 +429,17 @@ static float randomHalton(thread SamplerState& state)
 }
 
 template <SampleDimension Dim>
-static float randomPCG(thread SamplerState& state)
+static uint32_t randomPCGBits(thread SamplerState& state)
 {
     const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     uint32_t h = hash_with(state.seed + state.sampleIdx, dimension);
-    h = pcg_hash(h);
-    return uintToFloat(h);
+    return pcg_hash(h);
+}
+
+template <SampleDimension Dim>
+static float randomPCG(thread SamplerState& state)
+{
+    return uintToFloat(randomPCGBits<Dim>(state));
 }
 
 // ── Sobol + Owen scrambling (ported from OptiX random.h) ────────────────────
@@ -473,12 +478,16 @@ inline uint32_t nested_uniform_scramble(uint32_t value, uint32_t seed)
 // `scrambleDim` is the true (unreduced) sample dimension and only feeds the Owen
 // scramble seed, so that two dimensions which do share a matrix -- which now
 // only happens 256 apart -- still differ.
-inline float sobol_scramble(uint32_t index, uint32_t matrixIndex, uint32_t scrambleDim, uint32_t seed)
+inline uint32_t sobol_scramble_bits(uint32_t index, uint32_t matrixIndex, uint32_t scrambleDim, uint32_t seed)
 {
     seed = hash(seed);
     index = nested_uniform_scramble(index, seed);
-    uint32_t result = nested_uniform_scramble(sobol_uint(index, matrixIndex), hash_combine(seed, scrambleDim));
-    return min(result * 0x1p-32f, FloatOneMinusEpsilon);
+    return nested_uniform_scramble(sobol_uint(index, matrixIndex), hash_combine(seed, scrambleDim));
+}
+
+inline float sobol_scramble(uint32_t index, uint32_t matrixIndex, uint32_t scrambleDim, uint32_t seed)
+{
+    return min(sobol_scramble_bits(index, matrixIndex, scrambleDim, seed) * 0x1p-32f, FloatOneMinusEpsilon);
 }
 
 template <SampleDimension Dim>
@@ -489,6 +498,13 @@ static float randomSobol(thread SamplerState& state)
     // fourteen bounces of eNUM_DIMENSIONS each. The scramble seed is the
     // unreduced dimension so that even those differ.
     return sobol_scramble(state.sampleIdx, dimension % 256u, dimension, state.seed + state.depth);
+}
+
+template <SampleDimension Dim>
+static uint32_t randomSobolBits(thread SamplerState& state)
+{
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+    return sobol_scramble_bits(state.sampleIdx, dimension % 256u, dimension, state.seed + state.depth);
 }
 
 // ── Sobol with a blue-noise screen-space error distribution ─────────────────
@@ -541,6 +557,20 @@ static float randomSobolBlueNoise(thread SamplerState& state)
     return fract(v + blueNoiseShift(state.bn, dimension));
 }
 
+template <SampleDimension Dim>
+static uint32_t randomSobolBlueNoiseBits(thread SamplerState& state)
+{
+    if (state.depth != 0u)
+    {
+        return randomSobolBits<Dim>(state);
+    }
+    const uint32_t dimension = uint32_t(Dim);
+    const uint32_t word =
+        sobol_scramble_bits(state.sampleIdx, dimension % 256u, dimension, kBlueNoiseGlobalSeed);
+    const uint32_t shift = uint32_t(blueNoiseShift(state.bn, dimension) * 16777216.0f) << 8u;
+    return word + shift;
+}
+
 // Blue noise while the frame is young, per-pixel scrambling once it is not.
 //
 // The two are unbiased estimates of the same integral, so an accumulator can
@@ -559,6 +589,18 @@ static float randomHybrid(thread SamplerState& state)
     return randomSobol<Dim>(tail);
 }
 
+template <SampleDimension Dim>
+static uint32_t randomHybridBits(thread SamplerState& state)
+{
+    if (state.sampleIdx < state.bnSwitch)
+    {
+        return randomSobolBlueNoiseBits<Dim>(state);
+    }
+    SamplerState tail = state;
+    tail.sampleIdx = state.sampleIdx - state.bnSwitch;
+    return randomSobolBits<Dim>(tail);
+}
+
 // ── Sampler dispatch ────────────────────────────────────────────────────────
 // 0 = Halton, 1 = PCG, 2 = Sobol (Owen scrambled), 3 = Sobol + blue noise,
 // 4 = hybrid (3 below bnSwitch samples, 2 above)
@@ -575,4 +617,19 @@ static float random(thread SamplerState& state, uint32_t samplerType)
     if (samplerType == 1)
         return randomPCG<Dim>(state);
     return randomHalton<Dim>(state);
+}
+
+template <SampleDimension Dim>
+static uint32_t randomBits(thread SamplerState& state, uint32_t samplerType)
+{
+    if (samplerType == 4)
+        return randomHybridBits<Dim>(state);
+    if (samplerType == 3)
+        return randomSobolBlueNoiseBits<Dim>(state);
+    if (samplerType == 2)
+        return randomSobolBits<Dim>(state);
+    // Halton is constructed as a float radical inverse and has no full-width
+    // word to preserve. Use the same dimensioned PCG permutation as sampler 1
+    // for categorical decisions; continuous Halton dimensions are unchanged.
+    return randomPCGBits<Dim>(state);
 }

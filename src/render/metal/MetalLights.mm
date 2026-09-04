@@ -205,7 +205,7 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
             std::memcpy(&dst, &lightDescs[i], sizeof(Scene::Light));
             dst.projectorTexture = MTL::ResourceID{};
             dst.color.w = selection.entries[i].pdf;
-            dst.selectionAliasProbability = selection.entries[i].aliasProbability;
+            dst.selectionAliasThreshold = selection.entries[i].aliasThreshold;
             dst.selectionAlias = selection.entries[i].alias;
             if (lightDescs[i].type == LIGHT_TYPE_PROJECTOR)
             {

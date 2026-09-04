@@ -31,8 +31,6 @@ TEST_CASE("light selection alias table follows power and excludes zero bins")
     CHECK(table.entries[1].pdf == doctest::Approx(0.75f));
     for (const auto& entry : table.entries)
     {
-        CHECK(entry.aliasProbability >= 0.0f);
-        CHECK(entry.aliasProbability <= 1.0f);
         CHECK(entry.alias < table.entries.size());
     }
 }
@@ -44,7 +42,7 @@ TEST_CASE("uniform and sub-float positive light weights remain reachable")
     for (size_t i = 0; i < uniform.entries.size(); ++i)
     {
         const auto& entry = uniform.entries[i];
-        CHECK(entry.aliasProbability == 1.0f);
+        CHECK(entry.aliasThreshold == 0u);
         CHECK(entry.alias == i);
         CHECK(entry.pdf == doctest::Approx(1.0f / 257.0f).epsilon(1e-6));
     }
@@ -53,8 +51,61 @@ TEST_CASE("uniform and sub-float positive light weights remain reachable")
     REQUIRE(extreme.entries.size() == 2);
     CHECK(extreme.entries[0].pdf > 0.0f);
     CHECK(extreme.entries[1].pdf > 0.0f);
-    CHECK(lightAliasSelect(2u, 1u, 0x1p-23f, extreme.entries[1].aliasProbability, extreme.entries[1].alias) == 1u);
+    CHECK(lightAliasSelect(2u, 1u, 0u, extreme.entries[1].aliasThreshold, extreme.entries[1].alias) == 1u);
     CHECK(double(extreme.entries[0].pdf) + double(extreme.entries[1].pdf) == doctest::Approx(1.0).epsilon(1e-7));
+}
+
+TEST_CASE("categorical bucket draw reaches every bucket beyond the float mantissa")
+{
+    constexpr uint32_t randomValues = 1u << 23u;
+    constexpr uint32_t bucketCount = randomValues + 1u;
+    std::vector<bool> oldReached(bucketCount, false);
+    for (uint32_t raw = 0u; raw < randomValues; ++raw)
+    {
+        const float u = static_cast<float>(raw) / static_cast<float>(randomValues);
+        oldReached[static_cast<uint32_t>(u * static_cast<float>(bucketCount))] = true;
+    }
+    CHECK(std::ranges::count(oldReached, true) == randomValues);
+
+    std::vector<bool> reached(bucketCount, false);
+    constexpr uint64_t wordCount = uint64_t{ 1 } << 32u;
+    for (uint32_t bucket = 0u; bucket < bucketCount; ++bucket)
+    {
+        const uint64_t numerator = uint64_t(bucket) * wordCount;
+        const uint32_t firstWord =
+            static_cast<uint32_t>(numerator == 0u ? 0u : 1u + (numerator - 1u) / bucketCount);
+        reached[lightAliasBucket(bucketCount, firstWord)] = true;
+    }
+    CHECK(std::ranges::count(reached, true) == bucketCount);
+}
+
+TEST_CASE("integer alias and class thresholds equal their strict-comparison masses")
+{
+    const auto table = buildLightSelectionAlias({ 3.0, 7.0 });
+    REQUIRE(table.entries.size() == 2u);
+    constexpr double states = 4294967296.0;
+    for (uint32_t bucket = 0u; bucket < table.entries.size(); ++bucket)
+    {
+        const auto& entry = table.entries[bucket];
+        if (entry.alias != bucket && entry.aliasThreshold > 0u)
+        {
+            CHECK(lightAliasSelect(2u, bucket, entry.aliasThreshold - 1u, entry.aliasThreshold, entry.alias) == bucket);
+            CHECK(lightAliasSelect(2u, bucket, entry.aliasThreshold, entry.aliasThreshold, entry.alias) == entry.alias);
+            CHECK(double(entry.aliasThreshold) / states > 0.0);
+        }
+    }
+
+    const float classProbability = binaryPowerProbability(3.0, 7.0);
+    const uint32_t classThreshold = discreteProbabilityThreshold(classProbability);
+    CHECK(discreteThresholdProbability(classThreshold) == classProbability);
+    CHECK(discreteBernoulli(classThreshold - 1u, classProbability));
+    CHECK_FALSE(discreteBernoulli(classThreshold, classProbability));
+
+    // Mutation: a real-valued float threshold is not, in general, the mass of
+    // a strict comparison on the old 23-bit lattice.
+    constexpr float oldThreshold = 0.3f;
+    const double oldMass = std::ceil(double(oldThreshold) * double(1u << 23u)) / double(1u << 23u);
+    CHECK(oldMass != doctest::Approx(double(oldThreshold)).epsilon(1e-12));
 }
 
 TEST_CASE("finite light powers normalize without overflowing their alias table")
@@ -67,7 +118,6 @@ TEST_CASE("finite light powers normalize without overflowing their alias table")
     double sum = 0.0;
     for (const auto& entry : table.entries)
     {
-        CHECK(std::isfinite(entry.aliasProbability));
         CHECK(std::isfinite(entry.pdf));
         CHECK(entry.alias < table.entries.size());
         CHECK(entry.pdf > 0.0f);
@@ -91,9 +141,9 @@ TEST_CASE("invalid or black light powers have empty selection support")
     {
         CHECK(entry.pdf == 0.0f);
         CHECK(entry.alias == std::numeric_limits<uint32_t>::max());
-        CHECK(entry.aliasProbability == 0.0f);
+        CHECK(entry.aliasThreshold == 0u);
     }
-    CHECK(lightAliasSelect(4u, 0u, 0.5f, table.entries[0].aliasProbability, table.entries[0].alias) == 4u);
+    CHECK(lightAliasSelect(4u, 0u, 0u, table.entries[0].aliasThreshold, table.entries[0].alias) == 4u);
     CHECK(binaryPowerProbability(0.0, 3.0) == 0.0f);
     CHECK(binaryPowerProbability(3.0, 0.0) == 1.0f);
     CHECK(binaryPowerProbability(1.0, 3.0) == doctest::Approx(0.25f));
@@ -174,14 +224,15 @@ TEST_CASE("a rare emitter class retains entropy for every conditional light buck
         {
             break;
         }
-        reached[lightAliasBucket(lightCount, u / localProbability)] = true;
+        reached[static_cast<uint32_t>((u / localProbability) * static_cast<float>(lightCount))] = true;
     }
     CHECK_FALSE(std::ranges::all_of(reached, [](bool value) { return value; }));
 
     reached.fill(false);
     for (uint32_t bucket = 0u; bucket < lightCount; ++bucket)
     {
-        const float independent = (static_cast<float>(bucket) + 0.5f) / static_cast<float>(lightCount);
+        const uint32_t independent = bucket * (std::numeric_limits<uint32_t>::max() / lightCount) +
+                                     std::numeric_limits<uint32_t>::max() / (2u * lightCount);
         reached[lightAliasBucket(lightCount, independent)] = true;
     }
     CHECK(std::ranges::all_of(reached, [](bool value) { return value; }));
@@ -199,13 +250,16 @@ TEST_CASE("million-light selection preserves positive support and excludes zero 
     REQUIRE(table.entries.size() == count);
 
     std::vector<double> represented(count, 0.0);
-    const double bucketMass = 1.0 / double(count);
+    constexpr double integerStateCount = 4294967296.0;
     for (size_t bucket = 0; bucket < count; ++bucket)
     {
         const auto& entry = table.entries[bucket];
         REQUIRE(entry.alias < count);
-        represented[bucket] += bucketMass * double(entry.aliasProbability);
-        represented[entry.alias] += bucketMass * (1.0 - double(entry.aliasProbability));
+        const double bucketMass = double(discreteBucketStateCount(uint32_t(count), uint32_t(bucket))) /
+                                  integerStateCount;
+        const double own = entry.alias == bucket ? 1.0 : double(entry.aliasThreshold) / integerStateCount;
+        represented[bucket] += bucketMass * own;
+        represented[entry.alias] += bucketMass * (1.0 - own);
     }
     double pmfSum = 0.0;
     for (size_t i = 0; i < count; ++i)
@@ -260,12 +314,12 @@ TEST_CASE("light alias empirical frequencies match its represented PMF")
     };
     for (uint32_t sample = 0; sample < sampleCount; ++sample)
     {
-        const float bucketU = (float(sample) + 0.5f) / float(sampleCount);
-        const float aliasU = (float(hash(sample) & 0x00ffffffu) + 0.5f) * (1.0f / 16777216.0f);
-        const uint32_t bucket = lightAliasBucket(uint32_t(table.entries.size()), bucketU);
+        const uint32_t bucketWord = sample << 12u;
+        const uint32_t aliasWord = hash(sample);
+        const uint32_t bucket = lightAliasBucket(uint32_t(table.entries.size()), bucketWord);
         const auto& entry = table.entries[bucket];
         const uint32_t selected =
-            lightAliasSelect(uint32_t(table.entries.size()), bucket, aliasU, entry.aliasProbability, entry.alias);
+            lightAliasSelect(uint32_t(table.entries.size()), bucket, aliasWord, entry.aliasThreshold, entry.alias);
         REQUIRE(selected < table.entries.size());
         ++counts[selected];
     }
@@ -284,8 +338,7 @@ TEST_CASE("light alias empirical frequencies match its represented PMF")
         }
     }
     CHECK(chiSquare < 16.0);
-    CHECK(lightAliasBucket(4u, 1.0f) == 3u);
-    CHECK(lightAliasBucket(4u, std::numeric_limits<float>::quiet_NaN()) == 0u);
+    CHECK(lightAliasBucket(4u, std::numeric_limits<uint32_t>::max()) == 3u);
 }
 
 TEST_CASE("analytic light power accounts for emitting measure")
@@ -421,25 +474,26 @@ TEST_CASE("emissive mesh hierarchy preserves mesh and triangle PMFs")
 
     std::array<uint32_t, 4> counts{};
     uint32_t state = 0x8f3a12cdu;
-    auto uniform = [&state]() {
+    auto randomWord = [&state]() {
         state ^= state << 13u;
         state ^= state >> 17u;
         state ^= state << 5u;
-        return static_cast<float>(state >> 8u) * (1.0f / 16777216.0f);
+        return state;
     };
     constexpr uint32_t draws = 1u << 20u;
     for (uint32_t draw = 0u; draw < draws; ++draw)
     {
-        const uint32_t meshBucket = lightAliasBucket(static_cast<uint32_t>(distribution.meshes.size()), uniform());
+        const uint32_t meshBucket =
+            lightAliasBucket(static_cast<uint32_t>(distribution.meshes.size()), randomWord());
         const EmissiveMeshLight& meshEntry = distribution.meshes[meshBucket];
         const uint32_t meshId = lightAliasSelect(static_cast<uint32_t>(distribution.meshes.size()), meshBucket,
-                                                 uniform(), meshEntry.aliasProbability, meshEntry.alias);
+                                                 randomWord(), meshEntry.aliasThreshold, meshEntry.alias);
         REQUIRE(meshId < distribution.meshes.size());
         const EmissiveMeshLight& mesh = distribution.meshes[meshId];
-        const uint32_t triangleBucket = lightAliasBucket(mesh.triangleCount, uniform());
+        const uint32_t triangleBucket = lightAliasBucket(mesh.triangleCount, randomWord());
         const EmissiveTriangleLight& triangleEntry = distribution.triangles[mesh.triangleOffset + triangleBucket];
         const uint32_t triangleId = lightAliasSelect(
-            mesh.triangleCount, triangleBucket, uniform(), triangleEntry.aliasProbability, triangleEntry.alias);
+            mesh.triangleCount, triangleBucket, randomWord(), triangleEntry.aliasThreshold, triangleEntry.alias);
         REQUIRE(triangleId < mesh.triangleCount);
         ++counts[mesh.triangleOffset + triangleId];
     }

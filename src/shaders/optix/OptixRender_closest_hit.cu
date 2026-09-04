@@ -180,17 +180,17 @@ extern "C" __global__ void __anyhit__occlusion()
     optixIgnoreIntersection();
 }
 
-static __forceinline__ __device__ uint32_t selectLightIndex(float bucketUniform,
-                                                            float aliasUniform,
+static __forceinline__ __device__ uint32_t selectLightIndex(uint32_t bucketWord,
+                                                            uint32_t coinWord,
                                                             uint32_t numLights)
 {
-    const uint32_t bucket = lightAliasBucket(numLights, bucketUniform);
+    const uint32_t bucket = lightAliasBucket(numLights, bucketWord);
     if (bucket >= numLights)
     {
         return numLights;
     }
     const UniformLight& entry = params.scene.lights[bucket];
-    return lightAliasSelect(numLights, bucket, aliasUniform, entry.selectionAliasProbability, entry.selectionAlias);
+    return lightAliasSelect(numLights, bucket, coinWord, entry.selectionAliasThreshold, entry.selectionAlias);
 }
 
 static __forceinline__ __device__ float analyticLightSelectionPdf(const UniformLight& light)
@@ -441,13 +441,13 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
                                                   float curveRadius,
                                                   bool volumeEvent = false)
 {
-    const float4 xi = make_float4(random<SampleDimension::eLightBucket>(sampler),
-                                  random<SampleDimension::eLightAlias>(sampler),
-                                  random<SampleDimension::eLightPointX>(sampler),
-                                  random<SampleDimension::eLightPointY>(sampler));
+    const uint2 aliasWords = make_uint2(randomBits<SampleDimension::eLightBucket>(sampler),
+                                        randomBits<SampleDimension::eLightAlias>(sampler));
+    const float2 jitter = make_float2(random<SampleDimension::eLightPointX>(sampler),
+                                      random<SampleDimension::eLightPointY>(sampler));
 
     float envPdf = 0.0f;
-    const float3 dir = sampleEnvMap(xi, params.envAliasTable, params.envMapWidth, params.envMapHeight,
+    const float3 dir = sampleEnvMap(aliasWords, jitter, params.envAliasTable, params.envMapWidth, params.envMapHeight,
                                     params.envMapRotation, envPdf);
 
     LightConnection c = makeEmptyConnection();
@@ -549,21 +549,22 @@ static __forceinline__ __device__ float3 emissiveMeshRadiance(const EmissiveMesh
     return emission * resolveOpacity(material, textures, uv);
 }
 
-static __forceinline__ __device__ uint32_t sampleEmissiveMesh(SamplerState& sampler, float bucketUniform)
+static __forceinline__ __device__ uint32_t sampleEmissiveMesh(SamplerState& sampler, uint32_t bucketWord)
 {
-    const uint32_t bucket = lightAliasBucket(params.scene.numEmissiveMeshes, bucketUniform);
+    const uint32_t bucket = lightAliasBucket(params.scene.numEmissiveMeshes, bucketWord);
     const EmissiveMeshLight& entry = params.scene.emissiveMeshes[bucket];
-    return lightAliasSelect(params.scene.numEmissiveMeshes, bucket, random<SampleDimension::eLightAlias>(sampler),
-                            entry.aliasProbability, entry.alias);
+    return lightAliasSelect(params.scene.numEmissiveMeshes, bucket,
+                            randomBits<SampleDimension::eLightAlias>(sampler), entry.aliasThreshold, entry.alias);
 }
 
 static __forceinline__ __device__ uint32_t sampleEmissiveTriangleIndex(SamplerState& sampler,
                                                                        const EmissiveMeshLight& mesh)
 {
-    const uint32_t bucket = lightAliasBucket(mesh.triangleCount, random<SampleDimension::eTriangleBucket>(sampler));
+    const uint32_t bucket =
+        lightAliasBucket(mesh.triangleCount, randomBits<SampleDimension::eTriangleBucket>(sampler));
     const EmissiveTriangleLight& entry = params.scene.emissiveTriangles[mesh.triangleOffset + bucket];
-    return lightAliasSelect(mesh.triangleCount, bucket, random<SampleDimension::eTriangleAlias>(sampler),
-                            entry.aliasProbability, entry.alias);
+    return lightAliasSelect(mesh.triangleCount, bucket, randomBits<SampleDimension::eTriangleAlias>(sampler),
+                            entry.aliasThreshold, entry.alias);
 }
 
 static __forceinline__ __device__ int findEmissiveMesh(uint32_t instanceId, uint32_t geometryId)
@@ -598,11 +599,11 @@ static __forceinline__ __device__ int findEmissiveMesh(uint32_t instanceId, uint
 
 static __forceinline__ __device__ LightConnection connectEmissiveMesh(SamplerState& sampler,
                                                                       const SurfaceInteraction& si,
-                                                                      float meshUniform,
+                                                                      uint32_t meshWord,
                                                                       bool volumeEvent)
 {
     LightConnection c = makeEmptyConnection();
-    const uint32_t meshId = sampleEmissiveMesh(sampler, meshUniform);
+    const uint32_t meshId = sampleEmissiveMesh(sampler, meshWord);
     if (meshId >= params.scene.numEmissiveMeshes)
     {
         return c;
@@ -696,12 +697,12 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     const bool hasAnalytic = params.scene.numLights > 0u;
     const bool hasMesh = params.scene.numEmissiveMeshes > 0u;
     const bool hasLocal = hasAnalytic || hasMesh;
-    const float u = random<SampleDimension::eLightId>(sampler);
+    const uint32_t emitterWord = randomBits<SampleDimension::eLightId>(sampler);
     float localSelectionPdf = 1.0f;
     if (params.hasEnvMap)
     {
         localSelectionPdf = 1.0f - params.envSelectionPdf;
-        if (!hasLocal || u >= localSelectionPdf)
+        if (!hasLocal || discreteBernoulli(emitterWord, params.envSelectionPdf))
         {
             LightConnection c = connectEnvLight(sampler, si, curveRadius, volumeEvent);
             c.pdf *= hasLocal ? params.envSelectionPdf : 1.0f;
@@ -715,12 +716,12 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
         return makeEmptyConnection();
     }
 
-    const float classU = random<SampleDimension::eLightClass>(sampler);
+    const uint32_t classWord = randomBits<SampleDimension::eLightClass>(sampler);
     const float meshPdf = params.scene.meshLightSelectionPdf;
-    if (hasMesh && (!hasAnalytic || meshPdf >= 1.0f || classU < meshPdf))
+    if (hasMesh && (!hasAnalytic || discreteBernoulli(classWord, meshPdf)))
     {
-        const float meshU = random<SampleDimension::eLightBucket>(sampler);
-        LightConnection c = connectEmissiveMesh(sampler, si, meshU, volumeEvent);
+        const uint32_t meshWord = randomBits<SampleDimension::eLightBucket>(sampler);
+        LightConnection c = connectEmissiveMesh(sampler, si, meshWord, volumeEvent);
         c.pdf *= localSelectionPdf * (hasAnalytic ? meshPdf : 1.0f);
         return c;
     }
@@ -729,9 +730,9 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
     {
         return makeEmptyConnection();
     }
-    const float analyticU = random<SampleDimension::eLightBucket>(sampler);
-    const float aliasU = random<SampleDimension::eLightAlias>(sampler);
-    const uint32_t lightId = selectLightIndex(analyticU, aliasU, params.scene.numLights);
+    const uint32_t analyticWord = randomBits<SampleDimension::eLightBucket>(sampler);
+    const uint32_t aliasWord = randomBits<SampleDimension::eLightAlias>(sampler);
+    const uint32_t lightId = selectLightIndex(analyticWord, aliasWord, params.scene.numLights);
     if (lightId >= params.scene.numLights)
     {
         return makeEmptyConnection();
@@ -2286,7 +2287,9 @@ extern "C" __global__ void __closesthit__radiance()
     const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
 
     float4 xi = make_float4(z1, z2, z3, z4);
-    BsdfSampleResult sample_data = bsdf_sample(si, xi);
+    const uint32_t lobeWord = randomBits<SampleDimension::eBSDF2>(prd->sampler) >> 9u;
+    const uint32_t fresnelWord = randomBits<SampleDimension::eBSDF3>(prd->sampler) >> 9u;
+    BsdfSampleResult sample_data = bsdf_sample(si, xi, lobeWord, fresnelWord);
 
     if (sample_data.event_type == BSDF_EVENT_ABSORB)
     {

@@ -24,10 +24,10 @@
 // table and the same host builder Metal uses, so the two backends now draw their
 // environment samples from one distribution rather than two.
 //
-// xi: four independent uniform random numbers in [0, 1): alias bucket, alias
-// coin, u jitter and solid-angle v jitter. Returns a world-space direction and
-// writes the solid-angle pdf.
-static __forceinline__ __device__ float3 sampleEnvMap(const float4& xi,
+// The two full-width words select the alias bucket and branch. The two floats
+// independently jitter within the selected texel.
+static __forceinline__ __device__ float3 sampleEnvMap(const uint2& aliasWords,
+                                                      const float2& jitter,
                                                       const EnvAliasEntry* aliasTable,
                                                       uint32_t envMapWidth,
                                                       uint32_t envMapHeight,
@@ -39,13 +39,13 @@ static __forceinline__ __device__ float3 sampleEnvMap(const float4& xi,
 
     // Shared with Metal and the host: see common/env_alias_sampling.h, which
     // tests/render/test_env_alias_sampling.cpp exercises without a GPU.
-    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, xi.x, xi.y);
+    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, aliasWords.x, aliasWords.y);
 
     const uint32_t x = draw.texel % w;
     const uint32_t y = draw.texel / w;
 
     const float3 dir =
-        envSampleTexelDirection((int)x, (int)y, (int)w, (int)h, xi.z, xi.w, envMapRotation);
+        envSampleTexelDirection((int)x, (int)y, (int)w, (int)h, jitter.x, jitter.y, envMapRotation);
 
     pdf = aliasTable[draw.texel].solidAnglePdf;
 

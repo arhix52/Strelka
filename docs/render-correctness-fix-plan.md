@@ -26,7 +26,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | P. Extreme affine normal/support consistency | Common cofactor scaling underflows the only active normal; a finite `J_A` denominator can overflow although `p_A` and `p_omega` remain finite | Extreme inverse-transpose normal, `diag(2e19,2e19,1)` density, sample/eval/intersect, shear, and overflow mutations | Transform normals from an object tangent plane and carry scale-safe `p_A` directly through sample/PDF/intersection | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | pending | FIXED |
 | P2. Reciprocal-scale analytic support | A shared max scale turns `(1e20,0,0) cross (0,1e-20,0)` into an unstable `1e-40` intermediate; finite triangle endpoints can overflow `p1-p0`; a rounded unit cosine can overflow the PDF guard | Reciprocal/large affine and triangle sample-PDF-intersection, overflow/underflow, exact miss, condition-gate, and `dot(n,n)>1` regressions | Independently scaled compensated affine algebra, analytic disc/ellipsoid hits, exponent-carrying triangle measures, bounded Skeel-valid point maps, and scale-safe `p_A r^2/cos` | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | `40e39fc` | FIXED |
 | Q. True Standard-PBR/conductor delta measures | Rough lobes below the delta threshold are sampled continuously but labelled delta; positive PDFs are floored; sheen/tiny transmission can have evaluation without proposal support | Exact mirror/refraction, sub-`1e-10` marginal, sheen-with-transmission, near-critical Snell/Fresnel, and finite-lattice tiny-lobe regressions | Sum coincident atoms as discrete masses; keep every other lobe continuous; evaluate returned float endpoints with compensated inverse/Jacobian/Fresnel arithmetic | FIXED | Shader compiled; shared source | Shared headers; external toolchain required | pending | FIXED |
-| R. Finite-RNG categorical representation | Alias buckets above `2^23` are unreachable and float thresholds do not equal Metal/OptiX event masses | `8,388,609` buckets, strict-threshold lattice, hierarchy probability, support and GOF mutations | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| R. Finite-RNG categorical representation | Alias buckets above `2^23` are unreachable and float thresholds do not equal Metal/OptiX event masses | `8,388,609` buckets, strict-threshold lattice, hierarchy probability, support and GOF mutations | Full-width integer bucket words and integer Bernoulli thresholds; reconstruct the exactly represented marginal PMF | FIXED | FIXED on MTLDevice | Shared source; external CUDA toolchain required | this commit | FIXED |
 | S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
 | U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; stacked emitters therefore enumerate different paths | analytic segment blockers, stacked area lights, overlapping analytic surfaces and soft punctual regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
@@ -698,8 +698,8 @@ is out of scope unless it blocks validation.
   threshold and one mirror atom below it.
 - Support: a positive continuous BRDF/BTDF term must have a positive proposal on its hemisphere. Sheen shares a
   cosine proposal even when opaque diffuse is suppressed by full interface transmission. Every positive lobe weight
-  is widened enough to contain a point of the production 23-bit uniform lattice; exact represented event masses are
-  handled separately by finding R. Zero weights retain empty selection intervals.
+  is widened enough to contain a point of the production 23-bit uniform lattice; finding R now uses the exact mass
+  of each represented selection interval. Zero weights retain empty selection intervals.
 - Conditional and marginal PDF: for continuous `wi`,
   `p_omega(wi)=sum_(k continuous) P(K=k) p_omega(wi|k)`, excluding every delta lobe. For a shared mirror atom, the
   returned discrete mass is the sum of all compatible atoms:
@@ -747,3 +747,50 @@ is out of scope unless it blocks validation.
   zero measure mismatches, but that kernel does not execute the BSDF changes. `clang-tidy` is unavailable on this
   host; OptiX consumes the shared headers but CUDA compilation/execution remains externally `UNVERIFIED`. Status:
   FIXED.
+
+## Finding R: finite-RNG categorical representation
+
+- Random variables and measure: an alias draw uses a full-width unsigned bucket word `B` and an independent
+  full-width unsigned coin word `C`; both are discrete uniform variables over the `2^32` integer lattice. The
+  resulting light/environment/mesh/triangle identity is a categorical probability mass. Its conditional area or
+  solid-angle sample remains a separate continuous variable and measure.
+- Support: for `1 <= N <= 2^32`, bucket `i` owns every integer `b` for which
+  `floor(b N / 2^32)=i`. Each of the first `N` categorical buckets therefore owns at least one integer state. An
+  alias branch owns exactly `T_i` coin states through the predicate `C < T_i`; a positive represented branch uses a
+  positive integer threshold, while zero input weights remain unreachable.
+- Conditional and marginal PMF: let `M=2^32`, `K_i` be the exact number of bucket words mapped to bucket `i`,
+  `T_i` the stored integer threshold, and `a_i` its alias. Then
+  `P(B=i)=K_i/M`, `P(J=i|B=i)=T_i/M`, and `P(J=a_i|B=i)=1-T_i/M`. The represented marginal used by MIS is
+  `P(J=j)=sum_i (K_i/M)[1(i=j)T_i/M + 1(a_i=j)(1-T_i/M)]`. A self-alias represents the whole bucket regardless of
+  threshold. This exact finite-lattice distribution, rounded once into the uploaded PMF field, is authoritative for
+  both sampling and PDF lookup.
+- Selection PMFs and classification: environment/local and analytic/mesh binary class choices are discrete masses
+  and must use the same integer-threshold convention. Alias identity selection remains discrete; the selected
+  emitter's delta/continuous classification is unchanged. NEE and BSDF-hit/miss MIS multiply by the identical
+  represented outer PMFs.
+- Reproducer: the old Metal PCG path exposes only `2^23` distinct floats. Sweeping all of them through
+  `floor(u * 8,388,609)` reaches exactly `8,388,608` buckets, leaving one positive bucket impossible. A general float
+  alias threshold also denotes a real number that is not the strict-comparison mass realized by that finite float
+  lattice. The regression fails on the current implementation with `8,388,608 != 8,388,609` before production
+  changes.
+- Implementation: shared CPU/Metal/OptiX code maps a full 32-bit random word to a bucket with multiplication-high,
+  and represents every nontrivial alias coin as a 32-bit integer threshold. Host construction reconstructs the
+  marginal PMF from the exact number of words owned by each nonuniform bucket and the exact coin count, then uploads
+  that PMF for MIS lookup. Environment/local and analytic/mesh class choices use the same integer Bernoulli
+  convention. The existing four-byte alias field is reinterpreted from `float` to `uint32_t`, so table ABI sizes and
+  memory consumption do not increase. Continuous position/direction samples retain independent float dimensions.
+  Standard-PBR lobe and Fresnel choices use a common exact 23-bit sub-lattice because their public sampling API also
+  serves host tests and continuous draws as floats; their physical coefficients remain in the numerator, while the
+  represented proposal mass is used in both sample and eval PDFs.
+- Mutation sensitivity: the old float bucket mapping reaches only `8,388,608/8,388,609` positive buckets. A separate
+  strict-comparison mutation shows that a nominal float probability `0.3` differs from its event mass on the old
+  23-bit lattice. Integer boundary tests check both `T-1` and `T`, and PMF reconstruction explicitly accounts for
+  unequal multiplication-high bucket populations.
+- Validation: focused distribution and BSDF tests pass 87/87 cases and 66,002,781 assertions under ASan+UBSan.
+  Debug and Release CTest pass 4/4, production Metal shaders compile, and changed CPU/Metal files are clean under the
+  repository clang-tidy configuration. The full audit passes 881/881 cases and 68,677,694 assertions; environment
+  normalization is `1`, the Lambertian estimate is `1.002147074` inside its CI, and the legacy environment mutation
+  remains detected at `2.003353165`. The actual Apple M4 Pro fast/safe kernels execute 262,144 samples with zero
+  measure mismatches. Direct OptiX lint/compilation is blocked on this macOS host by the absent `optix.h`; the CUDA
+  path consumes the same integer table ABI and shared selection source but remains externally `UNVERIFIED`. Status:
+  FIXED for CPU and Metal, UNVERIFIED for OptiX execution.

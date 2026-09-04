@@ -137,7 +137,7 @@ inline EmissiveMeshDistribution buildEmissiveMeshDistribution(const std::vector<
         {
             EmissiveTriangleLight triangle{};
             triangle.selectionPdf = entry.pdf;
-            triangle.aliasProbability = entry.aliasProbability;
+            triangle.aliasThreshold = entry.aliasThreshold;
             triangle.alias = entry.alias;
             out.triangles.push_back(triangle);
         }
@@ -148,7 +148,7 @@ inline EmissiveMeshDistribution buildEmissiveMeshDistribution(const std::vector<
     for (size_t i = 0; i < out.meshes.size(); ++i)
     {
         out.meshes[i].selectionPdf = meshTable.entries[i].pdf;
-        out.meshes[i].aliasProbability = meshTable.entries[i].aliasProbability;
+        out.meshes[i].aliasThreshold = meshTable.entries[i].aliasThreshold;
         out.meshes[i].alias = meshTable.entries[i].alias;
     }
     return out;

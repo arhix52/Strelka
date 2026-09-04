@@ -859,14 +859,15 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                                 texture2d<float> envMapTexture,
                                 bool volumeEvent)
 {
-    const float4 xi = float4(random<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType),
-                             random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType),
-                             random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
-                             random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
+    const uint2 aliasWords = uint2(randomBits<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType),
+                                   randomBits<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType));
+    const float2 jitter = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
+                                 random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
 
     float envPdf = 0.0f;
     float3 dir =
-        sampleEnvMap(xi, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation, envPdf);
+        sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
+                     uniforms.envMapRotation, envPdf);
 
     LightConnection c = makeEmptyConnection();
     c.toLight = dir;
@@ -962,23 +963,23 @@ static float3 emissiveMeshRadiance(device const Material& material, float2 uv)
     return emission;
 }
 
-static uint32_t sampleEmissiveMesh(constant Uniforms& uniforms, thread SamplerState& sampler, float bucketUniform)
+static uint32_t sampleEmissiveMesh(constant Uniforms& uniforms, thread SamplerState& sampler, uint32_t bucketWord)
 {
-    const uint32_t bucket = lightAliasBucket(uniforms.numEmissiveMeshes, bucketUniform);
+    const uint32_t bucket = lightAliasBucket(uniforms.numEmissiveMeshes, bucketWord);
     device const EmissiveMeshLight& entry = uniforms.emissiveMeshes[bucket];
-    const float coin = random<SampleDimension::eLightAlias>(sampler, uniforms.samplerType);
-    return lightAliasSelect(uniforms.numEmissiveMeshes, bucket, coin, entry.aliasProbability, entry.alias);
+    const uint32_t coinWord = randomBits<SampleDimension::eLightAlias>(sampler, uniforms.samplerType);
+    return lightAliasSelect(uniforms.numEmissiveMeshes, bucket, coinWord, entry.aliasThreshold, entry.alias);
 }
 
 static uint32_t sampleEmissiveTriangleIndex(constant Uniforms& uniforms,
                                             thread SamplerState& sampler,
                                             device const EmissiveMeshLight& mesh)
 {
-    const float bucketUniform = random<SampleDimension::eTriangleBucket>(sampler, uniforms.samplerType);
-    const uint32_t bucket = lightAliasBucket(mesh.triangleCount, bucketUniform);
+    const uint32_t bucketWord = randomBits<SampleDimension::eTriangleBucket>(sampler, uniforms.samplerType);
+    const uint32_t bucket = lightAliasBucket(mesh.triangleCount, bucketWord);
     device const EmissiveTriangleLight& entry = uniforms.emissiveTriangles[mesh.triangleOffset + bucket];
-    const float coin = random<SampleDimension::eTriangleAlias>(sampler, uniforms.samplerType);
-    return lightAliasSelect(mesh.triangleCount, bucket, coin, entry.aliasProbability, entry.alias);
+    const uint32_t coinWord = randomBits<SampleDimension::eTriangleAlias>(sampler, uniforms.samplerType);
+    return lightAliasSelect(mesh.triangleCount, bucket, coinWord, entry.aliasThreshold, entry.alias);
 }
 
 static int findEmissiveMesh(constant Uniforms& uniforms, uint32_t instanceId, uint32_t geometryId)
@@ -1019,12 +1020,12 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
                                            device const Material* materials,
                                            thread SamplerState& sampler,
                                            thread SurfaceInteraction& si,
-                                           float meshBucketUniform,
+                                           uint32_t meshBucketWord,
                                            float motionTime,
                                            bool volumeEvent)
 {
     LightConnection connection = makeEmptyConnection();
-    const uint32_t meshId = sampleEmissiveMesh(uniforms, sampler, meshBucketUniform);
+    const uint32_t meshId = sampleEmissiveMesh(uniforms, sampler, meshBucketWord);
     if (meshId >= uniforms.numEmissiveMeshes)
     {
         return connection;
@@ -1101,12 +1102,12 @@ static EmissiveVisibilitySegment lightVisibilitySegment(thread const LightConnec
 // visibility.
 uint32_t sampleAnalyticLight(const uint32_t numLights,
                              device UniformLight* lights,
-                             const float bucketUniform,
-                             const float aliasUniform)
+                             const uint32_t bucketWord,
+                             const uint32_t coinWord)
 {
-    const uint32_t bucket = lightAliasBucket(numLights, bucketUniform);
+    const uint32_t bucket = lightAliasBucket(numLights, bucketWord);
     device const UniformLight& entry = lights[bucket];
-    return lightAliasSelect(numLights, bucket, aliasUniform, entry.selectionAliasProbability, entry.selectionAlias);
+    return lightAliasSelect(numLights, bucket, coinWord, entry.selectionAliasThreshold, entry.selectionAlias);
 }
 
 float analyticLightSelectionPdf(device const UniformLight& light)
@@ -1133,14 +1134,14 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     const bool hasAnalytic = SPEC_LIGHTS && numLights > 0u;
     const bool hasMesh = SPEC_LIGHTS && uniforms.numEmissiveMeshes > 0u;
     const bool hasLocal = hasAnalytic || hasMesh;
-    const float u = random<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
+    const uint32_t emitterWord = randomBits<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
     float localSelectionPdf = 1.0f;
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
         const float envSelectionPdf = uniforms.envMapColorTint.w;
         localSelectionPdf = 1.0f - envSelectionPdf;
 
-        if (!hasLocal || u >= localSelectionPdf)
+        if (!hasLocal || discreteBernoulli(emitterWord, envSelectionPdf))
         {
             LightConnection c = connectEnvLight(uniforms, samplerRnd, si, envAliasTable, envMapTexture, volumeEvent);
             c.pdf *= hasLocal ? envSelectionPdf : 1.0f;
@@ -1153,13 +1154,13 @@ LightConnection connectToLight(constant Uniforms& uniforms,
         return makeEmptyConnection();
     }
 
-    const float classU = random<SampleDimension::eLightClass>(samplerRnd, uniforms.samplerType);
+    const uint32_t classWord = randomBits<SampleDimension::eLightClass>(samplerRnd, uniforms.samplerType);
     const float meshSelectionPdf = uniforms.meshLightSelectionPdf;
-    if (hasMesh && (!hasAnalytic || meshSelectionPdf >= 1.0f || classU < meshSelectionPdf))
+    if (hasMesh && (!hasAnalytic || discreteBernoulli(classWord, meshSelectionPdf)))
     {
-        const float meshU = random<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType);
+        const uint32_t meshWord = randomBits<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType);
         LightConnection c = connectEmissiveMesh(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer,
-                                                materials, samplerRnd, si, meshU, motionTime, volumeEvent);
+                                                materials, samplerRnd, si, meshWord, motionTime, volumeEvent);
         c.pdf *= localSelectionPdf * (hasAnalytic ? meshSelectionPdf : 1.0f);
         return c;
     }
@@ -1169,9 +1170,9 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     {
         return makeEmptyConnection();
     }
-    const float analyticU = random<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType);
-    const float aliasU = random<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType);
-    const uint32_t lightId = sampleAnalyticLight(numLights, lights, analyticU, aliasU);
+    const uint32_t analyticWord = randomBits<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType);
+    const uint32_t aliasWord = randomBits<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType);
+    const uint32_t lightId = sampleAnalyticLight(numLights, lights, analyticWord, aliasWord);
     if (lightId >= numLights)
     {
         return makeEmptyConnection();

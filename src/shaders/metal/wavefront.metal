@@ -2943,7 +2943,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                              random<SampleDimension::eBSDF1>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF2>(rng, uniforms.samplerType),
                              random<SampleDimension::eBSDF3>(rng, uniforms.samplerType));
-    BsdfSampleResult sampleResult = isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) : bsdf_sample(si, xi);
+    const uint32_t lobeWord = randomBits<SampleDimension::eBSDF2>(rng, uniforms.samplerType) >> 9u;
+    const uint32_t fresnelWord = randomBits<SampleDimension::eBSDF3>(rng, uniforms.samplerType) >> 9u;
+    BsdfSampleResult sampleResult =
+        isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) : bsdf_sample(si, xi, lobeWord, fresnelWord);
 
     if (sampleResult.event_type == BSDF_EVENT_ABSORB)
     {

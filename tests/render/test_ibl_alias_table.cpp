@@ -22,7 +22,8 @@ TEST_CASE("buildSolidAngleIblAliasTable black map has unit probs and zero pdfSca
     CHECK(result.envPdfScale == doctest::Approx(0.0f));
     for (const auto& e : result.alias)
     {
-        CHECK(e.prob == doctest::Approx(1.0f));
+        CHECK(e.threshold == 0u);
+        CHECK(e.alias < result.alias.size());
     }
 }
 
@@ -45,8 +46,6 @@ TEST_CASE("buildSolidAngleIblAliasTable bright texel gets mass and positive pdfS
     // Every entry stays in valid Walker/Vose ranges.
     for (size_t i = 0; i < result.alias.size(); ++i)
     {
-        CHECK(result.alias[i].prob >= 0.0f);
-        CHECK(result.alias[i].prob <= 1.0f + 1e-5f);
         CHECK(result.alias[i].alias < result.alias.size());
     }
 }
@@ -84,7 +83,6 @@ TEST_CASE("a NaN texel does not take the whole map with it")
     CHECK(r.totalPower > 0.0);
     for (const EnvAliasEntry& e : r.alias)
     {
-        CHECK(std::isfinite(e.prob));
         CHECK(e.alias < (uint32_t)(w * h));
     }
 }
@@ -117,15 +115,18 @@ TEST_CASE("positive extreme-dynamic-range texels retain discrete support")
     const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels.data(), w, h);
     REQUIRE(result.alias.size() == (size_t)w * h);
 
-    // Reconstruct the PMF represented by the float alias table. This checks
+    // Reconstruct the PMF represented by the integer alias table. This checks
     // support directly without hoping a finite random run visits a 1e-12 bin.
     std::vector<double> represented(result.alias.size(), 0.0);
-    const double bucketMass = 1.0 / (double)result.alias.size();
+    constexpr double integerStateCount = 4294967296.0;
     for (size_t bucket = 0; bucket < result.alias.size(); ++bucket)
     {
         const EnvAliasEntry& entry = result.alias[bucket];
-        represented[bucket] += bucketMass * (double)entry.prob;
-        represented[entry.alias] += bucketMass * (1.0 - (double)entry.prob);
+        const double bucketMass = double(discreteBucketStateCount(uint32_t(result.alias.size()), uint32_t(bucket))) /
+                                  integerStateCount;
+        const double own = entry.alias == bucket ? 1.0 : double(entry.threshold) / integerStateCount;
+        represented[bucket] += bucketMass * own;
+        represented[entry.alias] += bucketMass * (1.0 - own);
     }
     for (size_t i = 0; i < represented.size(); ++i)
     {
@@ -138,7 +139,6 @@ TEST_CASE("positive extreme-dynamic-range texels retain discrete support")
         if (values[i] > 0.0f)
         {
             CHECK(represented[i] > 0.0);
-            CHECK(result.alias[i].prob >= 0x1p-23f);
         }
         else
         {

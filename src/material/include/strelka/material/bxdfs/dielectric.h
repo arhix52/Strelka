@@ -14,6 +14,7 @@
 #include "../sampling.h"
 #include "../fresnel.h"
 #include "../microfacet.h"
+#include <discrete_sampling.h>
 
 // Continuous samples are finalized from the rounded direction that is actually
 // returned to the path tracer.  Near the critical angle, reconstructing the
@@ -41,7 +42,8 @@ DEVICE_FUNC bool dielectric_finish_continuous_sample(const THREAD_REF SurfaceInt
 // ---------------------------------------------------------------------------
 // Sample
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2, float u3)
+DEVICE_FUNC BsdfSampleResult
+dielectric_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2, unsigned int fresnelWord)
 {
     BsdfSampleResult result;
 
@@ -69,11 +71,13 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
     if (si.thin_walled || deltaTransmission)
     {
         const float fresnel = fresnel_dielectric(NdotV_abs, eta);
-        if (!(u3 < fresnel))
+        const float proposalFresnel = discreteFloatLatticeProbability(fresnel);
+        if (!discreteFloatLatticeBernoulli(fresnelWord, fresnel))
         {
             result.wi = -V;
-            result.bsdf_over_pdf = si.albedo * (si.thin_walled ? 1.0f : eta * eta);
-            result.pdf = 1.0f - fresnel;
+            result.pdf = 1.0f - proposalFresnel;
+            result.bsdf_over_pdf = si.albedo * ((1.0f - fresnel) / result.pdf) *
+                                   (si.thin_walled ? 1.0f : eta * eta);
             result.event_type = BSDF_EVENT_SPECULAR_TRANSMISSION;
             return result;
         }
@@ -97,8 +101,8 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
         }
         if (is_smooth)
         {
-            result.bsdf_over_pdf = si.albedo;
-            result.pdf = fresnel;
+            result.pdf = proposalFresnel;
+            result.bsdf_over_pdf = si.albedo * (fresnel / result.pdf);
             result.event_type = BSDF_EVENT_SPECULAR_REFLECTION;
             return result;
         }
@@ -134,9 +138,10 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
 
     // -- Fresnel ------------------------------------------------------------
     const float F = fresnel_dielectric(VdotH, eta);
+    const float proposalFresnel = discreteFloatLatticeProbability(F);
 
     // -- Choose reflection or refraction ------------------------------------
-    const bool do_reflect = (u3 < F);
+    const bool do_reflect = discreteFloatLatticeBernoulli(fresnelWord, F);
 
     if (do_reflect)
     {
@@ -154,9 +159,8 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
 
         if (is_smooth)
         {
-            // Delta reflection: bsdf_over_pdf = F * albedo / F = albedo
-            result.bsdf_over_pdf = si.albedo;
-            result.pdf = F; // discrete: not a true density
+            result.pdf = proposalFresnel; // discrete: not a true density
+            result.bsdf_over_pdf = si.albedo * (F / result.pdf);
             result.event_type = BSDF_EVENT_SPECULAR_REFLECTION;
         }
         else
@@ -216,8 +220,8 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
         {
             // The non-symmetry correction factor eta^2 for BTDF importance sampling
             const float factor = eta * eta;
-            result.bsdf_over_pdf = si.albedo * factor;
-            result.pdf = (1.0f - F); // discrete
+            result.pdf = (1.0f - proposalFresnel); // discrete
+            result.bsdf_over_pdf = si.albedo * (((1.0f - F) / result.pdf) * factor);
             result.event_type = BSDF_EVENT_SPECULAR_TRANSMISSION;
         }
         else
@@ -229,6 +233,11 @@ DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteracti
     }
 
     return result;
+}
+
+DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2, float u3)
+{
+    return dielectric_sample(si, u1, u2, discreteFloatLatticeWord(u3));
 }
 
 // ---------------------------------------------------------------------------
@@ -272,11 +281,12 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
             return result;
 
         const float F = fresnel_dielectric((si.thin_walled || deltaTransmission) ? NdotV_abs : VdotH, eta);
+        const float proposalFresnel = discreteFloatLatticeProbability(F);
         const float shape = saturating_nonnegative_product(F, ggx_ndf_visibility(alpha, Nf, H, NdotV_abs, NdotL_abs));
         result.bsdf = make_float3(saturating_nonnegative_product(si.albedo.x, shape),
                                   saturating_nonnegative_product(si.albedo.y, shape),
                                   saturating_nonnegative_product(si.albedo.z, shape));
-        result.pdf = F * ggx_vndf_pdf(alpha, Nf, H, NdotV_abs, VdotH);
+        result.pdf = proposalFresnel * ggx_vndf_pdf(alpha, Nf, H, NdotV_abs, VdotH);
     }
     else
     {
@@ -299,6 +309,7 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
             return result;
 
         const float F = fresnel_dielectric(robustVdotH, eta);
+        const float proposalFresnel = discreteFloatLatticeProbability(F);
         const float denom = refraction_residual_length(V, wi, eta);
         const float denomSquared = denom * denom;
         if (!(denomSquared > 0.0f))
@@ -315,7 +326,8 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
         // The same pair dielectric_sample() applies; see the note there.
         const float dwh_dwi = refraction_jacobian(V, wi, eta, LdotH);
         const float pdf_h = ggx_vndf_pdf_half(alpha, Nf, H, NdotV_abs, VdotH);
-        result.pdf = saturating_nonnegative_product(saturating_nonnegative_product(1.0f - F, pdf_h), dwh_dwi);
+        result.pdf = saturating_nonnegative_product(
+            saturating_nonnegative_product(1.0f - proposalFresnel, pdf_h), dwh_dwi);
     }
 
     return result;
