@@ -43,6 +43,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AF. Light scalar boundary validation | NaN projector aspect has shader radiance but host PMF zero; NaN intensity/range and infinite radius/angles reach device records; invalid environment controls propagate NaN | packed-record finiteness, radiance/PMF support equivalence, environment canonicalization, invalid-input mutations | turn invalid analytic records into one finite disabled sentinel; sanitize environment radiometry and reduce rotation before backend upload | FIXED | Shared Scene boundary | Shared Scene boundary; external CUDA required | this commit | UNVERIFIED |
 | AG. IES profile index bounds | Unregistered/`INT_MAX` IES indices are numerically rounded to float and cast back before shader bounds checks | empty/valid/extreme/negative Scene slots and guarded-conversion mutation | canonicalize invalid slots to `-1` and use a shared pre-cast finite/range guard in Metal and OptiX | FIXED | Shared guard compiled | Shared guard; external CUDA required | this commit | UNVERIFIED |
 | AH. Malformed IES profile ingestion | Metal packs undersized grids verbatim, direct one-plane profiles pack a grid device evaluation rejects, and the loader accepts partial/non-finite numeric tokens | malformed grid/angle/candela packer cases, one-plane normalization, and invalid LM-63 numeric-token fixtures | validate one neutral host profile representation before either backend upload; unfold a rotational plane; reject malformed LM-63 numbers at parse time | FIXED | Shared host packer compiled | Shared host packer; external CUDA required | this commit | UNVERIFIED |
+| AI. IES same-path reload | Re-registering a corrected profile path returns the old slot without replacing its angular data or publishing a light change | active-light same-path replacement and change-bit regression | preserve the stable slot but replace its profile contents and invalidate backend light resources | FIXED | Shared Scene update | Shared Scene update; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1378,3 +1379,24 @@ is out of scope unless it blocks validation.
   LM-63 fixtures loaded successfully. It now passes 21/21; the broader IES group passes 34/34 cases and 1,054,618
   assertions in Debug, Release, and ASan+UBSan. Both production Metal shader configurations compile. OptiX consumes
   the same host bytes but CUDA compilation/runtime remains externally `UNVERIFIED`.
+
+## Finding AI: IES same-path reload
+
+- Random variables and measure: none are added. Reloading changes the deterministic IES radiance multiplier for an
+  already represented light event.
+- Support: the registered slot identity remains stable so packed light indices do not move, while its current finite
+  angle/candela table replaces the stale contents. Invalid replacement data is still made empty by finding AH's
+  common packer.
+- Conditional/marginal PDF and selection PMF: unchanged. The profile affects the integrand, not the punctual/area
+  conditional or represented light-selection mass.
+- Delta/continuous classification and MIS: unchanged. NEE and an analytic hit consume the same freshly uploaded
+  profile generation. The Scene must mark `ChangeBits::Lights` so both Metal and OptiX rebuild that shared buffer
+  before the next launch.
+- Current-HEAD reproducer: register path `fixture.ies` with candela one, create an active IES light, clear change
+  bits, then register the same path with candela two. `addIesProfile()` returns the original slot but leaves candela
+  one in `mIesProfiles` and publishes no change, so both backends continue rendering the stale distribution.
+- Implementation and result: a named profile keeps its original slot but atomically replaces the stored table and
+  marks `ChangeBits::Lights`; unnamed programmatic profiles remain distinct instead of deduplicating on an empty
+  path. The pre-fix regression failed 3/5 assertions and now passes 5/5. Together with the existing registered-index
+  boundary case it passes 10/10 in Debug, Release, and ASan+UBSan. Production Metal shaders compile; OptiX consumes
+  the same Scene change but remains externally runtime `UNVERIFIED`.

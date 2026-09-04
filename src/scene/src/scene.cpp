@@ -993,17 +993,24 @@ void Scene::setEnvLight(const EnvLightDesc& desc)
 
 int32_t Scene::addIesProfile(IesProfile profile)
 {
-    // Reuse an already-loaded path so toggling the same file in the UI does not
-    // grow the table without bound.
-    for (size_t i = 0; i < mIesProfiles.size(); ++i)
+    // Keep a file's slot stable so lights that already reference it need no
+    // repacking, but replace the contents because the file may have been fixed
+    // or edited since the previous load.
+    if (!profile.path.empty())
     {
-        if (mIesProfiles[i].path == profile.path)
+        for (size_t i = 0; i < mIesProfiles.size(); ++i)
         {
-            return (int32_t)i;
+            if (mIesProfiles[i].path == profile.path)
+            {
+                mIesProfiles[i] = std::move(profile);
+                markChanged(ChangeBits::Lights);
+                return static_cast<int32_t>(i);
+            }
         }
     }
     mIesProfiles.push_back(std::move(profile));
-    return (int32_t)mIesProfiles.size() - 1;
+    markChanged(ChangeBits::Lights);
+    return static_cast<int32_t>(mIesProfiles.size() - 1);
 }
 
 int32_t Scene::addProjectorImage(const std::string& path)

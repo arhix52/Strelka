@@ -301,6 +301,35 @@ TEST_CASE("a projector carries no IES profile, even one left over from a spot")
     CHECK(scene.getLights()[id].points[0].y == doctest::Approx(-1.0f));
 }
 
+TEST_CASE("reloading an IES path refreshes its stable slot")
+{
+    Scene scene;
+    Scene::IesProfile profile;
+    profile.path = "fixtures/reload.ies";
+    profile.verticalAngles = { 0.0f, 90.0f };
+    profile.horizontalAngles = { 0.0f, 360.0f };
+    profile.candela = { 1.0f, 1.0f, 1.0f, 1.0f };
+    profile.maxCandela = 1.0f;
+    const int32_t slot = scene.addIesProfile(profile);
+
+    Scene::UniformLightDesc desc{};
+    desc.type = LIGHT_TYPE_POINT;
+    desc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    desc.intensity = 1.0f;
+    desc.color = glm::float3(1.0f);
+    desc.iesProfile = slot;
+    scene.createLight(desc);
+    scene.consumeChanges();
+
+    profile.candela = { 2.0f, 2.0f, 2.0f, 2.0f };
+    profile.maxCandela = 2.0f;
+    CHECK(scene.addIesProfile(profile) == slot);
+    CHECK(scene.getIesProfiles().size() == 1);
+    CHECK(scene.getIesProfiles()[static_cast<size_t>(slot)].candela[0] == doctest::Approx(2.0f));
+    CHECK(scene.getIesProfiles()[static_cast<size_t>(slot)].maxCandela == doctest::Approx(2.0f));
+    CHECK(any(scene.peekChanges() & ChangeBits::Lights));
+}
+
 TEST_CASE("the projector image table reuses an entry for the same file")
 {
     Scene scene;
