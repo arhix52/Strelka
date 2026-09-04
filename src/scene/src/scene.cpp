@@ -674,8 +674,8 @@ uint32_t Scene::createSphereLightMesh()
 
     std::vector<Scene::Vertex> vertices;
     std::vector<uint32_t> indices;
-    const int segments = 16;
-    const int rings = 16;
+    const int segments = 64;
+    const int rings = 32;
     const float radius = 1.0f;
     // Generate vertices and normals
     for (int i = 0; i <= rings; ++i)
@@ -746,9 +746,10 @@ uint32_t Scene::createDiscLightMesh()
     vertices.push_back(v2); // first point
 
     const float diskRadius = 1.0f; // param
-    const float step = 2.0f * std::numbers::pi / 16;
+    constexpr int segments = 64;
+    const float step = 2.0f * std::numbers::pi / segments;
     float angle = 0;
-    for (int i = 0; i < 16; ++i)
+    for (int i = 0; i < segments; ++i)
     {
         indices.push_back(0); // each triangle have central point
         indices.push_back(vertices.size() - 1); // prev vertex

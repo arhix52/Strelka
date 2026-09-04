@@ -341,6 +341,8 @@ TEST_CASE("analytic intersection covers the smooth disc beyond the editor proxy"
     CHECK(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_DISC));
     CHECK(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_SPHERE));
     CHECK(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_RECT));
+    CHECK_FALSE(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_POINT));
+    CHECK_FALSE(lightUsesAnalyticAreaIntersection(LIGHT_TYPE_DISTANT));
     const float angle = float(M_PI_F) / 16.0f;
     const float3 target = make_float3(0.99f * std::cos(angle), 0.99f * std::sin(angle), 0.0f);
     const float3 origin = target + make_float3(0.0f, 0.0f, 2.0f);
@@ -448,13 +450,7 @@ TEST_CASE("finite analytic light surfaces block only the open shadow segment")
     CHECK_FALSE(analyticLightSurfaceOccludesSegment(
         LIGHT_TYPE_DISC, zero, center, axisX, axisY, normal, 3.0f, origin, direction, 0.0f, 3.0f));
 
-    // A positive-radius punctual light is the same analytical sphere for NEE,
-    // BSDF/camera hits, and visibility. A sharp punctual atom has no surface.
     const float radius = 0.5f;
-    CHECK(analyticLightSurfaceOccludesSegment(LIGHT_TYPE_POINT, make_float3(radius, 0.0f, 0.0f), center, zero, zero,
-                                              zero, 3.0f, origin, direction, 0.0f, 10.0f));
-    CHECK_FALSE(analyticLightSurfaceOccludesSegment(
-        LIGHT_TYPE_POINT, zero, center, zero, zero, zero, 3.0f, origin, direction, 0.0f, 10.0f));
 
     Rng rng(0x50F7u);
     for (int i = 0; i < 4096; ++i)
@@ -2087,7 +2083,25 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     CHECK(shader.find("findAnalyticAreaLightHit(", closestHit) != std::string::npos);
 }
 
-TEST_CASE("coincident analytic emitters retain every BSDF-hit component")
+TEST_CASE("the nearest of two area emitters is the visible hit")
+{
+    const float3 origin = make_float3(0.0f);
+    const float3 direction = make_float3(0.0f, 0.0f, 1.0f);
+    const float3 normal = make_float3(0.0f, 0.0f, -1.0f);
+    const auto hit = [&](float z) {
+        const float3 corner = make_float3(-0.5f, -0.5f, z);
+        return intersectAnalyticLightSurface(LIGHT_TYPE_RECT, corner, corner + make_float3(1.0f, 0.0f, 0.0f),
+                                             make_float3(0.0f), corner + make_float3(0.0f, 1.0f, 0.0f), normal,
+                                             origin, direction, 0.0f, 100.0f);
+    };
+    const AnalyticLightIntersection near = hit(2.0f);
+    const AnalyticLightIntersection far = hit(4.0f);
+    REQUIRE(near.hit);
+    REQUIRE(far.hit);
+    CHECK(near.distance < far.distance);
+}
+
+TEST_CASE("OptiX coincident analytic emitters retain every BSDF-hit component")
 {
     const float3 corner = make_float3(-0.5f, -0.5f, 1.0f);
     const float3 edgeX = make_float3(1.0f, 0.0f, 0.0f);
@@ -2119,13 +2133,28 @@ TEST_CASE("coincident analytic emitters retain every BSDF-hit component")
 
     const std::filesystem::path repository =
         std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    for (const char* path : { "src/shaders/metal/wavefront.metal",
-                              "src/shaders/optix/OptixRender_closest_hit.cu" })
-    {
-        std::ifstream sourceFile(repository / path);
-        REQUIRE(sourceFile.good());
-        const std::string source((std::istreambuf_iterator<char>(sourceFile)), std::istreambuf_iterator<char>());
-        CHECK(source.find("for (uint32_t componentId = 0u;") != std::string::npos);
-        CHECK(source.find("analyticLightIntersectionSharesEvent") != std::string::npos);
-    }
+    std::ifstream sourceFile(repository / "src/shaders/optix/OptixRender_closest_hit.cu");
+    REQUIRE(sourceFile.good());
+    const std::string source((std::istreambuf_iterator<char>(sourceFile)), std::istreambuf_iterator<char>());
+    CHECK(source.find("for (uint32_t componentId = 0u;") != std::string::npos);
+    CHECK(source.find("analyticLightIntersectionSharesEvent") != std::string::npos);
+}
+
+TEST_CASE("Metal analytic surfaces use TLAS traversal")
+{
+    const std::filesystem::path repository =
+        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
+    std::ifstream shaderFile(repository / "src/shaders/metal/wavefront.metal");
+    REQUIRE(shaderFile.good());
+    const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
+    CHECK(shader.find("findAnalyticAreaLightHit") == std::string::npos);
+    CHECK(shader.find("analyticLightsOccludeSegment") == std::string::npos);
+    CHECK(shader.find("for (uint32_t componentId = 0u;") == std::string::npos);
+    CHECK(shader.find("sr.ignoredLightId") != std::string::npos);
+
+    std::ifstream asFile(repository / "src/render/metal/MetalAccelStructure.mm");
+    REQUIRE(asFile.good());
+    const std::string asSource((std::istreambuf_iterator<char>(asFile)), std::istreambuf_iterator<char>());
+    CHECK(asSource.find("lightTypeIsPunctual(lightType) || infinite") != std::string::npos);
+    CHECK(asSource.find("GEOMETRY_MASK_LIGHT_HIDDEN") != std::string::npos);
 }
