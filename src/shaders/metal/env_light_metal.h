@@ -18,6 +18,7 @@ using namespace metal;
 // independently jitter within the selected texel.
 static inline float3 sampleEnvMap(const uint2 aliasWords,
                                   const float2 jitter,
+                                  const uint2 retryWords,
                                   device const EnvAliasEntry* aliasTable,
                                   uint32_t envMapWidth,
                                   uint32_t envMapHeight,
@@ -34,8 +35,8 @@ static inline float3 sampleEnvMap(const uint2 aliasWords,
     const uint32_t x = draw.texel % w;
     const uint32_t y = draw.texel / w;
 
-    const float3 dir =
-        envSampleTexelDirection((int)x, (int)y, (int)w, (int)h, jitter.x, jitter.y, envMapRotation);
+    const float3 dir = envSampleTexelDirection(
+        (int)x, (int)y, (int)w, (int)h, jitter.x, jitter.y, retryWords.x, retryWords.y, envMapRotation);
 
     pdf = aliasTable[draw.texel].solidAnglePdf;
 

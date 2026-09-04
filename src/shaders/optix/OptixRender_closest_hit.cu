@@ -444,10 +444,12 @@ static __device__ LightConnection connectEnvLight(SamplerState& sampler,
         randomBits<SampleDimension::eLightBucket>(sampler), randomBits<SampleDimension::eLightAlias>(sampler));
     const float2 jitter =
         make_float2(random<SampleDimension::eLightPointX>(sampler), random<SampleDimension::eLightPointY>(sampler));
+    const uint2 retryWords = make_uint2(randomBits<SampleDimension::eEnvironmentRetryU>(sampler),
+                                        randomBits<SampleDimension::eEnvironmentRetryV>(sampler));
 
     float envPdf = 0.0f;
-    const float3 dir = sampleEnvMap(aliasWords, jitter, params.envAliasTable, params.envMapWidth, params.envMapHeight,
-                                    params.envMapRotation, envPdf);
+    const float3 dir = sampleEnvMap(aliasWords, jitter, retryWords, params.envAliasTable, params.envMapWidth,
+                                    params.envMapHeight, params.envMapRotation, envPdf);
 
     LightConnection c = makeEmptyConnection();
     c.toLight = dir;

@@ -174,6 +174,7 @@ TEST_CASE("finite environment jitter remains inside the selected texel")
 
     const float u = envSampleTexelU(static_cast<int>(selectedX), static_cast<int>(width), 0x1.fffffep-1f);
     CHECK(static_cast<uint32_t>(u * static_cast<float>(width)) == selectedX);
+    CHECK(u != (static_cast<float>(selectedX) + 0.5f) / static_cast<float>(width));
 
     for (const int w : { 1, 4, 16, 1024 })
     {
@@ -188,7 +189,8 @@ TEST_CASE("finite environment jitter remains inside the selected texel")
                     {
                         for (const float xi : { 0.0f, 0x1.fffffep-1f })
                         {
-                            const float3 direction = envSampleTexelDirection(x, y, w, h, xi, xi, rotation);
+                            const float3 direction =
+                                envSampleTexelDirection(x, y, w, h, xi, xi, 0x12345678u, 0x9abcdef0u, rotation);
                             const float2 evaluated = dirToEnvUV(direction, rotation);
                             const int evaluatedX = std::clamp(static_cast<int>(evaluated.x * static_cast<float>(w)),
                                                               0, w - 1);
@@ -208,6 +210,73 @@ TEST_CASE("finite environment jitter remains inside the selected texel")
             }
         }
     }
+}
+
+TEST_CASE("environment round-trip repair retains jitter instead of creating a midpoint atom")
+{
+    constexpr int w = 1024;
+    constexpr int h = 512;
+    constexpr int x = 0;
+    constexpr int y = 0;
+    constexpr float rotation = 0.0f;
+    const float midpointU = (static_cast<float>(x) + 0.5f) / static_cast<float>(w);
+    const float midpointV = envSolidAngleRowV(y, h, 0.5f);
+    const float3 midpoint = envUVToDir(make_float2(midpointU, midpointV), rotation);
+
+    int mismatchMutation = 0;
+    int midpointCollapses = 0;
+    for (uint32_t word = 0; word < (1u << 23u) && mismatchMutation < 16; ++word)
+    {
+        const float xi = static_cast<float>(word) * 0x1p-23f;
+        const float rawU = (static_cast<float>(x) + envOpenUnitInterval(xi)) / static_cast<float>(w);
+        const float rawV = envSampleSolidAngleV(y, h, xi);
+        const float3 rawDirection = envUVToDir(make_float2(rawU, rawV), rotation);
+        const float2 rawBack = dirToEnvUV(rawDirection, rotation);
+        const int rawX = std::clamp(static_cast<int>(rawBack.x * static_cast<float>(w)), 0, w - 1);
+        const int rawY = std::clamp(static_cast<int>(rawBack.y * static_cast<float>(h)), 0, h - 1);
+        if (rawX == x && rawY == y)
+        {
+            continue;
+        }
+
+        ++mismatchMutation;
+        const float3 repaired =
+            envSampleTexelDirection(x, y, w, h, xi, xi, hashWord(word), hashWord(word ^ 0x9e3779b9u), rotation);
+        const float2 repairedBack = dirToEnvUV(repaired, rotation);
+        CHECK(std::clamp(static_cast<int>(repairedBack.x * static_cast<float>(w)), 0, w - 1) == x);
+        CHECK(std::clamp(static_cast<int>(repairedBack.y * static_cast<float>(h)), 0, h - 1) == y);
+        midpointCollapses += repaired.x == midpoint.x && repaired.y == midpoint.y && repaired.z == midpoint.z ? 1 : 0;
+    }
+
+    REQUIRE(mismatchMutation == 16);
+    CHECK(midpointCollapses == 0);
+}
+
+TEST_CASE("environment round-trip repair does not collapse an extreme row interval")
+{
+    constexpr int w = 1;
+    constexpr int h = 1 << 20;
+    constexpr int x = 0;
+    constexpr float rotation = 0.0f;
+
+    const auto checkDistinct = [&](int y, uint32_t firstWord, uint32_t lastWord) {
+        const float xiU = 0.31415927f;
+        const float3 first = envSampleTexelDirection(
+            x, y, w, h, xiU, static_cast<float>(firstWord) * 0x1p-23f, 0x12345678u, 0x9abcdef0u, rotation);
+        const float3 last = envSampleTexelDirection(
+            x, y, w, h, xiU, static_cast<float>(lastWord) * 0x1p-23f, 0x12345678u, 0x9abcdef0u, rotation);
+        const float2 firstUv = dirToEnvUV(first, rotation);
+        const float2 lastUv = dirToEnvUV(last, rotation);
+
+        CAPTURE(y);
+        CHECK(std::clamp(static_cast<int>(firstUv.y * h), 0, h - 1) == y);
+        CHECK(std::clamp(static_cast<int>(lastUv.y * h), 0, h - 1) == y);
+        const bool distinct = first.x != last.x || first.y != last.y || first.z != last.z;
+        CHECK(distinct);
+    };
+
+    checkDistinct(h / 2, 8259807u, 8388607u);
+    checkDistinct(h - 1, 0u, 632868u);
 }
 
 TEST_CASE("a zero bilinear footprint is never drawn")

@@ -54,15 +54,32 @@ DEVICE_FUNC float envOpenUnitInterval(float xi)
 }
 
 /// A representable normalized coordinate whose lookup remains in texel `x`.
-/// The midpoint fallback is used only when adding the largest lattice value to
-/// an integer rounds onto the next bin boundary.
+/// If the first rounded value crosses a boundary, retain the input coordinate
+/// and project it monotonically to the nearest representable interior value.
 DEVICE_FUNC float envSampleTexelU(int x, int width, float xi)
 {
     const float w = (float)width;
-    float u = ((float)x + envOpenUnitInterval(xi)) / w;
+    const float t = envOpenUnitInterval(xi);
+    float u = ((float)x + t) / w;
     if ((int)(u * w) != x)
     {
-        u = ((float)x + 0.5f) / w;
+        float accepted = 0.5f;
+        float rejected = t;
+        u = ((float)x + accepted) / w;
+        for (int i = 0; i < 24; ++i)
+        {
+            const float trial = accepted + 0.5f * (rejected - accepted);
+            const float trialU = ((float)x + trial) / w;
+            if ((int)(trialU * w) == x)
+            {
+                accepted = trial;
+                u = trialU;
+            }
+            else
+            {
+                rejected = trial;
+            }
+        }
     }
     return u;
 }
@@ -122,28 +139,53 @@ DEVICE_FUNC float3 envUVToDir(float2 uv, float rotation)
     return make_float3(cosR * x + sinR * z, y, -sinR * x + cosR * z);
 }
 
-/// Sample a direction whose finite-precision inverse mapping still belongs to
-/// the selected texel. Trigonometric roundoff at the azimuth seam can move an
-/// endpoint-sized jitter into an adjacent bin even when the UV arithmetic did
-/// not; an interior solid-angle midpoint is the exact conditional fallback.
-DEVICE_FUNC float3 envSampleTexelDirection(int x, int y, int width, int height, float xiU, float xiV, float rotation)
+DEVICE_FUNC uint32_t envJitterWord(float xi)
 {
-    float u = envSampleTexelU(x, width, xiU);
-    float v = envSampleSolidAngleV(y, height, xiV);
-    float3 direction = envUVToDir(make_float2(u, v), rotation);
-    float2 evaluated = dirToEnvUV(direction, rotation);
-    int evaluatedX = (int)(evaluated.x * (float)width);
-    int evaluatedY = (int)(evaluated.y * (float)height);
-    evaluatedX = evaluatedX < 0 ? 0 : (evaluatedX >= width ? width - 1 : evaluatedX);
-    evaluatedY = evaluatedY < 0 ? 0 : (evaluatedY >= height ? height - 1 : evaluatedY);
+    const uint32_t word = (uint32_t)(fminf(fmaxf(xi, 0.0f), 0x1.fffffep-1f) * 8388608.0f);
+    return word < 8388608u ? word : 8388607u;
+}
 
-    if (evaluatedX != x || evaluatedY != y)
+DEVICE_FUNC float envWordJitter(uint32_t word)
+{
+    return (float)(word >> 9u) * 0x1p-23f;
+}
+
+/// Sample a direction whose finite-precision inverse mapping still belongs to
+/// the selected texel. A mismatch is a numerical rejection, not a new event:
+/// retry from independent random dimensions rather than concentrating all such
+/// samples at one midpoint.
+DEVICE_FUNC float3 envSampleTexelDirection(
+    int x, int y, int width, int height, float xiU, float xiV, uint32_t retryU, uint32_t retryV, float rotation)
+{
+    const uint32_t originalU = envJitterWord(xiU);
+    const uint32_t originalV = envJitterWord(xiV);
+    uint32_t stateU = retryU ^ originalV;
+    uint32_t stateV = retryV ^ originalU ^ originalV * 0x9e3779b9u;
+    float3 direction = make_float3(0.0f, 1.0f, 0.0f);
+    for (int attempt = 0; attempt < 9; ++attempt)
     {
-        u = ((float)x + 0.5f) / (float)width;
-        v = envSolidAngleRowV(y, height, 0.5f);
+        const float u = envSampleTexelU(x, width, xiU);
+        const float v = envSampleSolidAngleV(y, height, xiV);
         direction = envUVToDir(make_float2(u, v), rotation);
+        const float2 evaluated = dirToEnvUV(direction, rotation);
+        int evaluatedX = (int)(evaluated.x * (float)width);
+        int evaluatedY = (int)(evaluated.y * (float)height);
+        evaluatedX = evaluatedX < 0 ? 0 : (evaluatedX >= width ? width - 1 : evaluatedX);
+        evaluatedY = evaluatedY < 0 ? 0 : (evaluatedY >= height ? height - 1 : evaluatedY);
+        if (evaluatedX == x && evaluatedY == y)
+        {
+            return direction;
+        }
+
+        stateU = stateU * 1664525u + 1013904223u;
+        stateV = stateV * 1664525u + 1013904223u;
+        xiU = envWordJitter(stateU);
+        xiV = envWordJitter(stateV);
     }
-    return direction;
+
+    const float u = ((float)x + 0.5f) / (float)width;
+    const float v = envSolidAngleRowV(y, height, 0.5f);
+    return envUVToDir(make_float2(u, v), rotation);
 }
 
 /// Sanitized environment luminance. The host uses these coefficients before

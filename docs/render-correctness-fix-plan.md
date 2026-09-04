@@ -44,6 +44,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AG. IES profile index bounds | Unregistered/`INT_MAX` IES indices are numerically rounded to float and cast back before shader bounds checks | empty/valid/extreme/negative Scene slots and guarded-conversion mutation | canonicalize invalid slots to `-1` and use a shared pre-cast finite/range guard in Metal and OptiX | FIXED | Shared guard compiled | Shared guard; external CUDA required | this commit | UNVERIFIED |
 | AH. Malformed IES profile ingestion | Metal packs undersized grids verbatim, direct one-plane profiles pack a grid device evaluation rejects, and the loader accepts partial/non-finite numeric tokens | malformed grid/angle/candela packer cases, one-plane normalization, and invalid LM-63 numeric-token fixtures | validate one neutral host profile representation before either backend upload; unfold a rotational plane; reject malformed LM-63 numbers at parse time | FIXED | Shared host packer compiled | Shared host packer; external CUDA required | this commit | UNVERIFIED |
 | AI. IES same-path reload | Re-registering a corrected profile path returns the old slot without replacing its angular data or publishing a light change | active-light same-path replacement and change-bit regression | preserve the stable slot but replace its profile contents and invalidate backend light resources | FIXED | Shared Scene update | Shared Scene update; external CUDA required | this commit | UNVERIFIED |
+| AJ. Environment round-trip fallback atoms | UV/direction correction maps finite-precision bin mismatches onto a common fallback; the first repair still collapsed 7.54% of one extreme-row lattice interval | endpoint and exact extreme-row collision mutations with selected/evaluated-bin agreement | treat a round-trip mismatch as numerical rejection and retry from two independent RNG dimensions | FIXED | Shared math compiled | Shared math; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1400,3 +1401,30 @@ is out of scope unless it blocks validation.
   path. The pre-fix regression failed 3/5 assertions and now passes 5/5. Together with the existing registered-index
   boundary case it passes 10/10 in Debug, Release, and ASan+UBSan. Production Metal shaders compile; OptiX consumes
   the same Scene change but remains externally runtime `UNVERIFIED`.
+
+## Finding AJ: environment round-trip fallback atoms
+
+- Random variables and measure: environment texel identity `I` is a discrete mass; conditional azimuth and row
+  coordinate are continuous variables inducing uniform density in solid angle over that texel's exact bin.
+- Support: every interior direction whose inverse lat-long mapping belongs to selected texel `I`. Coordinate poles
+  and bin boundaries have zero continuous measure. Float round-trip repair must not create a separate midpoint event
+  with finite input probability.
+- Conditional/marginal PDF: `p(W|I)=1/DeltaOmega_I` and `p_omega(W)=P(I)/DeltaOmega_I`; the represented alias mass
+  and exact row solid angle are unchanged. The repair only chooses a valid float representative of the same
+  conditional event.
+- Selection PMF, delta classification, and MIS: environment identity retains its represented discrete PMF and the
+  direction remains continuous in `domega`. Environment NEE and BSDF miss use the same texel lookup PDF.
+- Current-HEAD reproducer: when float UV arithmetic or the trigonometric inverse maps a selected-bin representative
+  into a neighbour, both repair paths discard the original jitter and return the exact bin midpoint. An exhaustive
+  23-bit lattice sweep at ordinary HDR resolutions finds hundreds of such inputs in a pole row, all collapsed onto
+  one direction; at 1,048,576 rows the old V fallback affects about 1.47% of lattice states.
+- Implementation and result: a float round-trip mismatch is a numerical rejection of the attempted representative.
+  The sampler retries from two independent, dimensioned 32-bit RNG words while preserving the selected texel and its
+  exact row-area density; it no longer projects all failures toward one latitude. The retry is bounded to keep a bad
+  device input from hanging a GPU, with the already valid texel midpoint retained only as a last-resort sentinel.
+  Before the final change, the reviewer reproduced identical output for lattice words `8259807..8388607` in the
+  middle row (128,801 states) and `0..632868` in the south row (632,869 states); both exact endpoint comparisons
+  failed. They now produce distinct directions and still inverse-map to their selected rows. The 21-case environment
+  group passes 5,943 assertions in Debug, Release, and ASan+UBSan, and production Metal shaders compile. Actual-device
+  and full-audit results follow the scoped commit; OptiX consumes the same sampler but remains externally runtime
+  `UNVERIFIED`.
