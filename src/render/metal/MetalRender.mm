@@ -3052,6 +3052,14 @@ std::string MetalRender::renderWorkAuditJson() const
     const uint64_t shadowActive = sum(WORK_SHADOW_RAYS_BASE);
     const uint64_t missActive = sum(WORK_MISS_ITEMS_BASE);
     uint64_t dispatchTotal = 0;
+    auto dispatchCount = [&](const char* label) {
+        const auto it = mRenderWorkDispatches.find(label);
+        return it == mRenderWorkDispatches.end() ? uint64_t(0) : it->second;
+    };
+    const uint64_t guideDispatchCount = dispatchCount("wavefrontGuide") + dispatchCount("wavefrontGuideStatic");
+    const uint64_t restirSpatialDispatchCount = dispatchCount("wavefrontRestirSpatial");
+    const uint64_t restirFinalDispatchCount = dispatchCount("wavefrontRestirFinal");
+    const uint64_t firstHitDispatched = roundedThreads(c[WORK_SHADE_ITEMS_BASE]);
     std::string dispatches = "{";
     bool first = true;
     for (const auto& [label, count] : mRenderWorkDispatches)
@@ -3079,22 +3087,19 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"fullBufferClears\":0,\"fullBufferCopies\":0,\"bytesCopied\":0,"
         "\"manualAnalyticLightTests\":{},\"missLightEvaluations\":{},"
         "\"dispatchCount\":{},\"pipelineDispatches\":{}}}",
-        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs,
-        c[WORK_PRIMARY_RAYS],
-        array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE),
-        c[WORK_INTERSECTION_QUERIES], c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES],
-        c[WORK_RESTIR_CANDIDATE_QUERIES], c[WORK_RESTIR_REUSE_QUERIES],
-        c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES], c[WORK_RESTIR_FINAL_VISIBILITY_RAYS],
-        c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES], c[WORK_PRIMARY_RAYS],
-        roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
-        dispatched(WORK_EXTEND_RAYS_BASE),
-        shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive, dispatched(WORK_MISS_ITEMS_BASE), shadowActive,
-        dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
-        roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_SPATIAL_ITEMS],
-        roundedThreads(c[WORK_RESTIR_SPATIAL_ITEMS]), c[WORK_RESTIR_FINAL_ITEMS],
-        roundedThreads(c[WORK_RESTIR_FINAL_ITEMS]), mRenderWorkAsCounts.blasBuilds,
-        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits,
-        c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal, dispatches);
+        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs, c[WORK_PRIMARY_RAYS],
+        array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE), c[WORK_INTERSECTION_QUERIES],
+        c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES], c[WORK_RESTIR_CANDIDATE_QUERIES],
+        c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES],
+        c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
+        c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
+        dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,
+        dispatched(WORK_MISS_ITEMS_BASE), shadowActive, dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
+        roundedThreads(static_cast<uint64_t>(width) * height) * guideDispatchCount, c[WORK_RESTIR_SPATIAL_ITEMS],
+        restirSpatialDispatchCount != 0u ? firstHitDispatched : 0u, c[WORK_RESTIR_FINAL_ITEMS],
+        restirFinalDispatchCount != 0u ? firstHitDispatched : 0u, mRenderWorkAsCounts.blasBuilds,
+        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits, c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS],
+        c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal, dispatches);
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)
