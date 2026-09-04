@@ -1734,7 +1734,7 @@ extern "C" __global__ void __miss__ms()
             // A sharp distant and a specular BSDF direction are discrete atoms.
             // Their exact represented match has unit MIS weight; a continuous
             // ray near the axis must not acquire invented angular support.
-            if (prd->specularBounce && distantLightDeltaDirectionMatches(ray_dir, axis))
+            if (distantLightDeltaPathMatches(prd->depth, prd->specularBounce, ray_dir, axis))
             {
                 radiance += prd->throughput * make_float3(light.color);
             }

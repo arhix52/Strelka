@@ -1835,6 +1835,17 @@ TEST_CASE("a sharp distant matches only a represented specular atom")
     CHECK(infiniteLightDistance() == 1e16f);
 }
 
+TEST_CASE("a sharp distant atom is visible to primary and specular paths")
+{
+    const float3 axis = unit(make_float3(1.0f, 1.0f, 1.0f));
+    CHECK(distantLightDeltaPathMatches(0u, false, axis, axis));
+    CHECK(distantLightDeltaPathMatches(1u, true, axis, axis));
+    CHECK_FALSE(distantLightDeltaPathMatches(1u, false, axis, axis));
+
+    const float3 nearby = unit(make_float3(1.0f, 1.0f, 1.000001f));
+    CHECK_FALSE(distantLightDeltaPathMatches(0u, false, nearby, axis));
+}
+
 TEST_CASE("analytic infinite lights obey camera and secondary visibility masks")
 {
     CHECK_FALSE(analyticLightVisibilityAllowsRay(0.0f, false));

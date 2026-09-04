@@ -455,6 +455,14 @@ DEVICE_FUNC bool distantLightDeltaDirectionMatches(float3 direction, float3 axis
     return direction.x == axisDirection.x && direction.y == axisDirection.y && direction.z == axisDirection.z;
 }
 
+DEVICE_FUNC bool distantLightDeltaPathMatches(uint32_t depth,
+                                              bool specularBounce,
+                                              float3 direction,
+                                              float3 axisDirection)
+{
+    return (depth == 0u || specularBounce) && distantLightDeltaDirectionMatches(direction, axisDirection);
+}
+
 DEVICE_FUNC float infiniteLightDistance()
 {
     return 1e16f;

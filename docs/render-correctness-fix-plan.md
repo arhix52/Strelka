@@ -47,6 +47,7 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | AJ. Environment round-trip fallback atoms | UV/direction correction maps finite-precision bin mismatches onto a common fallback; the first repair still collapsed 7.54% of one extreme-row lattice interval | endpoint and exact extreme-row collision mutations with selected/evaluated-bin agreement | treat a round-trip mismatch as numerical rejection and retry from two independent RNG dimensions | FIXED | Shared math compiled | Shared math; external CUDA required | this commit | UNVERIFIED |
 | AK. Transformed analytic POWER units | a 2x3 transform makes a POWER rectangle emit 6x the authored watts because radiance uses local area | packed rect/disc/ellipsoid world-area integration and local-area mutation | bake POWER radiance from the packed world surface area; leave RADIANCE unchanged | FIXED | Shared packed record | Shared packed record; external CUDA required | this commit | FIXED |
 | AL. Finite distant boundary measure | ordinary sun angle `0.00465`: q-halving raises one direction's multiplicity from 215 to 385 | exact rejected-boundary pair plus cap support/PDF regression | retry rejected float representatives from independent light dimensions | FIXED | Shader compiled | Shared source; external CUDA required | this commit | FIXED |
+| AM. OptiX primary sharp-distant atom | empty scene with camera direction exactly equal to a zero-angle distant axis is black only on OptiX | shared primary/specular/non-specular atom ownership regression | primary rays and specular chains use one shared delta-path predicate | FIXED | Shared predicate | Source fixed; external CUDA required | this commit | UNVERIFIED |
 
 ## Per-finding probability records
 
@@ -1465,3 +1466,17 @@ is out of scope unless it blocks validation.
 - Implementation and result: a float representative outside the analytic cap is rejected and retried from two
   independent dimensioned words. The exact boundary regression and the 400,914-assertion cap sample/PDF sweep pass;
   both production Metal shaders compile. OptiX consumes the shared sampler but needs external CUDA validation.
+
+## Finding AM: OptiX primary sharp-distant atom
+
+- Random variable and measure: a zero-angle distant light is a discrete direction atom. No continuous solid-angle
+  PDF is invented for it.
+- Support and PMF: the represented direction must equal the packed axis exactly. Its path support is the camera
+  strategy at depth zero or a specular BSDF atom; its marginal mass includes the analytic-light selection PMF only
+  when NEE selects the light.
+- MIS strategies: camera visibility and a matching specular chain own the atom with unit weight. A continuous BSDF
+  direction does not compete with it.
+- Reproducer and mutation: OptiX initialized the camera segment with `specularBounce=false` and tested only that flag
+  on miss, while Metal marked the same segment specular. The shared regression fails the old OptiX predicate.
+- Implementation: both shaders use `depth == 0 || specularBounce` plus exact represented-direction equality. The
+  four-case host regression passes and Metal compiles; OptiX runtime remains externally `UNVERIFIED`.

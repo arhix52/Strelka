@@ -1583,7 +1583,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                 // atom can meet the represented light atom, and no continuous
                 // MIS density participates. Exact equality avoids widening the
                 // sharp distant into an artificial finite cone.
-                if (specularBounce && distantLightDeltaDirectionMatches(rayDir, axis))
+                if (distantLightDeltaPathMatches(depth, specularBounce, rayDir, axis))
                 {
                     const float3 infiniteRadiance = float3(light.color);
                     radiance += throughput * infiniteRadiance;
