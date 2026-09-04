@@ -857,7 +857,14 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 
         mLights[lightId].type = LIGHT_TYPE_RECT;
         mLights[lightId].halfAngle = 0.0f;
-        mLights[lightId].pad0 = 0.0f;
+        // The area density is a constant of the light, and the device was
+        // rebuilding it per next-event draw out of exponent-decomposed
+        // compensated arithmetic -- the same per-ray recomputation the ellipsoid
+        // representability check was. pad0 is written and never read for these
+        // two types, so the answer travels in it.
+        mLights[lightId].pad0 =
+            inverseFiniteCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
+                                     glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]));
         // Controlled-falloff cutoff distance for area lights, read by
         // areaFalloff(); 0 (the default range) leaves the light unbounded.
         mLights[lightId].pad1 = desc.range;
@@ -884,7 +891,13 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].normal = glm::float4(transformedAreaLightNormal(localTransform), 0.0f);
         mLights[lightId].type = LIGHT_TYPE_DISC;
         mLights[lightId].halfAngle = 0.0f;
-        mLights[lightId].pad0 = 0.0f;
+        // The area density is a constant of the light, and the device was
+        // rebuilding it per next-event draw out of exponent-decomposed
+        // compensated arithmetic -- the same per-ray recomputation the ellipsoid
+        // representability check was. pad0 is written and never read for these
+        // two types, so the answer travels in it.
+        mLights[lightId].pad0 = analyticDiscAreaPdf(glm::float3(mLights[lightId].points[2]),
+                                                    glm::float3(mLights[lightId].points[3]));
         // Controlled-falloff cutoff distance for area lights, read by
         // areaFalloff(); 0 (the default range) leaves the light unbounded.
         mLights[lightId].pad1 = desc.range;

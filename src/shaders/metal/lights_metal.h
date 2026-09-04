@@ -33,13 +33,12 @@ static float calcLightAreaPdf(device const UniformLight& l, const float3 hitPoin
     {
     case LIGHT_TYPE_RECT: // rectangle area
     {
-        float3 e1 = float3(l.points[1]) - float3(l.points[0]);
-        float3 e2 = float3(l.points[3]) - float3(l.points[0]);
-        areaPdf = inverseFiniteCrossLength(e1, e2);
+        // Precomputed where the light is packed; see Scene::setLight.
+        areaPdf = l.pad0;
         break;
     }
     case LIGHT_TYPE_DISC: {
-        areaPdf = analyticDiscAreaPdf(float3(l.points[2]), float3(l.points[3]));
+        areaPdf = l.pad0;
         break;
     }
     case LIGHT_TYPE_SPHERE: {

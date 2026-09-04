@@ -596,3 +596,41 @@ TEST_CASE("headless light edits do not recreate released proxy geometry")
     CHECK(addedScene.getVertices().empty());
     CHECK(addedScene.getIndices().empty());
 }
+
+TEST_CASE("a rect or disc light carries its area density rather than rebuilding it")
+{
+    // The density is a constant of the light, and the shading path used to
+    // rebuild it per next-event draw out of exponent-decomposed compensated
+    // arithmetic. It now travels in pad0, which those two types write and never
+    // read -- so this is what says the number packed there is the number the
+    // device would have computed. Both halves of the MIS estimate read it, so a
+    // wrong value does not cancel: it biases.
+    Scene scene;
+
+    Scene::UniformLightDesc rect{};
+    rect.type = LIGHT_TYPE_RECT;
+    rect.intensityUnit = LIGHT_UNIT_INTENSITY;
+    rect.intensity = 5.0f;
+    rect.color = glm::float3(1.0f);
+    rect.width = 0.7f;
+    rect.height = 0.3f;
+    const Scene::Light& packedRect = scene.getLights()[scene.createLight(rect)];
+    REQUIRE(packedRect.type == LIGHT_TYPE_RECT);
+    CHECK(packedRect.pad0 ==
+          doctest::Approx(inverseFiniteCrossLength(glm::float3(packedRect.points[1] - packedRect.points[0]),
+                                                    glm::float3(packedRect.points[3] - packedRect.points[0]))));
+    // 1 / area, and the area is what was authored.
+    CHECK(packedRect.pad0 == doctest::Approx(1.0f / (0.7f * 0.3f)).epsilon(1e-4));
+
+    Scene::UniformLightDesc disc{};
+    disc.type = LIGHT_TYPE_DISC;
+    disc.intensityUnit = LIGHT_UNIT_INTENSITY;
+    disc.intensity = 5.0f;
+    disc.color = glm::float3(1.0f);
+    disc.radius = 0.25f;
+    const Scene::Light& packedDisc = scene.getLights()[scene.createLight(disc)];
+    REQUIRE(packedDisc.type == LIGHT_TYPE_DISC);
+    CHECK(packedDisc.pad0 == doctest::Approx(analyticDiscAreaPdf(glm::float3(packedDisc.points[2]),
+                                                                 glm::float3(packedDisc.points[3]))));
+    CHECK(packedDisc.pad0 == doctest::Approx(1.0f / (std::numbers::pi_v<float> * 0.25f * 0.25f)).epsilon(1e-4));
+}

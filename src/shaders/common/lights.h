@@ -159,13 +159,12 @@ static __inline__ __device__ float calcLightAreaPdf(const UniformLight& l, const
 
     if (l.type == LIGHT_TYPE_RECT)
     {
-        float3 e1 = make_float3(l.points[1]) - make_float3(l.points[0]);
-        float3 e2 = make_float3(l.points[3]) - make_float3(l.points[0]);
-        areaPdf = inverseFiniteCrossLength(e1, e2);
+        // Precomputed where the light is packed; see Scene::setLight.
+        areaPdf = l.pad0;
     }
     else if (l.type == LIGHT_TYPE_DISC)
     {
-        areaPdf = analyticDiscAreaPdf(make_float3(l.points[2]), make_float3(l.points[3]));
+        areaPdf = l.pad0;
     }
     else if (l.type == LIGHT_TYPE_SPHERE)
     {
