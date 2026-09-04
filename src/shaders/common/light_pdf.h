@@ -92,7 +92,7 @@ DEVICE_FUNC float computeMisWeight(float a, float b, unsigned int heuristic)
 /// has to be the same band is not.
 DEVICE_FUNC bool lightSampleFacesVertex(float cosAtLight)
 {
-    return cosAtLight > 0.0f;
+    return cosAtLight > 0.0f && cosAtLight <= 3.402823466e38f;
 }
 
 /// A point drawn from an emitter's area measure, converted to solid angle.
@@ -108,6 +108,7 @@ DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, fl
         return 0.0f;
     }
     constexpr float maxFinite = 3.402823466e38f;
+    cosAtLight = fminf(cosAtLight, 1.0f);
     const float scaledDistance = distToLight / sqrtf(area);
     const float largestFiniteDistance = sqrtf(maxFinite * cosAtLight);
     if (!(scaledDistance > 0.0f))
@@ -127,9 +128,28 @@ DEVICE_FUNC float areaPdfToSolidAnglePdf(float distToLight, float cosAtLight, fl
         return 0.0f;
     }
     constexpr float maxFinite = 3.402823466e38f;
-    const float firstProduct = areaPdf * distToLight;
-    const float productLimit = maxFinite * cosAtLight / distToLight;
-    return firstProduct > 0.0f && firstProduct <= productLimit ? firstProduct * distToLight / cosAtLight : maxFinite;
+    cosAtLight = fminf(cosAtLight, 1.0f);
+    if (!(distToLight <= maxFinite) || !(areaPdf <= maxFinite))
+    {
+        return maxFinite;
+    }
+    int distanceExponent = 0;
+    int cosineExponent = 0;
+    int pdfExponent = 0;
+#if defined(__METAL_VERSION__)
+    const float distanceMantissa = metal::frexp(distToLight, distanceExponent);
+    const float cosineMantissa = metal::frexp(cosAtLight, cosineExponent);
+    const float pdfMantissa = metal::frexp(areaPdf, pdfExponent);
+    const float result = metal::ldexp(pdfMantissa * distanceMantissa * distanceMantissa / cosineMantissa,
+                                      pdfExponent + 2 * distanceExponent - cosineExponent);
+#else
+    const float distanceMantissa = frexpf(distToLight, &distanceExponent);
+    const float cosineMantissa = frexpf(cosAtLight, &cosineExponent);
+    const float pdfMantissa = frexpf(areaPdf, &pdfExponent);
+    const float result = ldexpf(pdfMantissa * distanceMantissa * distanceMantissa / cosineMantissa,
+                                pdfExponent + 2 * distanceExponent - cosineExponent);
+#endif
+    return result <= maxFinite ? result : maxFinite;
 }
 
 /// Emissive area of a sphere of radius r. Named because the estimator, the pdf

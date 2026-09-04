@@ -74,7 +74,9 @@ struct LightSampleData
 struct AnalyticAreaLightHit
 {
     float distance;
+    float3 point;
     float3 normal;
+    float areaPdf;
     unsigned int lightId;
     bool hit;
 };
@@ -96,7 +98,9 @@ static __inline__ __device__ AnalyticAreaLightHit findAnalyticAreaLightHit(const
 {
     AnalyticAreaLightHit closest;
     closest.distance = maxDistance;
+    closest.point = make_float3(0.0f);
     closest.normal = make_float3(0.0f);
+    closest.areaPdf = 0.0f;
     closest.lightId = 0u;
     closest.hit = false;
     for (unsigned int lightId = 0u; lightId < lightCount; ++lightId)
@@ -126,7 +130,9 @@ static __inline__ __device__ AnalyticAreaLightHit findAnalyticAreaLightHit(const
         if (candidate.hit)
         {
             closest.distance = candidate.distance;
+            closest.point = candidate.point;
             closest.normal = candidate.normal;
+            closest.areaPdf = candidate.areaPdf;
             closest.lightId = lightId;
             closest.hit = true;
         }
@@ -196,12 +202,21 @@ static __inline__ __device__ void fillLightData(const UniformLight& l,
                                                 const float3 hitPoint,
                                                 LightSampleData& lightSampleData)
 {
-    lightSampleData.areaPdf = calcLightAreaPdf(l, lightSampleData.pointOnLight);
-    lightSampleData.normal = calcLightNormal(l, lightSampleData.pointOnLight);
     const float3 toLight = lightSampleData.pointOnLight - hitPoint;
     float lenToLight;
     lightSampleData.L = finiteDirectionAndDistance(toLight, lenToLight);
     lightSampleData.distToLight = lenToLight;
+    if (l.type == LIGHT_TYPE_SPHERE)
+    {
+        const AnalyticLightIntersection hit =
+            intersectAnalyticEllipsoid(hitPoint, lightSampleData.L, 0.0f, 3.402823466e38f, make_float3(l.points[1]),
+                                       make_float3(l.points[0]), make_float3(l.points[2]), make_float3(l.points[3]));
+        lightSampleData.areaPdf = hit.areaPdf;
+        lightSampleData.normal = hit.normal;
+        return;
+    }
+    lightSampleData.areaPdf = calcLightAreaPdf(l, lightSampleData.pointOnLight);
+    lightSampleData.normal = calcLightNormal(l, lightSampleData.pointOnLight);
 }
 
 // The spherical-rectangle frame, its sample and its solid angle all come from
@@ -413,7 +428,7 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
     lightSampleData.normal = sample.normal;
     lightSampleData.areaPdf = sample.areaPdf;
     lightSampleData.pdf = areaPdfToSolidAnglePdf(
-        lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), sample.areaPdf);
+        lightSampleData.distToLight, -dot(lightSampleData.L, lightSampleData.normal), lightSampleData.areaPdf);
 
     return lightSampleData;
 }

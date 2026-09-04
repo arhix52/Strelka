@@ -24,6 +24,17 @@ modified `tests/CMakeLists.txt`; untracked `docs/restir/`, sampling-audit report
 | N. Runtime light topology rebuild | Geometry bit was ignored; Metal TLAS retained captured masks and both backends reused missing/stale BLAS after type edits | Repeated type-edit/cache regression plus backend rebuild source/compile validation | Cache unit proxies and route Geometry changes through buffer, BLAS, TLAS, and SBT rebuilds | FIXED | Source compiled; execution pending reviewer | Source; external CUDA validation required | pending | FIXED |
 | O. Scale-safe analytic and mesh area measures | Finite `1e13` ellipsoid determinant and finite `1e38` triangle length overflow intermediate float products | Large ellipsoid/disc/triangle sample-intersection-PDF regressions and determinant/naive-length mutations | Scale vectors before normalization, solve analytic intersections homogeneously, and bound area-to-solid-angle arithmetic | FIXED | Shader compiled; shared math source | Shared source; external CUDA validation required | pending | FIXED |
 | P. Extreme affine normal/support consistency | Common cofactor scaling underflows the only active normal; a finite `J_A` denominator can overflow although `p_A` and `p_omega` remain finite | Extreme inverse-transpose normal, `diag(2e19,2e19,1)` density, sample/eval/intersect, shear, and overflow mutations | Transform normals from an object tangent plane and carry scale-safe `p_A` directly through sample/PDF/intersection | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | pending | FIXED |
+| P2. Reciprocal-scale analytic support | A shared max scale turns `(1e20,0,0) cross (0,1e-20,0)` into an unstable `1e-40` intermediate; finite triangle endpoints can overflow `p1-p0`; a rounded unit cosine can overflow the PDF guard | Reciprocal/large affine and triangle sample-PDF-intersection, overflow/underflow, exact miss, condition-gate, and `dot(n,n)>1` regressions | Independently scaled compensated affine algebra, analytic disc/ellipsoid hits, exponent-carrying triangle measures, bounded Skeel-valid point maps, and scale-safe `p_A r^2/cos` | FIXED | FIXED on MTLDevice | Shared source; external CUDA validation required | pending | FIXED |
+| Q. True Standard-PBR/conductor delta measures | Rough lobes below the delta threshold are sampled continuously but labelled delta; positive PDFs are floored; sheen/tiny transmission can have evaluation without proposal support | Exact mirror/refraction, sub-`1e-10` marginal, sheen-with-transmission, and finite-lattice tiny-lobe regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| R. Finite-RNG categorical representation | Alias buckets above `2^23` are unreachable and float thresholds do not equal Metal/OptiX event masses | `8,388,609` buckets, strict-threshold lattice, hierarchy probability, support and GOF mutations | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| S. Environment radiance/support lifecycle | Invalid HDR values reach textures, bilinear positive radiance can lie outside PMF support, runtime edits leave stale tables, and a `FLT_TRUE_MIN` 1x1 map loses its outer PMF through an infinite reciprocal | sanitization, 3x3 footprint support, seam/poles, tiny-positive power, edit/reload regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| T. Infinite-light exact support/MIS | Sharp distant versus mirror is not represented as a discrete match; tiny continuous caps and float round trips lose support; camera mask/tMax differ | delta match, tiny cap, boundary round-trip, camera visibility and backend-distance tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| U. Analytic/punctual visibility agreement | Shadow rays ignore analytic emitters and finite-radius punctual proxies; stacked emitters therefore enumerate different paths | analytic segment blockers, stacked area lights, overlapping analytic surfaces and soft punctual regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| V. Transformed frame validity | Non-finite translations and collapsed/sheared projector/IES frames keep proposal power; OptiX transforms tangents as normals | translation, partial-rank/full-frame, shear, mirrored and tangent Gram-Schmidt tests | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| W. Complete marginal PDF arithmetic | Conditional area PDFs saturate before outer PMFs, under-reporting a finite complete marginal density | tiny-area/low-selection analytic and mesh regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| X. Emissive mesh animated/textured consistency | Power support ignores shutter/interior motion; OpenPBR and Metal LOD paths disagree with hit emission | motion extrema, OpenPBR texture bridge and texture-LOD regressions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| Y. Runtime topology/mask safety | Headless host geometry is released too early; finite/infinite and camera-visibility edits do not rebuild every backend mask/descriptor | headless rebuild and repeated runtime mask transitions | pending | OPEN | OPEN | OPEN | pending | OPEN |
+| Z. Projector transfer convention | Metal samples sRGB while OptiX decodes the same LDR source with a gamma-2.2 path | shared texel-value fixture and source mutation | pending | OPEN | OPEN | OPEN | pending | OPEN |
 
 ## Per-finding probability records
 
@@ -606,7 +617,8 @@ is out of scope unless it blocks validation.
 - Support/PDF: an arbitrary mesh normal is transformed by the inverse transpose even when irrelevant affine axes
   differ by `1e60`. Analytic lights carry `p_A` directly, so an overflowing area or Jacobian does not remove support
   when the reciprocal density is positive. A light is rejected only when the homogeneous float representation shared
-  by sample, PDF evaluation, and intersection loses rank, or when no positive final area density is representable.
+  by sample, PDF evaluation, and intersection loses rank, or when no positive normal-float area density survives the
+  production Metal arithmetic mode. P2 supersedes the interim attempt to retain subnormal `p_A` values.
 - Reproducer/mutation: for `A=diag(1e-30,1e30,1)` and object normal `Y`, global cofactor scaling underflows the only
   active `1e-30` cofactor and returns zero. The ellipsoid sampler previously returned positive area at its `Y` pole,
   while global-axis-scaled PDF/intersection arithmetic underflowed the `X` axis and returned no support.
@@ -618,9 +630,60 @@ is out of scope unless it blocks validation.
   density bound over the complete sphere.
 - Delta/continuous and MIS: unchanged; meshes and ellipsoids remain continuous, and the light/BSDF strategies use
   the same support decision. The selected-light outer PMF is unchanged.
-- Validation: the `diag(2e19,2e19,1)` regression gives `p_A=1.98944e-40` and `p_omega=0.0795775`, while raw
-  `length(cross(axisX,axisY))` is non-finite; sample/evaluate/intersection normals and densities agree exactly. The
-  focused sanitizer run passes 76,716/76,716 assertions, Debug and Release CTest pass 4/4, production Metal shaders
-  compile, and the full harness passes 805/805 tests with 68,680,088 assertions. The actual Apple M4 Pro shared-math
-  audit passes 262,144 samples in fast and safe math with zero measure mismatches. OptiX consumes the same headers but
-  CUDA compile/runtime remains externally `UNVERIFIED`. Status: FIXED.
+- Validation: the interim CPU result retained `p_A=1.98944e-40` for `diag(2e19,2e19,1)`, but P2's direct MTLDevice
+  probe showed that production Metal flushes that conditional density. Final shared tests therefore reject it before
+  selection while preserving the largest normal density. Current complete validation is recorded in P2. Status:
+  FIXED.
+
+## Adversarial correction P2: reciprocal-scale analytic support
+
+- Random variable/measure: the analytic-light identity remains a discrete PMF. A disc samples a uniform object-disc
+  point; an ellipsoid samples a uniform object-sphere normal `N`. Their affine images are continuous in world area
+  `dA`, and the induced receiver direction is continuous in solid angle `domega`.
+- Support: every finite affine disc with positive normal-float `p_A`; every emissive triangle whose exact float-vertex
+  area has a normal-float reciprocal; and every ellipsoid whose complete area-density range is representable and whose
+  float point map has scale-invariant Skeel condition at most `2^12`. For the linear map this bounds the three-FMA
+  endpoint's recovered object-coordinate drift by
+  `gamma_3 K < 7.33e-4`. Rejected ellipsoids receive zero host power, sample/evaluate density, and intersection
+  support together. General affine solves, transformed normals, and discs do not inherit the sphere-map gate.
+- Conditional and marginal PDF: for a disc, `p_A=1/(pi |axisX cross axisY|)`; for an ellipsoid,
+  `p_A(N)=1/(4 pi |cofactor(A) N|)`. The directional density is
+  `p_omega=P(light) p_A distance^2/clamp(cos(theta_light),0,1)`, with the unchanged outer selection PMF included in
+  the complete light-strategy density. Power-of-two exponent factoring avoids forming an overflowing area,
+  determinant, squared distance, or inverse.
+- Delta/continuous and MIS: both surfaces remain continuous. NEE retains the sampler's endpoint, normal, and `p_A`
+  and tests the endpoint segment for occluders. A BSDF/camera hit uses the analytic disc/ellipsoid intersection and
+  that event's normal and `p_A`. They are the two correct float strategy events: a quantized far/grazing NEE ray is
+  not snapped to a different analytic hit merely to make the numbers equal. No proxy geometry or delta fallback is
+  introduced.
+- Current reproducer: a common `1e20` scale makes the reciprocal axis `1e-20` become `1e-40`; dividing by this
+  intermediate before cancelling both scale factors overflows and returns zero support although the true cross
+  length is one. Two `1e20` axes instead overflow the raw cross used only by intersection. Triangle endpoints
+  `(-FLT_MAX,0,0)`, `(FLT_MAX,0,0)`, and `(-FLT_MAX,FLT_MIN,0)` have finite area but make `p1-p0` infinite. Row
+  scaling alone also loses small endpoints that determine the area after large products cancel. Separately, a
+  normalized float vector can satisfy `dot(n,n)>1`, so `maxFloat*cos(theta_light)` becomes infinity and defeats the
+  saturation guard.
+- Root cause and implementation: shared-max normalization can underflow one axis before reciprocal scales cancel;
+  raw cross/determinant/quadratic and distance-square intermediates overflow even when the final density and hit are
+  finite. The common CPU/Metal/OptiX code now factors affine columns and world rows independently by powers of two,
+  retains determinant/dot/cross remainders as two-float expansions, constructs the geometric sphere discriminant,
+  reconstructs the homogeneous surface event, and accepts it only after a componentwise backward-residual check.
+  Disc intersection uses the same scale-safe affine solve. Triangle area and orientation use exponent-carrying
+  expansions of the original vertex products, so neither overflowing edges nor subnormal normalized intermediates
+  are formed; barycentric point/UV interpolation uses bounded convex lerps. Host selection derives triangle area from
+  that same represented `p_A`. Area-to-solid-angle conversion distinguishes true underflow from overflow and clamps
+  a rounded unit cosine before the saturation bound.
+- Independent review: 20 million exponent-boundary bases produced zero false gate decisions against a long-double
+  Skeel oracle (largest accepted `4095.98809`, smallest rejected `4096.01165`). For 937,653 accepted random rays the
+  analytic hit classification had zero errors and zero `p_A` errors above 1% (worst `3.21e-7`); five million direct
+  cofactor checks had no bad normals or errors above 1% (worst `3.65e-7`). A Decimal-100 triangle oracle then tested
+  one million random float triangles in each of exponent ranges `[-38,+38]` and `[-12,+12]`: zero false accepts,
+  zero false rejects, and zero density errors above 1%. The worst observed relative error was `1.096e-3` for an
+  extremely thin triangle with `sin(angle) about 1e-8`.
+- Validation: focused analytic/affine/emissive tests pass 2,723,157/2,723,157 assertions; full Debug and Release CTest
+  pass 4/4; targeted ASan+UBSan passes 2,723,157 assertions; production Metal shaders compile. The full audit passes
+  845/845 tests and 68,680,287 assertions. Its actual Apple M4 Pro fast/safe kernels execute 262,144 samples with zero
+  measure mismatches and threadgroup-invariant results. A separate actual-device mesh probe gives identical support
+  and exact `p_A` bits in default/fast/safe Metal for three Decimal counterexamples; normals differ only in their last
+  bits. OptiX consumes the same shared headers but CUDA compilation/runtime remains externally `UNVERIFIED` on this
+  macOS host. Status: FIXED.

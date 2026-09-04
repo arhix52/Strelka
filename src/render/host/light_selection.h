@@ -137,6 +137,8 @@ inline double analyticLightPower(const Scene::Light& light)
     }
     case LIGHT_TYPE_DISC:
         if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
+            affineSamplePointRangeIsFinite(glm::float3(light.points[1]), glm::float3(light.points[2]),
+                                          glm::float3(light.points[3]), glm::float3(0.0f)) &&
             analyticDiscAreaPdf(glm::float3(light.points[2]), glm::float3(light.points[3])) > 0.0f)
         {
             measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
@@ -152,7 +154,7 @@ inline double analyticLightPower(const Scene::Light& light)
         const glm::float3 deviceAxisX(light.points[0]);
         const glm::float3 deviceAxisY(light.points[2]);
         const glm::float3 deviceAxisZ(light.points[3]);
-        if (!analyticAffineTransformIsNonsingular(deviceAxisX, deviceAxisY, deviceAxisZ))
+        if (!analyticEllipsoidIsRepresentable(glm::float3(light.points[1]), deviceAxisX, deviceAxisY, deviceAxisZ))
         {
             break;
         }

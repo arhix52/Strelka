@@ -86,15 +86,15 @@ inline std::vector<double> emissiveTrianglePowers(std::span<const Scene::Vertex>
         {
             continue;
         }
-        const glm::dvec3 p0 = glm::dvec3(objectToWorld * glm::vec4(vertices[i0].pos, 1.0f));
-        const glm::dvec3 p1 = glm::dvec3(objectToWorld * glm::vec4(vertices[i1].pos, 1.0f));
-        const glm::dvec3 p2 = glm::dvec3(objectToWorld * glm::vec4(vertices[i2].pos, 1.0f));
-        const double area = 0.5 * glm::length(glm::cross(p1 - p0, p2 - p0));
-        if (std::isfinite(area) && area > 0.0)
+        const glm::float3 p0 = glm::float3(objectToWorld * glm::vec4(vertices[i0].pos, 1.0f));
+        const glm::float3 p1 = glm::float3(objectToWorld * glm::vec4(vertices[i1].pos, 1.0f));
+        const glm::float3 p2 = glm::float3(objectToWorld * glm::vec4(vertices[i2].pos, 1.0f));
+        const float areaPdf = emissiveTriangleAreaPdf(p0, p1, p2);
+        if (areaPdf > 0.0f)
         {
             // Existing mesh emission is two-sided. This is only a power proxy
             // for selection; the exact sampled density is reconstructed below.
-            powers[triangle] = 2.0 * std::numbers::pi_v<double> * radiance * area;
+            powers[triangle] = 2.0 * std::numbers::pi_v<double> * radiance / double(areaPdf);
         }
     }
     return powers;

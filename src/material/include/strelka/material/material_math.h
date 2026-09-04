@@ -115,8 +115,9 @@
     #define expf(x)    metal::exp(x)
     #define logf(x)    metal::log(x)
     #define powf(x,y)  metal::pow(x,y)
+#    define fmaf(x, y, z) metal::fma(x, y, z)
 
-    inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
+inline float3 make_float3(float x, float y, float z) { return float3(x, y, z); }
     inline float3 make_float3(float v)                    { return float3(v); }
     inline float2 make_float2(float x, float y)           { return float2(x, y); }
     inline float4 make_float4(float x, float y, float z, float w) { return float4(x, y, z, w); }
@@ -181,13 +182,13 @@
     inline float4 make_float4(float x, float y, float z, float w) { return float4(x, y, z, w); }
     // NOLINTEND(modernize-return-braced-init-list)
 
-    using glm::dot;
     using glm::cross;
-    using glm::normalize;
+    using glm::dot;
+using glm::length;
     using glm::mix;
+using glm::normalize;
     using glm::reflect;
     using glm::refract;
-    using glm::length;
 
     inline float clamp(float v, float lo, float hi)
     {
@@ -261,15 +262,201 @@ DEVICE_FUNC float3 finiteDirectionAndDistance(float3 offset, THREAD_REF float& d
     return distance > 0.0f ? offset / distance : make_float3(0.0f);
 }
 
+DEVICE_FUNC float differenceOfProducts(float a, float b, float c, float d)
+{
+    const float cd = c * d;
+    const float difference = fmaf(a, b, -cd);
+    return difference + fmaf(-c, d, cd);
+}
+
+struct CompensatedFloat
+{
+    float high;
+    float low;
+};
+
+DEVICE_FUNC CompensatedFloat compensatedSum(float a, float b)
+{
+    CompensatedFloat result{};
+    result.high = a + b;
+    const float virtualB = result.high - a;
+    result.low = (a - (result.high - virtualB)) + (b - virtualB);
+    return result;
+}
+
+DEVICE_FUNC CompensatedFloat compensatedProduct(float a, float b)
+{
+    CompensatedFloat result{};
+    result.high = a * b;
+    result.low = fmaf(a, b, -result.high);
+    return result;
+}
+
+DEVICE_FUNC CompensatedFloat addCompensated(CompensatedFloat a, CompensatedFloat b)
+{
+    const CompensatedFloat highSum = compensatedSum(a.high, b.high);
+    const CompensatedFloat lowSum = compensatedSum(a.low, b.low);
+    const CompensatedFloat middle = compensatedSum(highSum.low, lowSum.high);
+    const CompensatedFloat leading = compensatedSum(highSum.high, middle.high);
+    const CompensatedFloat trailing = compensatedSum(leading.low, middle.low + lowSum.low);
+    CompensatedFloat result = compensatedSum(leading.high, trailing.high);
+    result.low += trailing.low;
+    return result;
+}
+
+DEVICE_FUNC CompensatedFloat scaleCompensated(CompensatedFloat value, float scale)
+{
+    CompensatedFloat result = compensatedProduct(value.high, scale);
+    const CompensatedFloat correction = compensatedSum(result.low, value.low * scale);
+    const CompensatedFloat leading = compensatedSum(result.high, correction.high);
+    result = compensatedSum(leading.high, leading.low + correction.low);
+    return result;
+}
+
+DEVICE_FUNC CompensatedFloat multiplyCompensated(CompensatedFloat a, CompensatedFloat b)
+{
+    CompensatedFloat result = compensatedProduct(a.high, b.high);
+    result = addCompensated(result, compensatedProduct(a.high, b.low));
+    result = addCompensated(result, compensatedProduct(a.low, b.high));
+    return addCompensated(result, compensatedProduct(a.low, b.low));
+}
+
+DEVICE_FUNC CompensatedFloat negateCompensated(CompensatedFloat value)
+{
+    value.high = -value.high;
+    value.low = -value.low;
+    return value;
+}
+
+DEVICE_FUNC CompensatedFloat compensatedDot3(CompensatedFloat ax,
+                                             CompensatedFloat ay,
+                                             CompensatedFloat az,
+                                             CompensatedFloat bx,
+                                             CompensatedFloat by,
+                                             CompensatedFloat bz)
+{
+    return addCompensated(
+        addCompensated(multiplyCompensated(ax, bx), multiplyCompensated(ay, by)), multiplyCompensated(az, bz));
+}
+
+DEVICE_FUNC float compensatedValue(CompensatedFloat value)
+{
+    return value.high + value.low;
+}
+
+DEVICE_FUNC CompensatedFloat divideCompensated(CompensatedFloat numerator, CompensatedFloat denominator)
+{
+    const float denominatorValue = compensatedValue(denominator);
+    CompensatedFloat quotient = compensatedSum(compensatedValue(numerator) / denominatorValue, 0.0f);
+    for (unsigned int iteration = 0u; iteration < 2u; ++iteration)
+    {
+        const CompensatedFloat residual =
+            addCompensated(numerator, negateCompensated(multiplyCompensated(denominator, quotient)));
+        quotient = addCompensated(quotient, compensatedSum(compensatedValue(residual) / denominatorValue, 0.0f));
+    }
+    return quotient;
+}
+
+DEVICE_FUNC CompensatedFloat sqrtCompensated(CompensatedFloat value)
+{
+    const float root = sqrtf(fmaxf(compensatedValue(value), 0.0f));
+    CompensatedFloat result = compensatedSum(root, 0.0f);
+    if (root > 0.0f)
+    {
+        const CompensatedFloat residual = addCompensated(value, negateCompensated(multiplyCompensated(result, result)));
+        result = addCompensated(result, compensatedSum(compensatedValue(residual) / (2.0f * root), 0.0f));
+    }
+    return result;
+}
+
+DEVICE_FUNC CompensatedFloat compensatedDifferenceOfProducts(float a, float b, float c, float d)
+{
+    CompensatedFloat negativeProduct = compensatedProduct(c, d);
+    negativeProduct.high = -negativeProduct.high;
+    negativeProduct.low = -negativeProduct.low;
+    return addCompensated(compensatedProduct(a, b), negativeProduct);
+}
+
+DEVICE_FUNC CompensatedFloat compensatedDotCrossExpansion(float3 a, float3 b, float3 c)
+{
+    const CompensatedFloat x = scaleCompensated(compensatedDifferenceOfProducts(b.y, c.z, b.z, c.y), a.x);
+    const CompensatedFloat y = scaleCompensated(compensatedDifferenceOfProducts(b.z, c.x, b.x, c.z), a.y);
+    const CompensatedFloat z = scaleCompensated(compensatedDifferenceOfProducts(b.x, c.y, b.y, c.x), a.z);
+    return addCompensated(addCompensated(x, y), z);
+}
+
+DEVICE_FUNC CompensatedFloat
+compensatedDotCrossExpansion(CompensatedFloat ax, CompensatedFloat ay, CompensatedFloat az, float3 b, float3 c)
+{
+    const CompensatedFloat x = multiplyCompensated(compensatedDifferenceOfProducts(b.y, c.z, b.z, c.y), ax);
+    const CompensatedFloat y = multiplyCompensated(compensatedDifferenceOfProducts(b.z, c.x, b.x, c.z), ay);
+    const CompensatedFloat z = multiplyCompensated(compensatedDifferenceOfProducts(b.x, c.y, b.y, c.x), az);
+    return addCompensated(addCompensated(x, y), z);
+}
+
+DEVICE_FUNC float compensatedDotCross(float3 a, float3 b, float3 c)
+{
+    return compensatedValue(compensatedDotCrossExpansion(a, b, c));
+}
+
+DEVICE_FUNC float3 accurateCross(float3 a, float3 b)
+{
+    return make_float3(differenceOfProducts(a.y, b.z, a.z, b.y), differenceOfProducts(a.z, b.x, a.x, b.z),
+                       differenceOfProducts(a.x, b.y, a.y, b.x));
+}
+
+DEVICE_FUNC float accurateDot(float3 a, float3 b)
+{
+    return compensatedValue(addCompensated(
+        addCompensated(compensatedProduct(a.x, b.x), compensatedProduct(a.y, b.y)), compensatedProduct(a.z, b.z)));
+}
+
+DEVICE_FUNC CompensatedFloat compensatedDotExpansion(float3 a, float3 b)
+{
+    return addCompensated(
+        addCompensated(compensatedProduct(a.x, b.x), compensatedProduct(a.y, b.y)), compensatedProduct(a.z, b.z));
+}
+
+DEVICE_FUNC float decomposeFloatExponent(float value, THREAD_REF int& exponent)
+{
+#if defined(__METAL_VERSION__)
+    return metal::frexp(value, exponent);
+#else
+    return frexpf(value, &exponent);
+#endif
+}
+
+DEVICE_FUNC float scaleFloatExponent(float value, int exponent)
+{
+#if defined(__METAL_VERSION__)
+    return metal::ldexp(value, exponent);
+#else
+    return ldexpf(value, exponent);
+#endif
+}
+
+DEVICE_FUNC CompensatedFloat scaleCompensatedExponent(CompensatedFloat value, int exponent)
+{
+    return compensatedSum(scaleFloatExponent(value.high, exponent), scaleFloatExponent(value.low, exponent));
+}
+
 DEVICE_FUNC float3 finiteCrossDirection(float3 a, float3 b)
 {
-    float scale = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
-    scale = fmaxf(scale, fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z))));
-    if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
+    const float scaleA = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
+    const float scaleB = fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z)));
+    if (!(scaleA > 0.0f) || !(scaleA <= 3.402823466e38f) || !(scaleB > 0.0f) || !(scaleB <= 3.402823466e38f))
     {
         return make_float3(0.0f);
     }
-    return normalizeFiniteVectorOrZero(cross(a / scale, b / scale));
+    int exponentA = 0;
+    int exponentB = 0;
+    decomposeFloatExponent(scaleA, exponentA);
+    decomposeFloatExponent(scaleB, exponentB);
+    const float3 scaledA = make_float3(
+        scaleFloatExponent(a.x, -exponentA), scaleFloatExponent(a.y, -exponentA), scaleFloatExponent(a.z, -exponentA));
+    const float3 scaledB = make_float3(
+        scaleFloatExponent(b.x, -exponentB), scaleFloatExponent(b.y, -exponentB), scaleFloatExponent(b.z, -exponentB));
+    return normalizeFiniteVectorOrZero(accurateCross(scaledA, scaledB));
 }
 
 // `numerator / length(cross(a, b))`, evaluated without first forming either
@@ -278,18 +465,32 @@ DEVICE_FUNC float3 finiteCrossDirection(float3 a, float3 b)
 // long as the final density does.
 DEVICE_FUNC float finiteCrossReciprocal(float3 a, float3 b, float numerator)
 {
-    float scale = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
-    scale = fmaxf(scale, fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z))));
-    if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
+    const float scaleA = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
+    const float scaleB = fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z)));
+    if (!(numerator > 0.0f) || !(numerator <= 3.402823466e38f) || !(scaleA > 0.0f) || !(scaleA <= 3.402823466e38f) ||
+        !(scaleB > 0.0f) || !(scaleB <= 3.402823466e38f))
     {
         return 0.0f;
     }
-    const float scaledLength = finiteVectorLength(cross(a / scale, b / scale));
+    int exponentA = 0;
+    int exponentB = 0;
+    decomposeFloatExponent(scaleA, exponentA);
+    decomposeFloatExponent(scaleB, exponentB);
+    const float3 scaledA = make_float3(
+        scaleFloatExponent(a.x, -exponentA), scaleFloatExponent(a.y, -exponentA), scaleFloatExponent(a.z, -exponentA));
+    const float3 scaledB = make_float3(
+        scaleFloatExponent(b.x, -exponentB), scaleFloatExponent(b.y, -exponentB), scaleFloatExponent(b.z, -exponentB));
+    const float scaledLength = finiteVectorLength(accurateCross(scaledA, scaledB));
     if (!(scaledLength > 0.0f))
     {
         return 0.0f;
     }
-    const float reciprocal = (numerator / scaledLength / scale) / scale;
+    int numeratorExponent = 0;
+    int lengthExponent = 0;
+    const float numeratorMantissa = decomposeFloatExponent(numerator, numeratorExponent);
+    const float lengthMantissa = decomposeFloatExponent(scaledLength, lengthExponent);
+    const float reciprocal = scaleFloatExponent(
+        numeratorMantissa / lengthMantissa, numeratorExponent - lengthExponent - exponentA - exponentB);
     return reciprocal > 0.0f && reciprocal <= 3.402823466e38f ? reciprocal : 0.0f;
 }
 

@@ -1981,7 +1981,22 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     if (SPEC_LIGHTS && (rec.geomEntryIndex & HIT_LIGHT_BIT) != 0u)
     {
         const uint32_t lightId = rec.geomEntryIndex & ~HIT_LIGHT_BIT;
-        const float3 hitPoint = rayOrigin + rayDir * rec.distance;
+        device const UniformLight& currLight = lights[lightId];
+        AnalyticLightIntersection analyticSurfaceHit;
+        analyticSurfaceHit.hit = false;
+        if (currLight.type == LIGHT_TYPE_DISC)
+        {
+            analyticSurfaceHit = intersectAnalyticDisc(rayOrigin, rayDir, 0.0f, 3.402823466e38f,
+                                                       float3(currLight.points[1]), float3(currLight.points[2]),
+                                                       float3(currLight.points[3]), float3(currLight.normal));
+        }
+        else if (currLight.type == LIGHT_TYPE_SPHERE)
+        {
+            analyticSurfaceHit = intersectAnalyticEllipsoid(rayOrigin, rayDir, 0.0f, 3.402823466e38f,
+                                                            float3(currLight.points[1]), float3(currLight.points[0]),
+                                                            float3(currLight.points[2]), float3(currLight.points[3]));
+        }
+        const float3 hitPoint = analyticSurfaceHit.hit ? analyticSurfaceHit.point : rayOrigin + rayDir * rec.distance;
         // A light's geometry is still a surface the denoiser has to reconstruct.
         // Its emission is unaffected by denoising, so it gets a black albedo and
         // its own geometry, which keeps the guides continuous across the edge.
@@ -2031,8 +2046,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         {
             aov[tid].specularHitDistance += rec.distance;
         }
-        device const UniformLight& currLight = lights[lightId];
-        const float3 lightNormal = calcLightNormal(currLight, hitPoint);
+        const float3 lightNormal =
+            analyticSurfaceHit.hit ? analyticSurfaceHit.normal : calcLightNormal(currLight, hitPoint);
         // An emitter is a surface with a grid address like any other, so the
         // single-hit diagnostics answer here as well. Left to the branch below,
         // its emission -- orders of magnitude above any debug colour -- would
@@ -2068,8 +2083,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             // Same distance the shadow ray uses in connectLight() -- from the
             // scattering vertex, not the offset origin -- so both halves of the
             // MIS estimate scale the emission by the same controlled falloff.
-            const float3 falloffOrigin = rayOrigin - rayDir * p.misDistance;
-            const float3 Le = float3(currLight.color) * areaFalloff(currLight, length(hitPoint - falloffOrigin));
+            const float3 scatteringOrigin = rayOrigin - rayDir * p.misDistance;
+            const float hitDistance = finiteVectorLength(hitPoint - scatteringOrigin);
+            const float3 Le = float3(currLight.color) * areaFalloff(currLight, hitDistance);
             if (depth == 0u || specularBounce || !neeDone)
             {
                 radiance += throughput * Le;
@@ -2088,9 +2104,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 // saw it, which shrinks its solid-angle density, which inflates
                 // this weight -- and the next-event estimate at that vertex has
                 // already claimed the rest. The two then sum to more than one.
-                const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
-                const float lightPdf = getLightPdf(currLight, hitPoint, misOrigin,
-                                                   uniforms.rectLightSamplingMethod) *
+                const float conditionalLightPdf =
+                    analyticSurfaceHit.hit ?
+                        areaPdfToSolidAnglePdf(hitDistance, -dot(rayDir, lightNormal), analyticSurfaceHit.areaPdf) :
+                        getLightPdf(currLight, hitPoint, scatteringOrigin,
+                                                   uniforms.rectLightSamplingMethod);
+                const float lightPdf = conditionalLightPdf *
                                        lightSelectionPdf;
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 radiance += throughput * Le * mis;
@@ -3458,11 +3477,10 @@ static void guideImpl(uint gid,
         uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
         constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                          \
         TRAITS::structure accelerationStructure [[buffer(2)]], device AovSample* aov [[buffer(4)]],                   \
-        device const Material* materials [[buffer(5)]],                                                               \
-        device const GeometryEntry* geometryEntries [[buffer(6)]], device const char* vertexBuffer [[buffer(7)]],      \
-        device const char* prevVertexBuffer [[buffer(8)]], device const uint32_t* indexBuffer [[buffer(9)]],           \
-        device const packed_float3* curvePoints [[buffer(10)]], device const uint32_t* curveSegments [[buffer(11)]],  \
-        device const UniformLight* lights [[buffer(12)]])                                                             \
+        device const Material* materials [[buffer(5)]], device const GeometryEntry* geometryEntries [[buffer(6)]],     \
+        device const char* vertexBuffer [[buffer(7)]], device const char* prevVertexBuffer [[buffer(8)]],              \
+        device const uint32_t* indexBuffer [[buffer(9)]], device const packed_float3* curvePoints [[buffer(10)]],      \
+        device const uint32_t* curveSegments [[buffer(11)]], device const UniformLight* lights [[buffer(12)]])                                                             \
     {                                                                                                                  \
         guideImpl<TRAITS>(gid, uniforms, instances, accelerationStructure, aov, materials, geometryEntries,           \
                           vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, lights);            \

@@ -357,14 +357,40 @@ TEST_CASE("analytic light power uses transformed smooth area")
     sphere.points[0] = glm::float4(1e20f, 0.0f, 0.0f, 0.0f);
     sphere.points[2] = glm::float4(0.0f, 1e20f, 0.0f, 0.0f);
     sphere.points[3] = glm::float4(0.0f, 0.0f, 1e20f, 0.0f);
-    CHECK(analyticLightPower(sphere) > 0.0);
-    CHECK(std::isfinite(analyticLightPower(sphere)));
+    CHECK(analyticLightPower(sphere) == 0.0);
 
     sphere.points[0] = glm::float4(1e13f, 0.0f, 0.0f, 0.0f);
     sphere.points[2] = glm::float4(0.0f, 1e13f, 0.0f, 0.0f);
     sphere.points[3] = glm::float4(0.0f, 0.0f, 1e13f, 0.0f);
     CHECK(analyticLightPower(sphere) > 0.0);
     CHECK(std::isfinite(analyticLightPower(sphere)));
+
+    const float cosine = std::cos(0.6f);
+    const float sine = std::sin(0.6f);
+    sphere.points[0] = glm::float4(16.0f * cosine, 16.0f * sine, 0.0f, 0.0f);
+    sphere.points[2] = glm::float4(-sine, cosine, 0.0f, 0.0f);
+    sphere.points[3] = glm::float4(0.0f, 0.0f, 1.0f, 0.0f);
+    CHECK(analyticLightPower(sphere) > 0.0);
+
+    sphere.points[0] = glm::float4(1500.0f * cosine, 1500.0f * sine, 0.0f, 0.0f);
+    CHECK(analyticLightPower(sphere) > 0.0);
+
+    sphere.points[0] = glm::float4(7.1825589e-8f, 5.9514921e-8f, -2.69455853e-8f, 0.0f);
+    sphere.points[2] = glm::float4(-8.47644524e-11f, 9.36010366e-11f, -1.92090233e-11f, 0.0f);
+    sphere.points[3] = glm::float4(9.36574361e-5f, 2.48845143e-4f, 7.99277448e-4f, 0.0f);
+    CHECK(analyticLightPower(sphere) == 0.0);
+
+    disc.points[1] = glm::float4(std::numeric_limits<float>::max(), 0.0f, 0.0f, 1.0f);
+    disc.points[2] = glm::float4(1e32f, 0.0f, 0.0f, 0.0f);
+    disc.points[3] = glm::float4(0.0f, 1e-10f, 0.0f, 0.0f);
+    disc.normal = glm::float4(0.0f, 0.0f, 1.0f, 0.0f);
+    CHECK(analyticLightPower(disc) == 0.0);
+
+    sphere.points[1] = disc.points[1];
+    sphere.points[0] = disc.points[2];
+    sphere.points[2] = disc.points[3];
+    sphere.points[3] = glm::float4(0.0f, 0.0f, 1e-10f, 0.0f);
+    CHECK(analyticLightPower(sphere) == 0.0);
 }
 
 TEST_CASE("emissive mesh hierarchy preserves mesh and triangle PMFs")
@@ -507,11 +533,116 @@ TEST_CASE("emissive triangle sample and hit PDF agree under affine transform")
     CHECK(extremePdf > 0.0f);
 }
 
+TEST_CASE("emissive triangle interpolation stays finite at float range")
+{
+    const float maxFinite = std::numeric_limits<float>::max();
+    const float3 p0 = make_float3(maxFinite, 0.0f, 0.0f);
+    const float3 p1 = make_float3(maxFinite, 1.0f, 0.0f);
+    const float3 p2 = make_float3(maxFinite, 0.0f, 1.0f);
+    const float2 uv = make_float2(maxFinite, maxFinite);
+    const float u0 = 0.000610351562f;
+    const float u1 = 0.00891113281f;
+    const EmissiveTriangleSample sample = sampleEmissiveTriangle(p0, p1, p2, uv, uv, uv, u0, u1);
+    REQUIRE(sample.valid);
+    CHECK(sample.point.x == maxFinite);
+    CHECK(sample.uv == uv);
+    CHECK(sample.areaPdf == 2.0f);
+
+    const float root = std::sqrt(u0);
+    const float b0 = 1.0f - root;
+    const float b1 = root * (1.0f - u1);
+    const float b2 = root - b1;
+    CHECK_FALSE(std::isfinite((b0 * p0 + b1 * p1 + b2 * p2).x));
+}
+
+TEST_CASE("emissive triangle measure survives overflowing endpoint differences")
+{
+    const float maxFinite = std::numeric_limits<float>::max();
+    const float3 p0 = make_float3(-maxFinite, 0.0f, 0.0f);
+    const float3 p1 = make_float3(maxFinite, 0.0f, 0.0f);
+    const float3 p2 = make_float3(-maxFinite, std::numeric_limits<float>::min(), 0.0f);
+    const float2 uv = make_float2(0.0f, 0.0f);
+    const EmissiveTriangleSample sample = sampleEmissiveTriangle(p0, p1, p2, uv, uv, uv, 0.25f, 0.0f);
+    REQUIRE(sample.valid);
+    CHECK(sample.point.x == 0.0f);
+    CHECK(sample.normal == make_float3(0.0f, 0.0f, 1.0f));
+
+    const long double twiceArea =
+        (2.0L * static_cast<long double>(maxFinite)) * static_cast<long double>(p2.y);
+    CHECK(sample.areaPdf == doctest::Approx(static_cast<double>(2.0L / twiceArea)).epsilon(2e-6));
+    CHECK_FALSE(std::isfinite((p1 - p0).x));
+
+    oka::Scene scene;
+    std::vector<oka::Scene::Vertex> vertices(3);
+    vertices[0].pos = glm::float3(p0);
+    vertices[1].pos = glm::float3(p1);
+    vertices[2].pos = glm::float3(p2);
+    const uint32_t meshId = scene.createMesh(vertices, { 0u, 1u, 2u });
+    oka::Scene::MaterialDescription material;
+    material.params.emission = glm::float3(1.0f);
+    material.params.emission_strength = 1.0f;
+    const auto powers = oka::render::emissiveTrianglePowers(
+        scene, scene.getMeshes()[meshId], material, glm::mat4(1.0f));
+    REQUIRE(powers.size() == 1u);
+    CHECK(powers[0] > 0.0);
+    CHECK(std::isfinite(powers[0]));
+}
+
+TEST_CASE("emissive triangle measure retains exponent-separated endpoint terms")
+{
+    const EmissiveTriangleMeasure normalDensity = emissiveTriangleMeasure(
+        make_float3(2.69389246e33f, 3.64638875e17f, 8.27110457e16f),
+        make_float3(-7.85297065e19f, -23.1444607f, 8.62724393e-39f),
+        make_float3(4.73868002e17f, 1.35268463e-35f, 2.89990249e-18f));
+    CHECK(normalDensity.areaPdf == doctest::Approx(6.784540066654614e-38).epsilon(2e-6));
+    CHECK(normalDensity.areaPdf >= std::numeric_limits<float>::min());
+    CHECK(dot(normalDensity.normal, normalDensity.normal) == doctest::Approx(1.0f).epsilon(2e-6));
+
+    const EmissiveTriangleMeasure underflowDensity = emissiveTriangleMeasure(
+        make_float3(-1.57713117e36f, 5.03585699e-21f, 2.16896687e28f),
+        make_float3(-6.44862957e-5f, -3.8660869e-31f, -3.72892914e-16f),
+        make_float3(1.50318351e20f, 1.41720677e-20f, -99582920.0f));
+    CHECK(underflowDensity.areaPdf == 0.0f);
+    CHECK(underflowDensity.normal == make_float3(0.0f));
+
+    const EmissiveTriangleMeasure cancelledDensity = emissiveTriangleMeasure(
+        make_float3(-2.96706332e25f, 3.29073524e-17f, 8.87590965e35f),
+        make_float3(1.26941101e-26f, 4.70448121e-33f, 1.92276515e-23f),
+        make_float3(-1.86062789e-6f, 6.83772451e-36f, -41.1517296f));
+    CHECK(cancelledDensity.areaPdf == doctest::Approx(1.2101428097e-30).epsilon(2e-6));
+    CHECK(dot(cancelledDensity.normal, cancelledDensity.normal) == doctest::Approx(1.0f).epsilon(2e-6));
+}
+
+TEST_CASE("emissive mesh power excludes unrepresentable area densities")
+{
+    oka::Scene scene;
+    std::vector<oka::Scene::Vertex> vertices(3);
+    vertices[0].pos = { 0.0f, 0.0f, 0.0f };
+    vertices[1].pos = { 1e-20f, 0.0f, 0.0f };
+    vertices[2].pos = { 0.0f, 1e-20f, 0.0f };
+    const uint32_t meshId = scene.createMesh(vertices, { 0u, 1u, 2u });
+    oka::Scene::MaterialDescription material;
+    material.params.emission = glm::float3(1.0f);
+    material.params.emission_strength = 1.0f;
+
+    CHECK(emissiveTriangleAreaPdf(float3(vertices[0].pos), float3(vertices[1].pos), float3(vertices[2].pos)) == 0.0f);
+    const auto powers = oka::render::emissiveTrianglePowers(
+        scene, scene.getMeshes()[meshId], material, glm::mat4(1.0f));
+    REQUIRE(powers.size() == 1u);
+    CHECK(powers[0] == 0.0);
+
+    // Mutation: double area alone is positive although 1 / area exceeds the
+    // conditional float representation used by both GPU backends.
+    const glm::dvec3 e1(vertices[1].pos);
+    const glm::dvec3 e2(vertices[2].pos);
+    CHECK(0.5 * glm::length(glm::cross(e1, e2)) > 0.0);
+}
+
 TEST_CASE("large finite emissive triangles retain area-measure support")
 {
     const float3 p0 = make_float3(0.0f);
-    const float3 p1 = make_float3(2e19f, 0.0f, 0.0f);
-    const float3 p2 = make_float3(0.0f, 2e19f, 0.0f);
+    const float3 p1 = make_float3(1e19f, 0.0f, 0.0f);
+    const float3 p2 = make_float3(0.0f, 1e19f, 0.0f);
     const float2 uv = make_float2(0.0f, 0.0f);
     const EmissiveTriangleSample sample = sampleEmissiveTriangle(p0, p1, p2, uv, uv, uv, 0.25f, 0.5f);
     REQUIRE(sample.valid);
@@ -525,8 +656,12 @@ TEST_CASE("large finite emissive triangles retain area-measure support")
 
     // Mutation: the old length(cross) squares a finite 1e38 vector and
     // overflows before the reciprocal area density can be formed.
-    CHECK_FALSE(std::isfinite(cross(p1 - p0, p2 - p0).z));
+    CHECK_FALSE(std::isfinite(length(cross(p1 - p0, p2 - p0))));
     CHECK(inverseFiniteCrossLength(p1 - p0, p2 - p0) > 0.0f);
+
+    const EmissiveTriangleSample subnormal = sampleEmissiveTriangle(
+        p0, make_float3(2e19f, 0.0f, 0.0f), make_float3(0.0f, 2e19f, 0.0f), uv, uv, uv, 0.25f, 0.5f);
+    CHECK_FALSE(subnormal.valid);
 
     float distance = 0.0f;
     const float3 direction = finiteDirectionAndDistance(make_float3(1e20f, 1e14f, 0.0f), distance);
@@ -534,6 +669,17 @@ TEST_CASE("large finite emissive triangles retain area-measure support")
     CHECK(std::isfinite(distance));
     CHECK(dot(direction, direction) == doctest::Approx(1.0f));
     CHECK_FALSE(std::isfinite(length(make_float3(1e20f, 1e14f, 0.0f))));
+}
+
+TEST_CASE("emissive triangle PDF clamps rounded unit cosines")
+{
+    const float3 normal = make_float3(-0.408859611f, 0.248610795f, -0.878081203f);
+    const float roundedCosine = dot(normal, normal);
+    REQUIRE(roundedCosine > 1.0f);
+    const float3 pointOnLight = -normal * 2e19f;
+    const float pdf = emissiveTriangleSolidAnglePdf(1.0f, make_float3(0.0f), pointOnLight, normal);
+    CHECK(pdf == std::numeric_limits<float>::max());
+    CHECK(std::isfinite(pdf));
 }
 
 TEST_CASE("emissive mesh visibility ends before the traversed emitter")

@@ -1329,7 +1329,7 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
                 {
                     best.hit = true;
                     best.distance = analyticHit.distance;
-                    best.position = origin + dir * analyticHit.distance;
+                    best.position = analyticHit.point;
                     best.instanceId = instId;
                     best.lightId = inst.mLightId;
                 }

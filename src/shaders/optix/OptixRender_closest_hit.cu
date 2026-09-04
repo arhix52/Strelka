@@ -1583,8 +1583,8 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
                                                                  float3 rayDirection)
 {
     const UniformLight& light = params.scene.lights[hit.lightId];
-    const float3 hitPoint = rayOrigin + hit.distance * rayDirection;
-    const float3 lightNormal = calcLightNormal(light, hitPoint);
+    const float3 hitPoint = hit.point;
+    const float3 lightNormal = hit.normal;
 
     if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
     {
@@ -1617,7 +1617,8 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
     if (lightSampleFacesVertex(-dot(rayDirection, lightNormal)))
     {
         const float3 misOrigin = rayOrigin - rayDirection * prd->misDistance;
-        const float3 Le = make_float3(light.color) * areaFalloff(light, length(hitPoint - misOrigin));
+        const float hitDistance = finiteVectorLength(hitPoint - misOrigin);
+        const float3 Le = make_float3(light.color) * areaFalloff(light, hitDistance);
         float3 radiance;
         if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
         {
@@ -1630,7 +1631,7 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
                 params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
             const float lightSelectionPdf = localSelectionPdf * analyticClassPdf * analyticLightSelectionPdf(light);
             const float lightPdf =
-                getLightPdf(light, hitPoint, misOrigin, params.rectLightSamplingMethod) * lightSelectionPdf;
+                areaPdfToSolidAnglePdf(hitDistance, -dot(rayDirection, lightNormal), hit.areaPdf) * lightSelectionPdf;
             radiance = prd->throughput * Le *
                        computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
         }
