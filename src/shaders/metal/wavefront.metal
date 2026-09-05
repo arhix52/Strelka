@@ -208,7 +208,11 @@ static inline void restirDiagnosticVisibility(constant Uniforms& uniforms, uint3
 // returned or took the other branch, so they are inactive and the simdgroup
 // reductions below see only the lanes being queued. One atomic per simdgroup
 // instead of one per lane.
-static inline void queuePush(device atomic_uint* counter, device uint32_t* queueOut, uint32_t pathIndex, uint32_t capacity)
+static inline void queuePush(constant Uniforms& uniforms,
+                             device atomic_uint* counter,
+                             device uint32_t* queueOut,
+                             uint32_t pathIndex,
+                             uint32_t capacity)
 {
     const uint32_t rank = simd_prefix_exclusive_sum(1u);
     const uint32_t total = simd_sum(1u);
@@ -216,6 +220,11 @@ static inline void queuePush(device atomic_uint* counter, device uint32_t* queue
     if (simd_is_first())
     {
         base = atomic_fetch_add_explicit(counter, total, memory_order_relaxed);
+        auditWork(uniforms, WORK_QUEUE_APPENDS, total);
+        if (base >= capacity || total > capacity - base)
+        {
+            auditWork(uniforms, WORK_QUEUE_OVERFLOWS, base >= capacity ? total : total - (capacity - base));
+        }
     }
     base = simd_broadcast_first(base);
     if (base < capacity && rank < capacity - base)
@@ -811,6 +820,7 @@ static void extendImpl(uint gid,
     const uint32_t auditBounce = min(pathDepth(paths[tid].depthAndFlags), WORK_BOUNCE_SLOTS - 1u);
     auditWork(uniforms, WORK_EXTEND_RAYS_BASE + auditBounce);
     auditWork(uniforms, WORK_INTERSECTION_QUERIES);
+    auditWork(uniforms, WORK_EXTENSION_QUERIES);
 
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
@@ -935,13 +945,13 @@ static void extendImpl(uint gid,
         mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
         mediumRec.distance = mediumScatterT;
         *wavefrontHitRecord(hits, tid) = mediumRec;
-        queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
+        queuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
     if (hit.type == intersection_type::none)
     {
-        queuePush(missCounter, missQueue, tid, control[WF_CTRL_CAPACITY]);
+        queuePush(uniforms, missCounter, missQueue, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -961,7 +971,7 @@ static void extendImpl(uint gid,
         (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
     rec.distance = hit.distance;
     *wavefrontHitRecord(hits, tid) = rec;
-    queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
+    queuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
 }
 
 
@@ -1626,6 +1636,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     float3 sharcEnvironment = float3(0.0f);
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
+        auditWork(uniforms, WORK_ENVIRONMENT_EVALUATIONS);
         // repeat in u, clamp in v. The map wraps in azimuth and does not wrap in
         // polar angle: with repeat on both axes the bilinear tap in the first row
         // blends the zenith with the last row, which is the nadir. OptiX has always
@@ -1951,7 +1962,26 @@ static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
                                        thread OpenPBR_PreparedBsdf& openpbrPrepared,
                                        thread float& curveRadius);
 
-static bool restirDiagnosticVisible(CurveStaticTraversal::structure accelerationStructure,
+static inline void auditNeeSampledConnection(constant Uniforms& uniforms, thread const LightConnection& conn)
+{
+    auditWork(uniforms, WORK_NEE_LIGHT_SAMPLER_CALLS);
+    if (!conn.needsRay)
+    {
+        auditWork(uniforms, WORK_NEE_REJECT_CONNECTION);
+        return;
+    }
+    auditWork(uniforms, WORK_NEE_CONDITIONAL_PDF_EVALUATIONS);
+    const uint32_t sampleType = restirSampleType(conn.sample);
+    if (sampleType == RESTIR_SAMPLE_ANALYTIC)
+        auditWork(uniforms, WORK_NEE_FINITE_LIGHT_INSPECTIONS, 2u);
+    else if (sampleType == RESTIR_SAMPLE_EMISSIVE_TRIANGLE)
+        auditWork(uniforms, WORK_NEE_EMISSIVE_LIGHT_INSPECTIONS, 4u);
+    else if (sampleType == RESTIR_SAMPLE_ENVIRONMENT)
+        auditWork(uniforms, WORK_NEE_ENVIRONMENT_SAMPLES);
+}
+
+static bool restirDiagnosticVisible(constant Uniforms& uniforms,
+                                    CurveStaticTraversal::structure accelerationStructure,
                                     CurveStaticTraversal::table functionTable,
                                     thread const LightConnection& connection,
                                     float3 shadowOrigin,
@@ -2109,9 +2139,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                              (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNee)
         {
+            auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
             const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
                                                         vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, rng,
                                                         si, envAliasTable, envMapTexture, iesProfiles, true);
+            auditNeeSampledConnection(uniforms, conn);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 // The phase cosine compares travel directions: dot(rayDir, toLight).
@@ -2124,7 +2156,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, scatterPoint);
                 if (any(weight > 1e-6f) && visibility.valid)
                 {
+                    auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
                     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                    auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                     ShadowRay sr;
                     sr.origin = packed_float3(scatterPoint);
                     sr.direction = packed_float3(visibility.direction);
@@ -2139,6 +2173,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     shadowRays[slot] = sr;
                 }
+            }
+            else if (conn.needsRay)
+            {
+                auditWork(uniforms, WORK_NEE_REJECT_PDF);
             }
         }
 
@@ -2187,7 +2225,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             return;
         }
         paths[tid] = p;
-        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+        auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+        queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -2249,6 +2288,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 
             if (didNeeVolume)
             {
+                auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
                 SurfaceInteraction vsi = {};
                 vsi.position = scatterPoint;
                 vsi.shading_normal = -rayDir;
@@ -2257,6 +2297,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
                                                             vertexBuffer, prevVertexBuffer, indexBuffer, motionTime,
                                                             wrng, vsi, envAliasTable, envMapTexture, iesProfiles, true);
+                auditNeeSampledConnection(uniforms, conn);
                 if (conn.needsRay && conn.pdf > 0.0f)
                 {
                     // Match the fog path's travel-direction phase convention.
@@ -2267,6 +2308,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, scatterPoint);
                     if (any(weight > 1e-6f) && visibility.valid)
                     {
+                        auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
                         ShadowRay sr;
                         sr.origin = packed_float3(scatterPoint);
                         sr.direction = packed_float3(visibility.direction);
@@ -2280,8 +2322,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         shadowRays[slot] = sr;
                     }
+                }
+                else if (conn.needsRay)
+                {
+                    auditWork(uniforms, WORK_NEE_REJECT_PDF);
                 }
             }
         }
@@ -2333,7 +2380,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         paths[tid] = p;
         mediumPaths[tid] = mediumState;
-        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+        auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+        queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -2588,7 +2636,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         paths[tid] = p;
         mediumPaths[tid] = mediumState;
-        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+        auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+        queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -2634,6 +2683,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                              (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNeeExit)
         {
+            auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
             // NEE here and not inside the walk: this is the vertex light can
             // actually reach, and leaving it to BSDF sampling alone is what makes
             // a translucent object the noisiest thing in a frame.
@@ -2646,6 +2696,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
                                                         vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, xrng,
                                                         xsi, envAliasTable, envMapTexture, iesProfiles, false);
+            auditNeeSampledConnection(uniforms, conn);
             if (conn.needsRay && conn.pdf > 0.0f)
             {
                 const float cosOut = dot(outward, conn.toLight);
@@ -2660,6 +2711,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, shadowOrigin);
                     if (any(weight > 1e-6f) && visibility.valid)
                     {
+                        auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
                         ShadowRay sr;
                         sr.origin = packed_float3(shadowOrigin);
                         sr.direction = packed_float3(visibility.direction);
@@ -2679,9 +2731,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                         const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         shadowRays[slot] = sr;
                     }
                 }
+            }
+            else if (conn.needsRay)
+            {
+                auditWork(uniforms, WORK_NEE_REJECT_PDF);
             }
         }
 
@@ -2728,7 +2785,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         paths[tid] = p;
         mediumPaths[tid] = mediumState;
-        queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+        auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+        queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
 
@@ -2826,7 +2884,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 p.throughput = packed_float3(float3(1.0f));
             }
             paths[tid] = p;
-            queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+            auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+            queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
             return;
         }
     }
@@ -3001,7 +3060,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 guideIorStack.top > 0 ? guideIorStack.entries[guideIorStack.top - 1].ior : 1.0f;
             guide.mediaIors = packGuideIors(guideCurrentIor, guideExteriorIor);
             uniforms.guideRays[tid] = guide;
-            queuePush((device atomic_uint*)&control[WF_CTRL_GUIDE], uniforms.guideQueue, tid, control[WF_CTRL_CAPACITY]);
+            queuePush(uniforms, (device atomic_uint*)&control[WF_CTRL_GUIDE], uniforms.guideQueue, tid,
+                      control[WF_CTRL_CAPACITY]);
         }
 
         // The stochastic radiance continuation must not overwrite the primary
@@ -3169,10 +3229,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             (SPEC_ENV_MAP && uniforms.hasEnvMap);
     const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
     bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
+    if (!smoothLobe)
+    {
+        auditWork(uniforms, WORK_NEE_DELTA_HITS);
+    }
     const ShadedFrame neeFrame =
         shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
     if (didNee)
     {
+        auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
         const bool restirInitial = uniforms.restirDIEnabled != 0u && depth == 0u;
         const uint32_t candidates = restirInitial ?
                                         max(uniforms.initialCandidateCount, 1u) :
@@ -3211,12 +3276,22 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
                                                         vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, crng,
                                                         si, envAliasTable, envMapTexture, iesProfiles);
+            auditNeeSampledConnection(uniforms, conn);
             const RestirEvaluation candidate =
                 evaluateRestirConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
             if (!(candidate.target > 0.0f))
             {
+                if (conn.needsRay && !(conn.pdf > 0.0f))
+                    auditWork(uniforms, WORK_NEE_REJECT_PDF);
+                else if (conn.needsRay &&
+                         !neeProposesDirection(
+                             isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(conn.toLight, si.shading_normal)))
+                    auditWork(uniforms, WORK_NEE_REJECT_COSINE);
+                else if (conn.needsRay)
+                    auditWork(uniforms, WORK_NEE_REJECT_TARGET);
                 continue;
             }
+            auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
             const float w = candidate.target / conn.pdf;
             // Reuse eLightId under a new scramble so adding RIS does not shift later Sobol dimensions.
             SamplerState arng = crng;
@@ -3239,7 +3314,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, bestConn.toLight) :
                           bestConn.origin;
             float initialTransmittance;
-            if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, bestConn,
+            if (!restirDiagnosticVisible(uniforms, diagnosticAccelerationStructure, diagnosticFunctionTable, bestConn,
                                          initialShadowOrigin, instances, materials, geometryEntries, vertexBuffer,
                                          indexBuffer, initialTransmittance))
             {
@@ -3515,7 +3590,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                     auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
                                     float ignoredTransmittance;
                                     if (!restirDiagnosticVisible(
-                                            diagnosticAccelerationStructure, diagnosticFunctionTable,
+                                            uniforms, diagnosticAccelerationStructure, diagnosticFunctionTable,
                                             selectedAtPrevious, selectedAtPrevious.origin, instances, materials,
                                             geometryEntries, vertexBuffer, indexBuffer, ignoredTransmittance))
                                     {
@@ -3579,8 +3654,21 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
                     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                    auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                     shadowRays[slot] = sr;
                 }
+                else if (!any(weight != 0.0f))
+                {
+                    auditWork(uniforms, WORK_NEE_SHADOW_REJECT_WEIGHT);
+                }
+                else
+                {
+                    auditWork(uniforms, WORK_NEE_SHADOW_REJECT_SEGMENT);
+                }
+            }
+            else
+            {
+                auditWork(uniforms, WORK_NEE_SHADOW_REJECT_NORMALIZATION);
             }
         }
     }
@@ -3837,7 +3925,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                       packSharcRoughness(sharcRoughness);
     paths[tid] = p;
 
-    queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+    auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+    queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
 }
 
 static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
@@ -4183,7 +4272,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
             {
                 auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
                 float ignoredTransmittance;
-                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable,
+                if (!restirDiagnosticVisible(uniforms, diagnosticAccelerationStructure, diagnosticFunctionTable,
                                              selectedAtNeighbor, selectedAtNeighbor.origin, instances, materials,
                                              geometryEntries, vertexBuffer, indexBuffer, ignoredTransmittance))
                 {
@@ -4277,8 +4366,8 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                 auditWork(uniforms, WORK_RESTIR_VISIBILITY_CACHE_ORACLE_QUERIES);
                 float oracleTransmittance;
                 const bool oracleVisible = restirDiagnosticVisible(
-                    diagnosticAccelerationStructure, diagnosticFunctionTable, connection, shadowOrigin, instances,
-                    materials, geometryEntries, vertexBuffer, indexBuffer, oracleTransmittance);
+                    uniforms, diagnosticAccelerationStructure, diagnosticFunctionTable, connection, shadowOrigin,
+                    instances, materials, geometryEntries, vertexBuffer, indexBuffer, oracleTransmittance);
                 auditWork(uniforms, oracleVisible ? WORK_RESTIR_VISIBILITY_CACHE_VISIBLE_VISIBLE :
                                                     WORK_RESTIR_VISIBILITY_CACHE_VISIBLE_OCCLUDED);
             }
@@ -4896,7 +4985,8 @@ static inline bool shadowLightProxy(uint32_t instanceId,
 template <typename T, bool Inline>
 struct CutoutShadowWalk
 {
-    static bool run(typename T::structure as,
+    static bool run(constant Uniforms& uniforms,
+                    typename T::structure as,
                     ray shadowRay,
                     float motionTime,
                     float cutoff,
@@ -4920,6 +5010,8 @@ struct CutoutShadowWalk
         isect.accept_any_intersection(false);
         for (uint32_t crossing = 0u; crossing < kMaxCutoutCrossings; ++crossing)
         {
+            if (crossing != 0u)
+                auditWork(uniforms, WORK_ALPHA_TRAVERSAL_RESTARTS);
             const auto hit = T::trace(isect, probe, as, RAY_MASK_SHADOW, motionTime, functionTable);
             if (hit.type == intersection_type::none)
             {
@@ -4958,7 +5050,8 @@ struct CutoutShadowWalk
 template <typename T>
 struct CutoutShadowWalk<T, true>
 {
-    static bool run(typename T::structure as,
+    static bool run(constant Uniforms&,
+                    typename T::structure as,
                     ray shadowRay,
                     float,
                     float cutoff,
@@ -5012,7 +5105,8 @@ struct CutoutShadowWalk<T, true>
     }
 };
 
-static bool restirDiagnosticVisible(CurveStaticTraversal::structure accelerationStructure,
+static bool restirDiagnosticVisible(constant Uniforms& uniforms,
+                                    CurveStaticTraversal::structure accelerationStructure,
                                     CurveStaticTraversal::table functionTable,
                                     thread const LightConnection& connection,
                                     float3 shadowOrigin,
@@ -5046,8 +5140,8 @@ static bool restirDiagnosticVisible(CurveStaticTraversal::structure acceleration
     }
     float3 alphaTransmittance;
     const bool visible = CutoutShadowWalk<CurveStaticTraversal, false>::run(
-        accelerationStructure, shadowRay, 0.0f, 0.0f, instances, materials, geometryEntries, vertexBuffer, indexBuffer,
-        functionTable, alphaTransmittance);
+        uniforms, accelerationStructure, shadowRay, 0.0f, 0.0f, instances, materials, geometryEntries, vertexBuffer,
+        indexBuffer, functionTable, alphaTransmittance);
     transmittance = alphaTransmittance.x;
     return visible;
 }
@@ -5176,9 +5270,9 @@ static void shadowImpl(uint gid,
     // the tags allow it, a bounded restart otherwise. See the note there for why
     // this cannot be an any-hit intersection function on Metal 4.
     float3 transmittance;
-    if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(accelerationStructure, shadowRay, motionTime, sr.rrCutoff,
-                                                        instances, materials, geometryEntries, vertexBuffer,
-                                                        indexBuffer, functionTable, transmittance))
+    if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(uniforms, accelerationStructure, shadowRay, motionTime,
+                                                        sr.rrCutoff, instances, materials, geometryEntries,
+                                                        vertexBuffer, indexBuffer, functionTable, transmittance))
     {
         if (restirVisibilityUpdate)
             restirStoreFinalVisibility(uniforms, sr.pixelIndex, 0.0f);

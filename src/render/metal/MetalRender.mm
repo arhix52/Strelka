@@ -3317,6 +3317,13 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"records\":{}}},"
         "\"finalRestirVisibilityRays\":{},"
         "\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
+        "\"neeLedger\":{{\"eligibleHits\":{},\"deltaHits\":{},\"lightSamplerCalls\":{},"
+        "\"finiteLightInspections\":{},\"emissiveLightInspections\":{},\"environmentSamples\":{},"
+        "\"conditionalPdfEvaluations\":{},\"validCandidates\":{},"
+        "\"rejectedCandidates\":{{\"connection\":{},\"pdf\":{},\"cosine\":{},\"target\":{}}},"
+        "\"shadowAppends\":{},\"rejectedShadows\":{{\"normalization\":{},\"weight\":{},\"segment\":{}}},"
+        "\"environmentEvaluations\":{},\"extensionQueries\":{},\"pathContinuations\":{},"
+        "\"terminatedPaths\":{},\"queueAppends\":{},\"queueOverflows\":{},\"alphaRestarts\":{}}},"
         "\"kernelThreads\":{{\"generate\":{{\"active\":{},\"dispatched\":{}}},"
         "\"extend\":{{\"active\":{},\"dispatched\":{}}},\"shade\":{{\"active\":{},\"dispatched\":{}}},"
         "\"miss\":{{\"active\":{},\"dispatched\":{}}},\"shadow\":{{\"active\":{},\"dispatched\":{}}},"
@@ -3356,7 +3363,15 @@ std::string MetalRender::renderWorkAuditJson() const
         shortArray(WORK_RESTIR_TARGET_RATIO_HISTOGRAM_BASE, RESTIR_AUDIT_TARGET_RATIO_BINS), selectedLightDiversity,
         c[WORK_RESTIR_TEMPORAL_SAME_LIGHT], c[WORK_RESTIR_TEMPORAL_DUPLICATE_CURRENT], mappingInjective, candidateAudit,
         c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
-        c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
+        c[WORK_NEE_ELIGIBLE_HITS], c[WORK_NEE_DELTA_HITS], c[WORK_NEE_LIGHT_SAMPLER_CALLS],
+        c[WORK_NEE_FINITE_LIGHT_INSPECTIONS], c[WORK_NEE_EMISSIVE_LIGHT_INSPECTIONS], c[WORK_NEE_ENVIRONMENT_SAMPLES],
+        c[WORK_NEE_CONDITIONAL_PDF_EVALUATIONS], c[WORK_NEE_VALID_CANDIDATES], c[WORK_NEE_REJECT_CONNECTION],
+        c[WORK_NEE_REJECT_PDF], c[WORK_NEE_REJECT_COSINE], c[WORK_NEE_REJECT_TARGET], c[WORK_NEE_SHADOW_APPENDS],
+        c[WORK_NEE_SHADOW_REJECT_NORMALIZATION], c[WORK_NEE_SHADOW_REJECT_WEIGHT], c[WORK_NEE_SHADOW_REJECT_SEGMENT],
+        c[WORK_ENVIRONMENT_EVALUATIONS], c[WORK_EXTENSION_QUERIES], c[WORK_PATH_CONTINUATIONS],
+        shadeActive >= c[WORK_PATH_CONTINUATIONS] ? shadeActive - c[WORK_PATH_CONTINUATIONS] : 0u,
+        c[WORK_QUEUE_APPENDS], c[WORK_QUEUE_OVERFLOWS], c[WORK_ALPHA_TRAVERSAL_RESTARTS], c[WORK_PRIMARY_RAYS],
+        roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,
         dispatched(WORK_MISS_ITEMS_BASE), shadowActive, dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
         roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_FINAL_ITEMS],

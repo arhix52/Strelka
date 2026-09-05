@@ -806,6 +806,7 @@ int HeadlessApp::run()
     const bool localManyLayout = m_config.auditMotionSequence == 3u;
     const bool balancedLayout = m_config.auditMotionSequence == 4u;
     const bool cameraOnlyLayout = m_config.auditMotionSequence == 5u;
+    const bool staticLightLayout = m_config.auditMotionSequence == 6u;
     auto auditLightBase = [&](uint32_t i) {
         if (!localManyLayout)
             return glm::vec3((float(i % 32u) - 15.5f) * 0.08f, 0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f);
@@ -859,13 +860,16 @@ int HeadlessApp::run()
     const auto startTime = high_resolution_clock::now();
     bool announced = false;
     const bool moveAuditNode = m_config.auditMovingNode && *m_config.auditMovingNode < m_scene->getNodes().size();
-    if (!auditMovingLightIds.empty() || moveAuditNode || !m_config.auditFramePrefix.empty())
+    if (!auditMovingLightIds.empty() || moveAuditNode || !m_config.auditFramePrefix.empty() ||
+        (staticLightLayout && m_config.auditFrames != 0u))
     {
         // Build scene and canonical analytic-light BLAS before counters start.
         m_render->renderSync(outputBuf.get());
         const glm::vec3 auditCameraPosition = m_scene->getCamera(0).position;
         const Scene::Node auditNode = moveAuditNode ? m_scene->getNodes()[*m_config.auditMovingNode] : Scene::Node{};
         auto moveAuditLights = [&](uint32_t frame) {
+            if (staticLightLayout)
+                return;
             for (uint32_t i = 0; i < auditMovingLightIds.size(); ++i)
             {
                 if (cameraOnlyLayout)
@@ -914,6 +918,8 @@ int HeadlessApp::run()
         }
         std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
         const uint32_t frames = std::max(m_config.auditFrames, 1u);
+        std::vector<double> auditGpuTimes;
+        auditGpuTimes.reserve(frames);
         for (uint32_t frame = 0; frame < frames; ++frame)
         {
             moveAuditLights(frame + 8u);
@@ -931,8 +937,12 @@ int HeadlessApp::run()
                 std::cout << fmt::format("\nSTRELKA_AUDIT_FRAME {} GPU={:.3f} ms spp={}\n", frame + 8u, frameGpuMs,
                                          m_sharedCtx->mSubframeIndex);
             }
+            auditGpuTimes.push_back(frameGpuMs);
             printProgress(frame + 1u, frames, frameGpuMs);
         }
+        std::ranges::sort(auditGpuTimes);
+        std::cout << fmt::format("\nSTRELKA_AUDIT_GPU_MEDIAN {:.3f} ms frames={}\n",
+                                 auditGpuTimes[auditGpuTimes.size() / 2u], auditGpuTimes.size());
         while (m_config.auditFreeze && m_config.auditFramePrefix.empty() && m_sharedCtx->mSubframeIndex < m_config.spp)
         {
             m_render->renderSync(outputBuf.get());

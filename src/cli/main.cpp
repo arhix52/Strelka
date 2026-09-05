@@ -67,7 +67,7 @@ int main(int argc, const char* argv[])
         ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-frames", "Audited frames for moving-light harness", cxxopts::value<uint32_t>())
         ("audit-moving-lights", "Add moving analytic lights for render-work audit", cxxopts::value<uint32_t>())
-        ("audit-motion-sequence", "Moving-light sequence: 0 smooth, 1 camera/abrupt, 2 add/delete, 3 local-many, 4 balanced",
+        ("audit-motion-sequence", "Audit sequence: 0 smooth, 1 camera/abrupt, 2 add/delete, 3 local-many, 4 balanced, 6 static",
          cxxopts::value<uint32_t>())
         ("audit-freeze", "Refine final moving-light frame to --spp", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-moving-node", "Move one emissive scene node", cxxopts::value<uint32_t>())
@@ -258,7 +258,7 @@ int main(int argc, const char* argv[])
     if (result.count("audit-moving-lights"))
         cfg.auditMovingLights = std::min(result["audit-moving-lights"].as<uint32_t>(), 4096u);
     if (result.count("audit-motion-sequence"))
-        cfg.auditMotionSequence = std::min(result["audit-motion-sequence"].as<uint32_t>(), 4u);
+        cfg.auditMotionSequence = std::min(result["audit-motion-sequence"].as<uint32_t>(), 6u);
     if (result.count("audit-freeze"))
         cfg.auditFreeze = result["audit-freeze"].as<bool>();
     if (result.count("audit-moving-node"))
@@ -273,7 +273,7 @@ int main(int argc, const char* argv[])
     }
 #endif
     if (cfg.auditFrames != 0u && cfg.auditMovingLights == 0u && !cfg.auditMovingNode && !cfg.auditRenderWork &&
-        cfg.auditFramePrefix.empty())
+        cfg.auditFramePrefix.empty() && cfg.auditMotionSequence != 6u)
     {
         STRELKA_FATAL("--audit-frames without moving lights requires --audit-render-work");
         return 1;

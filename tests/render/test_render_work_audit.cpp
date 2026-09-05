@@ -94,3 +94,27 @@ TEST_CASE("render-work moving lights update once per frame")
     sample.maxTlasRefitsPerFrame = 2;
     CHECK_FALSE(oka::metal::movingLightFrameWorkIsBounded(sample));
 }
+
+TEST_CASE("render-work NEE rays and candidates are bounded")
+{
+    RenderWorkInvariantSample sample{ .primaryRays = 320ull * 240ull,
+                                      .extendRays = 120000,
+                                      .extensionQueries = 120000,
+                                      .lightSamplerCalls = 50000,
+                                      .validNeeCandidates = 40000,
+                                      .shadowQueries = 30000,
+                                      .finiteLightInspections = 100000 };
+    CHECK(oka::metal::primaryRayCountMatches(sample, 320, 240, 1));
+    CHECK(oka::metal::extensionQueriesMatchSegments(sample));
+    CHECK(oka::metal::neeWorkIsBounded(sample));
+    CHECK(oka::metal::finiteLightInspectionsAreBounded(sample, 2));
+
+    ++sample.extensionQueries;
+    CHECK_FALSE(oka::metal::extensionQueriesMatchSegments(sample));
+    sample.extensionQueries--;
+    sample.shadowQueries = sample.validNeeCandidates + 1;
+    CHECK_FALSE(oka::metal::neeWorkIsBounded(sample));
+    sample.shadowQueries = 30000;
+    sample.queueOverflows = 1;
+    CHECK_FALSE(oka::metal::neeWorkIsBounded(sample));
+}

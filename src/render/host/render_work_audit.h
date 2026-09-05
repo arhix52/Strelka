@@ -28,6 +28,12 @@ struct RenderWorkInvariantSample
     uint64_t maxLightUploadsPerFrame = 0;
     uint64_t maxTemporalMappingsPerFrame = 0;
     uint64_t primaryDispatches = 0;
+    uint64_t extensionQueries = 0;
+    uint64_t lightSamplerCalls = 0;
+    uint64_t validNeeCandidates = 0;
+    uint64_t shadowQueries = 0;
+    uint64_t finiteLightInspections = 0;
+    uint64_t queueOverflows = 0;
 };
 
 struct CommandBufferAuditSample
@@ -93,6 +99,27 @@ inline bool movingLightFrameWorkIsBounded(const RenderWorkInvariantSample& sampl
 {
     return sample.maxTlasRefitsPerFrame <= 1u && sample.maxLightUploadsPerFrame <= 1u &&
            sample.maxTemporalMappingsPerFrame <= 1u && sample.primaryDispatches == sample.frames;
+}
+
+inline bool primaryRayCountMatches(const RenderWorkInvariantSample& sample, uint64_t width, uint64_t height, uint64_t spp)
+{
+    return sample.primaryRays == width * height * spp;
+}
+
+inline bool extensionQueriesMatchSegments(const RenderWorkInvariantSample& sample)
+{
+    return sample.extensionQueries == sample.extendRays;
+}
+
+inline bool neeWorkIsBounded(const RenderWorkInvariantSample& sample)
+{
+    return sample.shadowQueries <= sample.validNeeCandidates && sample.validNeeCandidates <= sample.lightSamplerCalls &&
+           sample.queueOverflows == 0u;
+}
+
+inline bool finiteLightInspectionsAreBounded(const RenderWorkInvariantSample& sample, uint64_t perSampleLimit)
+{
+    return sample.finiteLightInspections <= sample.lightSamplerCalls * perSampleLimit;
 }
 
 } // namespace oka::metal
