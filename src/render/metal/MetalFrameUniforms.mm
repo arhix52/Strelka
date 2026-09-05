@@ -171,6 +171,11 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->restirDebugMode = settings.getAs<uint32_t>("render/pt/restirDebugMode");
     pUniformData->restirBiasCorrection = std::min(settings.getAs<uint32_t>("render/pt/restirBiasCorrection"), 2u);
     pUniformData->restirInitialVisibility = std::min(settings.getAs<uint32_t>("render/pt/restirInitialVisibility"), 1u);
+    pUniformData->restirFinalVisibilityReuse =
+        std::min(settings.getAs<uint32_t>("render/pt/restirFinalVisibilityReuse"), 1u);
+    pUniformData->restirFinalVisibilityMaxAge =
+        std::min(settings.getAs<uint32_t>("render/pt/restirFinalVisibilityMaxAge"), 255u);
+    pUniformData->restirVisibilityRevision = in.restirVisibilityRevision;
 #ifndef NDEBUG
     pUniformData->restirProposalCollision = in.lights ? in.lights->proposalCollision() : 0.0f;
     pUniformData->restirProposalEntropy = in.lights ? in.lights->proposalEntropy() : 0.0f;
@@ -505,6 +510,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     settingsChanged |= (mPrevSettings.restirDebugMode != pUniformData->restirDebugMode);
     settingsChanged |= (mPrevSettings.restirBiasCorrection != pUniformData->restirBiasCorrection);
     settingsChanged |= (mPrevSettings.restirInitialVisibility != pUniformData->restirInitialVisibility);
+    settingsChanged |= (mPrevSettings.restirFinalVisibilityReuse != pUniformData->restirFinalVisibilityReuse);
+    settingsChanged |= (mPrevSettings.restirFinalVisibilityMaxAge != pUniformData->restirFinalVisibilityMaxAge);
 
     mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
     mPrevSettings.samplerType = samplerType;
@@ -538,6 +545,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     mPrevSettings.restirDebugMode = pUniformData->restirDebugMode;
     mPrevSettings.restirBiasCorrection = pUniformData->restirBiasCorrection;
     mPrevSettings.restirInitialVisibility = pUniformData->restirInitialVisibility;
+    mPrevSettings.restirFinalVisibilityReuse = pUniformData->restirFinalVisibilityReuse;
+    mPrevSettings.restirFinalVisibilityMaxAge = pUniformData->restirFinalVisibilityMaxAge;
 
     /* settingsChanged reported via FillResult; orchestrator resets subframe/history */
 

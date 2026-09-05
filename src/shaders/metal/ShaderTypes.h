@@ -312,6 +312,10 @@ struct Uniforms
     uint32_t restirHistoryValid;
     uint32_t restirBiasCorrection;
     uint32_t restirInitialVisibility;
+    uint32_t restirFinalVisibilityReuse;
+    uint32_t restirFinalVisibilityMaxAge;
+    uint32_t restirVisibilityRevision;
+    uint32_t restirVisibilityPadding;
     float restirProposalCollision;
     float restirProposalEntropy;
 
@@ -420,7 +424,7 @@ struct Uniforms
     uint32_t restirEnvironmentHistoryValid;
     uint32_t restirMeshHistoryValid;
 };
-static_assert(sizeof(Uniforms) == 1008, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1024, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -469,7 +473,17 @@ enum RenderWorkCounter : uint32_t
     WORK_RESTIR_INITIAL_VISIBILITY_QUERIES = 138,
     WORK_RESTIR_TEMPORAL_SAME_LIGHT = 139,
     WORK_RESTIR_INITIAL_VISIBILITY_REUSED = 140,
-    WORK_COUNTER_COUNT = 141,
+    WORK_RESTIR_VISIBILITY_CACHE_ATTEMPTS = 141,
+    WORK_RESTIR_VISIBILITY_CACHE_HITS = 142,
+    WORK_RESTIR_VISIBILITY_CACHE_REJECT_EMPTY = 143,
+    WORK_RESTIR_VISIBILITY_CACHE_REJECT_AGE = 144,
+    WORK_RESTIR_VISIBILITY_CACHE_REJECT_REVISION = 145,
+    WORK_RESTIR_VISIBILITY_CACHE_REJECT_RECEIVER = 146,
+    WORK_RESTIR_VISIBILITY_CACHE_REJECT_LIGHT = 147,
+    WORK_RESTIR_VISIBILITY_CACHE_ORACLE_QUERIES = 148,
+    WORK_RESTIR_VISIBILITY_CACHE_VISIBLE_VISIBLE = 149,
+    WORK_RESTIR_VISIBILITY_CACHE_VISIBLE_OCCLUDED = 150,
+    WORK_COUNTER_COUNT = 151,
     WORK_BOUNCE_SLOTS = 16
 };
 
@@ -478,7 +492,8 @@ enum RenderWorkCounter : uint32_t
 #define RESTIR_AUDIT_TARGET_RATIO_BINS 9u
 #define RESTIR_AUDIT_LIGHT_ID_WORDS 128u
 #define RESTIR_AUDIT_HISTORY_BIT 0x80000000u
-#define RESTIR_AUDIT_PATH_INDEX_MASK 0x7fffffffu
+#define RESTIR_VISIBILITY_UPDATE_BIT 0x40000000u
+#define RESTIR_AUDIT_PATH_INDEX_MASK 0x3fffffffu
 
 #define RESTIR_DIAGNOSTIC_PIXEL_COUNT 32u
 #define RESTIR_DIAGNOSTIC_SOURCE_COUNT 3u
@@ -837,8 +852,9 @@ struct RestirReservoir
 {
     RestirLightSample sample;
     RestirReservoirState state;
+    RestirVisibilityCache visibility;
 };
-static_assert(sizeof(RestirReservoir) == 32, "ReSTIR reservoir ABI changed");
+static_assert(sizeof(RestirReservoir) == 40, "ReSTIR reservoir ABI changed");
 
 struct RestirSurfaceHistory
 {
@@ -880,6 +896,7 @@ static_assert(sizeof(RestirShadingPoint) == 104, "ReSTIR shading point ABI chang
 #define RESTIR_TARGET_HAS_DIFFUSE_TRANSMISSION (1u << 27)
 #define RESTIR_TARGET_MATERIAL_SHIFT 24u
 #define RESTIR_TARGET_MATERIAL_MASK 0x7u
+#define RESTIR_TARGET_GEOMETRY_MASK 0x00ffffffu
 
 struct RestirTargetSurface
 {

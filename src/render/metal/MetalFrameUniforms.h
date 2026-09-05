@@ -69,6 +69,7 @@ public:
         bool resetRestirHistory = false;
         bool restirEnvironmentHistoryValid = true;
         bool restirMeshHistoryValid = true;
+        uint32_t restirVisibilityRevision = 0;
         bool hasPrevFramePose = false;
         uint32_t previousNumEmissiveMeshes = 0;
         float previousMeshLightSelectionPdf = 0.0f;
@@ -193,6 +194,8 @@ private:
         uint32_t restirDebugMode = 0;
         uint32_t restirBiasCorrection = 0;
         uint32_t restirInitialVisibility = 0;
+        uint32_t restirFinalVisibilityReuse = 0;
+        uint32_t restirFinalVisibilityMaxAge = 0;
     };
 
     MTL::Device* mDevice = nullptr;

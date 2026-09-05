@@ -245,6 +245,14 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
             throw std::runtime_error("restir_initial_visibility must be 'off' or 'on'");
         cfg.restirInitialVisibility = *v == "on" ? 1u : 0u;
     }
+    if (auto v = tbl["render"]["restir_final_visibility_reuse"].value<std::string>())
+    {
+        if (*v != "off" && *v != "conservative")
+            throw std::runtime_error("restir_final_visibility_reuse must be 'off' or 'conservative'");
+        cfg.restirFinalVisibilityReuse = *v == "conservative" ? 1u : 0u;
+    }
+    if (auto v = tbl["render"]["restir_final_visibility_max_age"].value<int64_t>())
+        cfg.restirFinalVisibilityMaxAge = (uint32_t)std::clamp<int64_t>(*v, 0, 255);
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
         cfg.estimatorMode = (uint32_t)*v;
     if (auto v = tbl["render"]["split_aov"].value<bool>())
@@ -450,6 +458,8 @@ void HeadlessApp::populateSettings()
 
     // Only keys MetalRender reads (plus per-animation state/time).
     seedCommonRenderSettings(*m_settings);
+    if (!m_config.auditFramePrefix.empty() && m_config.auditMovingLights == 0 && !m_config.auditMovingNode)
+        m_settings->setAs<bool>("render/pt/enableAcc", m_config.auditFreeze);
     m_settings->setAs<uint32_t>("render/width", m_config.width);
     m_settings->setAs<uint32_t>("render/height", m_config.height);
     m_settings->setAs<uint32_t>("render/pt/depth", m_config.maxDepth);
@@ -484,6 +494,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/restirDebugMode", m_config.restirDebugMode);
     m_settings->setAs<uint32_t>("render/pt/restirBiasCorrection", m_config.restirBiasCorrection);
     m_settings->setAs<uint32_t>("render/pt/restirInitialVisibility", m_config.restirInitialVisibility);
+    m_settings->setAs<uint32_t>("render/pt/restirFinalVisibilityReuse", m_config.restirFinalVisibilityReuse);
+    m_settings->setAs<uint32_t>("render/pt/restirFinalVisibilityMaxAge", m_config.restirFinalVisibilityMaxAge);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);
@@ -846,7 +858,7 @@ int HeadlessApp::run()
     const auto startTime = high_resolution_clock::now();
     bool announced = false;
     const bool moveAuditNode = m_config.auditMovingNode && *m_config.auditMovingNode < m_scene->getNodes().size();
-    if (!auditMovingLightIds.empty() || moveAuditNode)
+    if (!auditMovingLightIds.empty() || moveAuditNode || !m_config.auditFramePrefix.empty())
     {
         // Build scene and canonical analytic-light BLAS before counters start.
         m_render->renderSync(outputBuf.get());

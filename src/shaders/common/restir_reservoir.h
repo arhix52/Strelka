@@ -50,6 +50,8 @@ struct RestirReservoirState
 #define RESTIR_RESERVOIR_VISIBILITY_MASK (RESTIR_RESERVOIR_VISIBILITY_BITS << RESTIR_RESERVOIR_VISIBILITY_SHIFT)
 #define RESTIR_RESERVOIR_INITIAL_VISIBILITY_MASK (RESTIR_RESERVOIR_INITIAL_VISIBLE | RESTIR_RESERVOIR_VISIBILITY_MASK)
 #define RESTIR_RESERVOIR_FLAGS_MASK (~RESTIR_RESERVOIR_AGE_MASK)
+#define RESTIR_VISIBILITY_LIGHT_KEY_MASK 0x00ffffffu
+#define RESTIR_VISIBILITY_AGE_SHIFT 24u
 #define RESTIR_RNG_INITIAL_SALT 0x51633e2du
 #define RESTIR_RNG_TEMPORAL_SALT 0x68bc21ebu
 #define RESTIR_RNG_SPATIAL_SALT 0x3c6ef372u
@@ -87,6 +89,37 @@ DEVICE_FUNC float restirReservoirInitialVisibility(const THREAD_REF RestirReserv
     const unsigned int encoded =
         (reservoir.ageAndFlags & RESTIR_RESERVOIR_VISIBILITY_MASK) >> RESTIR_RESERVOIR_VISIBILITY_SHIFT;
     return float(encoded) / float(RESTIR_RESERVOIR_VISIBILITY_BITS);
+}
+
+struct RestirVisibilityCache
+{
+    unsigned int receiverKey;
+    unsigned int lightKeyAndAge;
+};
+
+DEVICE_FUNC unsigned int restirVisibilityAge(const THREAD_REF RestirVisibilityCache& cache)
+{
+    return cache.lightKeyAndAge >> RESTIR_VISIBILITY_AGE_SHIFT;
+}
+
+DEVICE_FUNC void restirVisibilityStore(THREAD_REF RestirVisibilityCache& cache,
+                                       unsigned int receiverKey,
+                                       unsigned int lightKey,
+                                       unsigned int age)
+{
+    cache.receiverKey = receiverKey;
+    cache.lightKeyAndAge =
+        (lightKey & RESTIR_VISIBILITY_LIGHT_KEY_MASK) | ((age < 255u ? age : 255u) << RESTIR_VISIBILITY_AGE_SHIFT);
+}
+
+DEVICE_FUNC bool restirVisibilityMatches(const THREAD_REF RestirVisibilityCache& cache,
+                                         unsigned int receiverKey,
+                                         unsigned int lightKey,
+                                         unsigned int maxAge)
+{
+    return cache.receiverKey == receiverKey &&
+           (cache.lightKeyAndAge & RESTIR_VISIBILITY_LIGHT_KEY_MASK) == (lightKey & RESTIR_VISIBILITY_LIGHT_KEY_MASK) &&
+           restirVisibilityAge(cache) <= maxAge;
 }
 
 DEVICE_FUNC bool restirReservoirUpdate(THREAD_REF RestirReservoirState& reservoir,

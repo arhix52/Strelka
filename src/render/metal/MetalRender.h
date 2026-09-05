@@ -276,6 +276,7 @@ private:
     bool mResetRestirHistory = true;
     bool mRestirEnvironmentHistoryValid = true;
     bool mRestirMeshHistoryValid = true;
+    uint32_t mRestirVisibilityRevision = 1;
     uint32_t mPreviousNumEmissiveMeshes = 0;
     float mPreviousMeshLightSelectionPdf = 0.0f;
     float mPreviousEnvSelectionPdf = 0.0f;

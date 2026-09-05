@@ -885,13 +885,13 @@ void MetalRender::init()
     static_assert(offsetof(::Vertex, uv) == 20);
     static_assert(offsetof(::Vertex, uv1) == 24);
     static_assert(offsetof(::Vertex, color) == 28);
-    static_assert(offsetof(Uniforms, openpbrParams) == 816);
-    static_assert(offsetof(Uniforms, openpbrTextures) == 824);
-    static_assert(offsetof(Uniforms, guideRays) == 832);
-    static_assert(offsetof(Uniforms, emissiveMeshes) == 840);
-    static_assert(offsetof(Uniforms, emissiveTriangles) == 848);
+    static_assert(offsetof(Uniforms, openpbrParams) == 832);
+    static_assert(offsetof(Uniforms, openpbrTextures) == 840);
+    static_assert(offsetof(Uniforms, guideRays) == 848);
+    static_assert(offsetof(Uniforms, emissiveMeshes) == 856);
+    static_assert(offsetof(Uniforms, emissiveTriangles) == 864);
     static_assert(offsetof(Material, baseColorTexture) == 256);
-    static_assert(sizeof(Uniforms) == 1008, "Uniforms host/Metal ABI changed");
+    static_assert(sizeof(Uniforms) == 1024, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -1780,6 +1780,7 @@ void MetalRender::render(Buffer* output)
     fin.resetRestirHistory = mResetRestirHistory;
     fin.restirEnvironmentHistoryValid = mRestirEnvironmentHistoryValid;
     fin.restirMeshHistoryValid = mRestirMeshHistoryValid;
+    fin.restirVisibilityRevision = mRestirVisibilityRevision;
     fin.previousNumEmissiveMeshes = mPreviousNumEmissiveMeshes;
     fin.previousMeshLightSelectionPdf = mPreviousMeshLightSelectionPdf;
     fin.previousEnvSelectionPdf = mPreviousEnvSelectionPdf;
@@ -1942,14 +1943,14 @@ void MetalRender::render(Buffer* output)
             featureIn.hasCurves = mGeometry.hasCurves();
             featureIn.hasOpenPBR = mMaterials.hasOpenPBRMaterials();
             featureIn.auditRenderWork = auditRenderWork;
-            featureIn.restirRayTracedDiagnostic =
-                pUniformData->restirBiasCorrection == 2u || pUniformData->restirInitialVisibility != 0u;
+            featureIn.restirRayTracedDiagnostic = pUniformData->restirBiasCorrection == 2u ||
+                                                  pUniformData->restirInitialVisibility != 0u ||
+                                                  (auditRenderWork && pUniformData->restirFinalVisibilityReuse != 0u);
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
 
-            if (featureIn.restirRayTracedDiagnostic &&
-                (featureIn.enableMotionBlur || featureIn.motionBlasBuilt || featureIn.hasCurves))
+            if (featureIn.restirRayTracedDiagnostic && (featureIn.enableMotionBlur || featureIn.motionBlasBuilt))
             {
-                STRELKA_FATAL("ReSTIR visibility diagnostics support static triangle scenes only");
+                STRELKA_FATAL("ReSTIR visibility diagnostics do not support motion-blurred geometry");
                 mRenderBusy.store(false, std::memory_order_release);
                 pPool->release();
                 return;
@@ -3295,6 +3296,9 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
         "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},\"restirDiagnosticQueries\":{},"
         "\"restirInitialVisibilityQueries\":{},\"restirInitialVisibilityReused\":{},"
+        "\"restirFinalVisibilityCache\":{{\"attempts\":{},\"hits\":{},"
+        "\"rejects\":{{\"empty\":{},\"age\":{},\"revision\":{},\"receiver\":{},\"light\":{}}},"
+        "\"oracleQueries\":{},\"visibleVisible\":{},\"visibleOccluded\":{}}},"
         "\"restirEffectiveM\":{:.6f},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
         "\"temporalRejects\":{{\"surface\":{},\"unmapped\":{},\"type\":{},\"environment\":{},\"mesh\":{}}},"
@@ -3326,6 +3330,11 @@ std::string MetalRender::renderWorkAuditJson() const
         c[WORK_INTERSECTION_QUERIES], c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES],
         c[WORK_RESTIR_CANDIDATE_QUERIES], c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_DIAGNOSTIC_QUERIES],
         c[WORK_RESTIR_INITIAL_VISIBILITY_QUERIES], c[WORK_RESTIR_INITIAL_VISIBILITY_REUSED],
+        c[WORK_RESTIR_VISIBILITY_CACHE_ATTEMPTS], c[WORK_RESTIR_VISIBILITY_CACHE_HITS],
+        c[WORK_RESTIR_VISIBILITY_CACHE_REJECT_EMPTY], c[WORK_RESTIR_VISIBILITY_CACHE_REJECT_AGE],
+        c[WORK_RESTIR_VISIBILITY_CACHE_REJECT_REVISION], c[WORK_RESTIR_VISIBILITY_CACHE_REJECT_RECEIVER],
+        c[WORK_RESTIR_VISIBILITY_CACHE_REJECT_LIGHT], c[WORK_RESTIR_VISIBILITY_CACHE_ORACLE_QUERIES],
+        c[WORK_RESTIR_VISIBILITY_CACHE_VISIBLE_VISIBLE], c[WORK_RESTIR_VISIBILITY_CACHE_VISIBLE_OCCLUDED],
         c[WORK_RESTIR_FINAL_ITEMS] != 0u ?
             static_cast<double>(c[WORK_RESTIR_EFFECTIVE_M]) / static_cast<double>(c[WORK_RESTIR_FINAL_ITEMS]) :
             0.0,
@@ -3387,9 +3396,16 @@ void MetalRender::handleSceneChanges()
     const bool responsiveSharc = getSettings()->getAs<bool>("render/pt/sharcMetalResponsive");
     const bool geometryChanged = any(changes & ChangeBits::Geometry);
     const bool materialsChanged = any(changes & ChangeBits::Materials);
+    if (materialsChanged || geometryChanged ||
+        (any(changes & ChangeBits::Transforms) && !any(changes & ChangeBits::Lights)))
+    {
+        ++mRestirVisibilityRevision;
+    }
     if (any(changes & ChangeBits::Lights))
     {
         uploadLightBuffer();
+        if (mLights.previousCount() != mLights.currentCount())
+            ++mRestirVisibilityRevision;
         needReset = true;
         needSharcReset = !responsiveSharc;
     }

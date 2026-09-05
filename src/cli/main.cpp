@@ -60,6 +60,9 @@ int main(int argc, const char* argv[])
          cxxopts::value<std::string>())
         ("restir-initial-visibility", "ReSTIR selected-initial visibility: off, on",
          cxxopts::value<std::string>())
+        ("restir-final-visibility-reuse", "ReSTIR final visibility reuse: off, conservative",
+         cxxopts::value<std::string>())
+        ("restir-final-visibility-max-age", "Maximum cached final-visibility age", cxxopts::value<uint32_t>())
         ("profile-stages", "Report per-stage GPU timings",   cxxopts::value<bool>()->implicit_value("true"))
         ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-frames", "Audited frames for moving-light harness", cxxopts::value<uint32_t>())
@@ -230,6 +233,18 @@ int main(int argc, const char* argv[])
         }
         cfg.restirInitialVisibility = mode == "on" ? 1u : 0u;
     }
+    if (result.count("restir-final-visibility-reuse"))
+    {
+        const std::string mode = result["restir-final-visibility-reuse"].as<std::string>();
+        if (mode != "off" && mode != "conservative")
+        {
+            STRELKA_FATAL("--restir-final-visibility-reuse must be off or conservative");
+            return 1;
+        }
+        cfg.restirFinalVisibilityReuse = mode == "conservative" ? 1u : 0u;
+    }
+    if (result.count("restir-final-visibility-max-age"))
+        cfg.restirFinalVisibilityMaxAge = std::min(result["restir-final-visibility-max-age"].as<uint32_t>(), 255u);
     if (result.count("profile-stages"))
     {
         cfg.profileStages = result["profile-stages"].as<bool>();

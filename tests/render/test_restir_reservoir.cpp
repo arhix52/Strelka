@@ -207,6 +207,29 @@ TEST_CASE("initial visibility cache follows exact selected sample")
     CHECK((reservoir.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) == 0u);
 }
 
+TEST_CASE("final visibility cache requires receiver light and bounded age")
+{
+    RestirVisibilityCache cache{};
+    restirVisibilityStore(cache, 0x12003456u, 0x00654321u, 2u);
+    CHECK(restirVisibilityAge(cache) == 2u);
+    CHECK(restirVisibilityMatches(cache, 0x12003456u, 0x00654321u, 2u));
+    CHECK_FALSE(restirVisibilityMatches(cache, 0x12003457u, 0x00654321u, 2u));
+    CHECK_FALSE(restirVisibilityMatches(cache, 0x12003456u, 0x00654320u, 2u));
+    CHECK_FALSE(restirVisibilityMatches(cache, 0x12003456u, 0x00654321u, 1u));
+}
+
+TEST_CASE("selected reservoir carries only winning visibility")
+{
+    RestirReservoirState current{ 1.0f, 1.0f, 1u, RESTIR_RESERVOIR_VALID | RESTIR_RESERVOIR_INITIAL_VISIBLE };
+    RestirVisibilityCache cache{};
+    restirVisibilityStore(cache, 7u, 9u, 0u);
+    CHECK(restirReservoirUpdate(current, 10.0f, 1.0f, 1u, 0.0f));
+    CHECK((current.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) == 0u);
+    restirVisibilityStore(cache, 11u, 13u, 1u);
+    restirReservoirStoreInitialVisibility(current, 1.0f);
+    CHECK(restirVisibilityMatches(cache, 11u, 13u, 1u));
+}
+
 TEST_CASE("ray-traced normalization removes an occluded source from BASIC support")
 {
     // RTXDI SpatialResampling.hlsli, BASIC/RAY_TRACED normalization:

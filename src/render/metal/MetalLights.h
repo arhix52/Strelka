@@ -60,6 +60,10 @@ public:
     {
         return mPendingTemporalMapping ? mPreviousLightCount : mLightCount;
     }
+    uint32_t currentCount() const
+    {
+        return mLightCount;
+    }
     uint64_t previousToCurrentAddress() const
     {
         return mPendingTemporalMapping && mTemporalMappingBuffer ? mTemporalMappingBuffer->gpuAddress() : 0u;
