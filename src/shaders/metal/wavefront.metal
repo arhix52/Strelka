@@ -140,6 +140,37 @@ static inline void auditWork(constant Uniforms& uniforms, uint32_t counter, uint
     }
 }
 
+static inline device RestirDiagnosticRecord* restirDiagnosticRecord(constant Uniforms& uniforms, uint32_t pixelIndex)
+{
+    if (!SPEC_RENDER_WORK_AUDIT || uniforms.renderWorkCounters == nullptr)
+    {
+        return nullptr;
+    }
+    device uint32_t* words = (device uint32_t*)uniforms.renderWorkCounters;
+    device uint32_t* pixels = words + WORK_COUNTER_COUNT;
+    device RestirDiagnosticRecord* records = (device RestirDiagnosticRecord*)(pixels + RESTIR_DIAGNOSTIC_PIXEL_COUNT);
+    for (uint32_t i = 0u; i < RESTIR_DIAGNOSTIC_PIXEL_COUNT; ++i)
+    {
+        if (pixels[i] == pixelIndex)
+        {
+            return &records[i];
+        }
+    }
+    return nullptr;
+}
+
+static inline void restirDiagnosticVisibility(constant Uniforms& uniforms, uint32_t pixelIndex, float3 contribution)
+{
+    device RestirDiagnosticRecord* record = restirDiagnosticRecord(uniforms, pixelIndex);
+    if (record != nullptr)
+    {
+        record->finalVisibility = 1u;
+        record->contribution[0] = contribution.x;
+        record->contribution[1] = contribution.y;
+        record->contribution[2] = contribution.z;
+    }
+}
+
 // Reserve a run of output slots for the active lanes of one simdgroup. Every
 // lane that reaches a call site belongs in that queue -- the others already
 // returned or took the other branch, so they are inactive and the simdgroup
@@ -1739,8 +1770,7 @@ static bool restirSurfaceHistoryCompatible(thread const RestirSurfaceHistory& cu
 
 static bool restirCanStoreDirectTarget(thread const SurfaceInteraction& si, bool isFibre, bool isOpenPBR)
 {
-    if (isFibre || isOpenPBR || si.material_type == MATERIAL_TYPE_HAIR ||
-        any(si.shading_normal != si.geometry_normal))
+    if (isFibre || isOpenPBR || si.material_type == MATERIAL_TYPE_HAIR || any(si.shading_normal != si.geometry_normal))
     {
         return false;
     }
@@ -1783,6 +1813,15 @@ static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
                                        thread OpenPBR_PreparedBsdf& openpbrPrepared,
                                        thread float& curveRadius);
 
+static bool restirDiagnosticVisible(StaticTraversal::structure accelerationStructure,
+                                    StaticTraversal::table functionTable,
+                                    thread const LightConnection& connection,
+                                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                    device const Material* materials,
+                                    device const GeometryEntry* geometryEntries,
+                                    device const char* vertexBuffer,
+                                    device const uint32_t* indexBuffer);
+
 kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            constant Uniforms& uniforms [[buffer(0)]],
                            constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
@@ -1812,9 +1851,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            // equal to the current pose whenever motion blur is off.
                            device char* sharcPassBuffer0 [[buffer(23)]],
                            device const char* sharcPassBuffer1 [[buffer(24)]],
-                           device SharcHashEntry* sharcHashEntries [[buffer(25)]],
-                           // Curves are rebuilt because primitive_data is local to the intersection kernel.
-                           device const packed_float3* curvePoints [[buffer(26)]],
+                           StaticTraversal::structure diagnosticAccelerationStructure [[buffer(25)]],
+                           StaticTraversal::table diagnosticFunctionTable [[buffer(26)]],
                            device const uint32_t* curveSegments [[buffer(27)]],
                            // Two counters for the ways the nested-dielectric stack loses a path; see
                            // ShaderTypes.h. Written only when one of them has already gone wrong.
@@ -1828,6 +1866,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         return;
     }
     const uint32_t tid = queue[gid];
+    device SharcHashEntry* sharcHashEntries = (device SharcHashEntry*)uniforms.sharcHashData;
+    device const packed_float3* curvePoints = (device const packed_float3*)uniforms.curvePointData;
     device const char* prevFrameVertexBuffer = sharcPassBuffer0;
     device const MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances =
         (device const MTLIndirectAccelerationStructureInstanceDescriptor*)sharcPassBuffer1;
@@ -3129,17 +3169,22 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     RestirReservoir previousReservoir = previousReservoirs[previousIndex];
                     const RestirSurfaceHistory oldSurface = previousHistory[previousIndex];
                     const uint32_t age = previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
-                    if ((previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u &&
-                        previousReservoir.state.M != 0u && age < uniforms.reservoirMaxAge &&
+                    const bool previousValid = (previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u;
+                    if (previousReservoir.state.M != 0u && (!previousValid || age < uniforms.reservoirMaxAge) &&
                         restirSurfaceHistoryCompatible(surface, oldSurface))
                     {
                         restirReservoirLimitHistoryM(
                             previousReservoir.state, reservoir.state.M, max(uniforms.reservoirMaxAge, 1u));
-                        const LightConnection previousConnection = reconnectRestirSample(
-                            uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
-                            motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);
-                        const RestirEvaluation previousEvaluation = evaluateRestirConnection(
-                            previousConnection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+                        RestirEvaluation previousEvaluation = {};
+                        if (previousValid)
+                        {
+                            const LightConnection previousConnection = reconnectRestirSample(
+                                uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
+                                motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);
+                            previousEvaluation =
+                                evaluateRestirConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
+                                                         openpbrPrepared, uniforms.misHeuristic);
+                        }
                         const uint32_t currentM = reservoir.state.M;
                         SamplerState temporalRng = rng;
                         temporalRng.seed = hash_combine(temporalRng.seed, 0x68bc21ebu);
@@ -3157,7 +3202,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         {
                             const float currentTarget = reservoir.state.target;
                             float previousTarget = previousReservoir.state.target;
-                            if (!selectedHistory)
+                            LightConnection selectedAtPrevious = {};
+                            if (!selectedHistory || SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC)
                             {
                                 const RestirTargetSurface previousStored =
                                     ((device const RestirTargetSurface*)previousSurfaceData)[previousIndex];
@@ -3181,7 +3227,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                     prevFrameVertexBuffer, indexBuffer, curvePoints, curveSegments, previousStored,
                                     false, 0.0f, previousSi, previousIsFibre, previousIsOpenPBR, previousNeeFrame,
                                     previousOpenpbrPrepared, previousCurveRadius);
-                                const LightConnection selectedAtPrevious =
+                                selectedAtPrevious =
                                     reconnectRestirSample(uniforms, lights, instances, materials, prevFrameVertexBuffer,
                                                           prevFrameVertexBuffer, indexBuffer, 0.0f, previousSi,
                                                           envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
@@ -3189,11 +3235,20 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                     restirTargetOnly(selectedAtPrevious, previousSi, previousIsFibre, previousNeeFrame,
                                                      previousIsOpenPBR, previousOpenpbrPrepared, uniforms.misHeuristic);
                             }
+                            if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && previousTarget > 0.0f)
+                            {
+                                auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
+                                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable,
+                                                             selectedAtPrevious, instances, materials, geometryEntries,
+                                                             vertexBuffer, indexBuffer))
+                                {
+                                    previousTarget = 0.0f;
+                                }
+                            }
                             const float sourceTargetSum =
                                 float(currentM) * currentTarget + float(previousReservoir.state.M) * previousTarget;
                             restirReservoirApplyBasicNormalization(
-                                reservoir.state, selectedHistory ? previousReservoir.state.target : currentTarget,
-                                sourceTargetSum);
+                                reservoir.state, selectedHistory ? previousTarget : currentTarget, sourceTargetSum);
                         }
                         reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) |
                                                       (selectedHistory ? min(age + 1u, RESTIR_RESERVOIR_AGE_MASK) : 0u);
@@ -3624,6 +3679,8 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                                         device const GeometryEntry* geometryEntries [[buffer(15)]],
                                         device const packed_float3* curvePoints [[buffer(16)]],
                                         device const uint32_t* curveSegments [[buffer(17)]],
+                                        StaticTraversal::structure diagnosticAccelerationStructure [[buffer(18)]],
+                                        StaticTraversal::table diagnosticFunctionTable [[buffer(19)]],
                                         texture2d<float> envMapTexture [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_RESTIR_N])
@@ -3643,6 +3700,14 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
         return;
     }
     auditWork(uniforms, WORK_RESTIR_FINAL_ITEMS);
+
+    device RestirDiagnosticRecord* diagnosticRecord = restirDiagnosticRecord(uniforms, tid);
+    if (diagnosticRecord != nullptr)
+    {
+        RestirDiagnosticRecord empty = {};
+        empty.pixelIndex = tid;
+        *diagnosticRecord = empty;
+    }
 
     RestirReservoir reservoir = initialReservoirs[tid];
     const uint32_t centerM = reservoir.state.M;
@@ -3689,19 +3754,22 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
         const uint32_t neighborIndex = uint32_t(neighborPixel.y) * uniforms.width + uint32_t(neighborPixel.x);
         const RestirReservoir neighbor = initialReservoirs[neighborIndex];
         const RestirSurfaceHistory neighborSurface = history[neighborIndex];
-        if ((neighbor.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u || neighbor.state.M == 0u ||
-            !restirSurfaceHistoryCompatible(currentSurface, neighborSurface))
+        if (neighbor.state.M == 0u || !restirSurfaceHistoryCompatible(currentSurface, neighborSurface))
         {
             continue;
         }
 
         auditWork(uniforms, WORK_RESTIR_SPATIAL_MERGES);
 
-        const LightConnection connection =
-            reconnectRestirSample(uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
-                                  motionTime, si, envAliasTable, envMapTexture, iesProfiles, neighbor.sample);
-        const RestirEvaluation evaluated = evaluateRestirConnection(
-            connection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+        RestirEvaluation evaluated = {};
+        if ((neighbor.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u)
+        {
+            const LightConnection connection = reconnectRestirSample(
+                uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, si,
+                envAliasTable, envMapTexture, iesProfiles, neighbor.sample);
+            evaluated = evaluateRestirConnection(
+                connection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+        }
         SamplerState neighborRng = rng;
         neighborRng.seed = hash_combine(rng.seed, 0x3c6ef372u + i * 0x9e3779b9u);
         if (restirReservoirUpdate(reservoir.state, restirReservoirMergeWeight(neighbor.state, evaluated.target),
@@ -3717,6 +3785,10 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
         (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) | min(selectedAge, RESTIR_RESERVOIR_AGE_MASK);
     if ((reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u)
     {
+        const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
+                              (min(uniforms.spatialNeighborCount, 16u) + 1u);
+        restirReservoirLimitM(reservoir.state, maxM);
+        auditWork(uniforms, WORK_RESTIR_EFFECTIVE_M, reservoir.state.M);
         currentReservoirs[tid] = reservoir;
         return;
     }
@@ -3727,10 +3799,24 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     const RestirEvaluation evaluated =
         evaluateRestirConnection(connection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
     reservoir.state.target = evaluated.target;
+    if (diagnosticRecord != nullptr)
+    {
+        diagnosticRecord->stableLightId = restirSampleLightId(reservoir.sample);
+        diagnosticRecord->selectedSourceIndex = selectedSourceIndex;
+        diagnosticRecord->currentTarget = evaluated.target;
+        diagnosticRecord->weightSum = reservoir.state.weightSum;
+    }
     if (uniforms.restirBiasCorrection != 0u)
     {
         float selectedSourceTarget = selectedSourceIndex == tid ? evaluated.target : 0.0f;
         float sourceTargetSum = float(centerM) * evaluated.target;
+        if (diagnosticRecord != nullptr)
+        {
+            diagnosticRecord->sourceCount = 1u;
+            diagnosticRecord->sourceIndices[0] = tid;
+            diagnosticRecord->sourceM[0] = centerM;
+            diagnosticRecord->sourceTargets[0] = evaluated.target;
+        }
         for (uint32_t i = 0u; i < neighborCount; ++i)
         {
             const int2 neighborPixel = int2(pixel) + kRestirNeighborOffsets[(rotation + i * 5u) & 15u];
@@ -3742,15 +3828,21 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
             const uint32_t neighborIndex = uint32_t(neighborPixel.y) * uniforms.width + uint32_t(neighborPixel.x);
             const RestirReservoir neighbor = initialReservoirs[neighborIndex];
             const RestirSurfaceHistory neighborSurface = history[neighborIndex];
-            if ((neighbor.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u || neighbor.state.M == 0u ||
-                !restirSurfaceHistoryCompatible(currentSurface, neighborSurface))
+            if (neighbor.state.M == 0u || !restirSurfaceHistoryCompatible(currentSurface, neighborSurface))
             {
                 continue;
             }
-            if (selectedSourceIndex == neighborIndex)
+            if (selectedSourceIndex == neighborIndex && !SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC)
             {
                 selectedSourceTarget = neighbor.state.target;
                 sourceTargetSum += float(neighbor.state.M) * selectedSourceTarget;
+                if (diagnosticRecord != nullptr && diagnosticRecord->sourceCount < RESTIR_DIAGNOSTIC_SOURCE_COUNT)
+                {
+                    const uint32_t source = diagnosticRecord->sourceCount++;
+                    diagnosticRecord->sourceIndices[source] = neighborIndex;
+                    diagnosticRecord->sourceM[source] = neighbor.state.M;
+                    diagnosticRecord->sourceTargets[source] = selectedSourceTarget;
+                }
                 continue;
             }
             const RestirTargetSurface neighborStored = ((device const RestirTargetSurface*)surfaceData)[neighborIndex];
@@ -3771,17 +3863,45 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
             const LightConnection selectedAtNeighbor = reconnectRestirSample(
                 uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, neighborMotionTime,
                 neighborSi, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
-            const float neighborTarget =
-                restirTargetOnly(selectedAtNeighbor, neighborSi, neighborIsFibre, neighborNeeFrame, neighborIsOpenPBR,
-                                 neighborOpenpbrPrepared, uniforms.misHeuristic);
+            float neighborTarget = restirTargetOnly(selectedAtNeighbor, neighborSi, neighborIsFibre, neighborNeeFrame,
+                                                    neighborIsOpenPBR, neighborOpenpbrPrepared, uniforms.misHeuristic);
+            if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && neighborTarget > 0.0f)
+            {
+                auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
+                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, selectedAtNeighbor,
+                                             instances, materials, geometryEntries, vertexBuffer, indexBuffer))
+                {
+                    neighborTarget = 0.0f;
+                }
+            }
+            if (selectedSourceIndex == neighborIndex)
+            {
+                selectedSourceTarget = neighborTarget;
+            }
             sourceTargetSum += float(neighbor.state.M) * neighborTarget;
+            if (diagnosticRecord != nullptr && diagnosticRecord->sourceCount < RESTIR_DIAGNOSTIC_SOURCE_COUNT)
+            {
+                const uint32_t source = diagnosticRecord->sourceCount++;
+                diagnosticRecord->sourceIndices[source] = neighborIndex;
+                diagnosticRecord->sourceM[source] = neighbor.state.M;
+                diagnosticRecord->sourceTargets[source] = neighborTarget;
+            }
+        }
+        if (diagnosticRecord != nullptr)
+        {
+            diagnosticRecord->basicDenominator = sourceTargetSum;
         }
         restirReservoirApplyBasicNormalization(reservoir.state, selectedSourceTarget, sourceTargetSum);
     }
     const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
                           (min(uniforms.spatialNeighborCount, 16u) + 1u);
     restirReservoirLimitM(reservoir.state, maxM);
+    auditWork(uniforms, WORK_RESTIR_EFFECTIVE_M, reservoir.state.M);
     currentReservoirs[tid] = reservoir;
+    if (diagnosticRecord != nullptr)
+    {
+        diagnosticRecord->normalization = restirReservoirNormalization(reservoir.state);
+    }
     if (uniforms.restirDebugMode != 0u)
     {
         const float3 debugColor =
@@ -4508,6 +4628,40 @@ struct CutoutShadowWalk<T, true>
     }
 };
 
+static bool restirDiagnosticVisible(StaticTraversal::structure accelerationStructure,
+                                    StaticTraversal::table functionTable,
+                                    thread const LightConnection& connection,
+                                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                    device const Material* materials,
+                                    device const GeometryEntry* geometryEntries,
+                                    device const char* vertexBuffer,
+                                    device const uint32_t* indexBuffer)
+{
+    const EmissiveVisibilitySegment segment = lightVisibilitySegment(connection, connection.origin);
+    if (!segment.valid)
+    {
+        return false;
+    }
+    ray shadowRay;
+    shadowRay.origin = connection.origin;
+    shadowRay.direction = segment.direction;
+    shadowRay.min_distance = 0.0f;
+    shadowRay.max_distance = segment.maxDistance;
+    if (!SPEC_ALPHA)
+    {
+        StaticTraversal::isect isect;
+        isect.assume_geometry_type(StaticTraversal::geometryTypes());
+        isect.force_opacity(forced_opacity::opaque);
+        isect.accept_any_intersection(true);
+        return StaticTraversal::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, 0.0f, functionTable).type ==
+               intersection_type::none;
+    }
+    float3 transmittance;
+    return CutoutShadowWalk<StaticTraversal, false>::run(accelerationStructure, shadowRay, 0.0f, 0.0f, instances,
+                                                         materials, geometryEntries, vertexBuffer, indexBuffer,
+                                                         functionTable, transmittance);
+}
+
 // ---------------------------------------------------------------------------
 // shadow -- resolve the deferred connections
 // ---------------------------------------------------------------------------
@@ -4584,6 +4738,10 @@ static void shadowImpl(uint gid,
                 weight *= transmittance;
                 sharcRadiance *= transmittance;
             }
+            if (bounce == 0u)
+            {
+                restirDiagnosticVisibility(uniforms, sr.pixelIndex, weight);
+            }
             radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
             if (SPEC_SHARC_UPDATE)
             {
@@ -4644,6 +4802,10 @@ static void shadowImpl(uint gid,
                                    float3(sr.origin), float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
         weight *= mediumTr;
         sharcRadiance *= mediumTr;
+    }
+    if (bounce == 0u)
+    {
+        restirDiagnosticVisibility(uniforms, sr.pixelIndex, weight);
     }
     radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
     if (SPEC_SHARC_UPDATE)

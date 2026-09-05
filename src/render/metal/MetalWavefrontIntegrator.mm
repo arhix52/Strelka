@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <bit>
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 
 #include <log.h>
@@ -86,6 +88,8 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.shadowTableStatic);
         safeRelease(kv.second.guideTableMotion);
         safeRelease(kv.second.guideTableStatic);
+        safeRelease(kv.second.restirShadeDiagnosticTable);
+        safeRelease(kv.second.restirSpatialDiagnosticTable);
     }
     mVariants.clear();
     safeRelease(mLibrary);
@@ -150,6 +154,8 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
         add(entry.second.shadowTableStatic);
         add(entry.second.guideTableMotion);
         add(entry.second.guideTableStatic);
+        add(entry.second.restirShadeDiagnosticTable);
+        add(entry.second.restirSpatialDiagnosticTable);
     }
 }
 
@@ -448,15 +454,41 @@ void MetalWavefrontIntegrator::resetStageProfilingMetal4()
 
 void MetalWavefrontIntegrator::beginRenderWorkAudit()
 {
+    constexpr size_t diagnosticBytes =
+        RESTIR_DIAGNOSTIC_PIXEL_COUNT * (sizeof(uint32_t) + sizeof(RestirDiagnosticRecord));
     if (!mRenderWorkCounterBuffer)
     {
         mRenderWorkCounterBuffer =
-            mDevice->newBuffer(WORK_COUNTER_COUNT * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+            mDevice->newBuffer(WORK_COUNTER_COUNT * sizeof(uint32_t) + diagnosticBytes, MTL::ResourceStorageModeShared);
         mResidencyDirty = true;
     }
     if (mRenderWorkCounterBuffer)
     {
         memset(mRenderWorkCounterBuffer->contents(), 0, mRenderWorkCounterBuffer->length());
+        auto* words = static_cast<uint32_t*>(mRenderWorkCounterBuffer->contents());
+        auto* pixels = words + WORK_COUNTER_COUNT;
+        std::fill_n(pixels, RESTIR_DIAGNOSTIC_PIXEL_COUNT, std::numeric_limits<uint32_t>::max());
+        // NOLINTNEXTLINE(concurrency-mt-unsafe) -- audit setup precedes worker threads.
+        if (const char* value = std::getenv("STRELKA_RESTIR_DIAGNOSTIC_PIXELS"))
+        {
+            for (uint32_t i = 0; i < RESTIR_DIAGNOSTIC_PIXEL_COUNT && *value != '\0'; ++i)
+            {
+                char* end = nullptr;
+                const unsigned long pixel = std::strtoul(value, &end, 10);
+                if (end == value || pixel > std::numeric_limits<uint32_t>::max())
+                {
+                    break;
+                }
+                pixels[i] = static_cast<uint32_t>(pixel);
+                value = *end == ',' ? end + 1 : end;
+            }
+        }
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto* records = reinterpret_cast<RestirDiagnosticRecord*>(pixels + RESTIR_DIAGNOSTIC_PIXEL_COUNT);
+        for (uint32_t i = 0; i < RESTIR_DIAGNOSTIC_PIXEL_COUNT; ++i)
+        {
+            records[i].pixelIndex = pixels[i];
+        }
     }
     mRenderWorkDispatches.clear();
 }
@@ -464,6 +496,17 @@ void MetalWavefrontIntegrator::beginRenderWorkAudit()
 const uint32_t* MetalWavefrontIntegrator::renderWorkCounters() const
 {
     return mRenderWorkCounterBuffer ? static_cast<const uint32_t*>(mRenderWorkCounterBuffer->contents()) : nullptr;
+}
+
+const RestirDiagnosticRecord* MetalWavefrontIntegrator::restirDiagnosticRecords() const
+{
+    if (!mRenderWorkCounterBuffer)
+    {
+        return nullptr;
+    }
+    const auto* words = static_cast<const uint32_t*>(mRenderWorkCounterBuffer->contents());
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    return reinterpret_cast<const RestirDiagnosticRecord*>(words + WORK_COUNTER_COUNT + RESTIR_DIAGNOSTIC_PIXEL_COUNT);
 }
 
 uint64_t MetalWavefrontIntegrator::renderWorkCounterAddress() const
@@ -491,6 +534,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const uint32_t pixels = frame.pathCount != 0u ? frame.pathCount : width * height;
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
     const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
+    const bool restirDiagnostic = (features & WavefrontFeatures::kRestirRayTracedDiagnostic) != 0u;
 
     MTL4::ArgumentTable* table = mMetal4->argumentTable();
     ConstantRing& ring = mMetal4->constants();
@@ -759,9 +803,16 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(sharcUpdate ? scene.sharcResolvedBuffer :
                                (scene.prevFrameInstanceBuffer ? scene.prevFrameInstanceBuffer : scene.instanceBuffer),
                  0, 24);
-            bind(scene.sharcHashBuffer, 0, 25);
-            // The persistent argument table requires rebinding curve slots even when the scene has no curves.
-            bind(scene.curvePointBuffer, 0, 26);
+            if (restirDiagnostic)
+            {
+                table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 25);
+                table->setResource(variant->restirShadeDiagnosticTable->gpuResourceID(), 26);
+            }
+            else
+            {
+                bind(scene.placeholderBuffer, 0, 25);
+                bind(scene.placeholderBuffer, 0, 26);
+            }
             bind(scene.curveSegmentBuffer, 0, 27);
             bind(mIorStatsBuffer, 0, 28);
             bind(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
@@ -796,6 +847,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(scene.geometryEntryBuffer, 0, 15);
                 bind(scene.curvePointBuffer, 0, 16);
                 bind(scene.curveSegmentBuffer, 0, 17);
+                if (restirDiagnostic)
+                {
+                    table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 18);
+                    table->setResource(variant->restirSpatialDiagnosticTable->gpuResourceID(), 19);
+                }
                 if (scene.environment && scene.environment->state().mapTexture)
                 {
                     table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
@@ -1031,6 +1087,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
     const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
     const bool sharcUpdatePass = (features & WavefrontFeatures::kSharcUpdate) != 0u;
+    const bool restirDiagnostic = (features & WavefrontFeatures::kRestirRayTracedDiagnostic) != 0u;
     // Textures are reached through resource IDs inside the Material struct, so
     // Metal cannot infer their use from the bindings and every encoder has to be
     // told about them again.
@@ -1288,12 +1345,12 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             {
                 enc->setTexture(scene.environment->state().mapTexture, 0);
             }
-            enc->setBuffer(scene.sharcHashBuffer, 0, 25);
-            // A curve hit carries a segment index and a parameter along it, and
-            // nothing else: the position, the tangent and the radius all come
-            // back out of these three buffers, the same way a triangle hit is
-            // refetched from the vertex buffer.
-            enc->setBuffer(scene.curvePointBuffer ? scene.curvePointBuffer : scene.placeholderBuffer, 0, 26);
+            if (restirDiagnostic)
+            {
+                enc->setAccelerationStructure(scene.instanceAccelerationStructure, 25);
+                enc->setIntersectionFunctionTable(variant->restirShadeDiagnosticTable, 26);
+                enc->useResource(variant->restirShadeDiagnosticTable, MTL::ResourceUsageRead);
+            }
             enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 27);
             enc->setBuffer(mIorStatsBuffer, 0, 28);
             enc->setBuffer(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
@@ -1324,6 +1381,12 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->setBuffer(scene.geometryEntryBuffer, 0, 15);
                 enc->setBuffer(scene.curvePointBuffer ? scene.curvePointBuffer : scene.placeholderBuffer, 0, 16);
                 enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 17);
+                if (restirDiagnostic)
+                {
+                    enc->setAccelerationStructure(scene.instanceAccelerationStructure, 18);
+                    enc->setIntersectionFunctionTable(variant->restirSpatialDiagnosticTable, 19);
+                    enc->useResource(variant->restirSpatialDiagnosticTable, MTL::ResourceUsageRead);
+                }
                 if (scene.environment && scene.environment->state().mapTexture)
                 {
                     enc->setTexture(scene.environment->state().mapTexture, 0);
@@ -1478,6 +1541,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&openpbr, MTL::DataTypeBool, (NS::UInteger)11);
     const bool auditRenderWork = (features & WavefrontFeatures::kRenderWorkAudit) != 0;
     values->setConstantValue(&auditRenderWork, MTL::DataTypeBool, (NS::UInteger)12);
+    const bool restirRayTracedDiagnostic = (features & WavefrontFeatures::kRestirRayTracedDiagnostic) != 0;
+    values->setConstantValue(&restirRayTracedDiagnostic, MTL::DataTypeBool, (NS::UInteger)13);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
@@ -1579,8 +1644,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.generate = make("wavefrontGenerate");
     v.extendMotion = makeTraversal(entry("wavefrontExtend"), true, v.extendTableMotion);
     v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), false, v.extendTableStatic);
-    v.shade = make("wavefrontShade");
-    v.restirSpatialFinal = make("wavefrontRestirSpatialFinal");
+    v.shade = restirRayTracedDiagnostic ? makeTraversal("wavefrontShade", false, v.restirShadeDiagnosticTable) :
+                                          make("wavefrontShade");
+    v.restirSpatialFinal = restirRayTracedDiagnostic ?
+                               makeTraversal("wavefrontRestirSpatialFinal", false, v.restirSpatialDiagnosticTable) :
+                               make("wavefrontRestirSpatialFinal");
     v.miss = make("wavefrontMiss");
     v.shadowMotion = makeTraversal(entry("wavefrontShadow"), true, v.shadowTableMotion);
     v.shadowStatic = makeTraversal(entry("wavefrontShadowStatic"), false, v.shadowTableStatic);

@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+struct RestirDiagnosticRecord;
 
 namespace oka::metal
 {
@@ -41,6 +42,8 @@ struct WavefrontVariant
     MTL::IntersectionFunctionTable* shadowTableStatic = nullptr;
     MTL::IntersectionFunctionTable* guideTableMotion = nullptr;
     MTL::IntersectionFunctionTable* guideTableStatic = nullptr;
+    MTL::IntersectionFunctionTable* restirShadeDiagnosticTable = nullptr;
+    MTL::IntersectionFunctionTable* restirSpatialDiagnosticTable = nullptr;
 };
 
 // Non-owning resources assembled by MetalRender for each encode.
@@ -157,6 +160,7 @@ public:
     void reportSharcStats();
     void beginRenderWorkAudit();
     const uint32_t* renderWorkCounters() const;
+    const RestirDiagnosticRecord* restirDiagnosticRecords() const;
     uint64_t renderWorkCounterAddress() const;
     const std::map<std::string, uint64_t>& renderWorkDispatches() const
     {

@@ -169,7 +169,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->spatialNeighborCount = settings.getAs<uint32_t>("render/pt/spatialNeighborCount");
     pUniformData->reservoirMaxAge = settings.getAs<uint32_t>("render/pt/reservoirMaxAge");
     pUniformData->restirDebugMode = settings.getAs<uint32_t>("render/pt/restirDebugMode");
-    pUniformData->restirBiasCorrection = std::min(settings.getAs<uint32_t>("render/pt/restirBiasCorrection"), 1u);
+    pUniformData->restirBiasCorrection = std::min(settings.getAs<uint32_t>("render/pt/restirBiasCorrection"), 2u);
     // PT accumulation and MetalFX history solve different problems. The former
     // remains the converged scene-linear result; the latter must see a fresh,
     // coherently jittered launch whose color, depth, motion and material guides

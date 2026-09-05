@@ -376,8 +376,12 @@ struct Uniforms
     // ordinary pipeline specialises every reference away.
 #ifdef __METAL_VERSION__
     device atomic_uint* renderWorkCounters;
+    device char* sharcHashData;
+    device const char* curvePointData;
 #else
     uint64_t renderWorkCounters;
+    uint64_t sharcHashData;
+    uint64_t curvePointData;
 #endif
 
     uint32_t numInfiniteLights;
@@ -398,7 +402,7 @@ struct Uniforms
     uint64_t abiTailPadding;
 #endif
 };
-static_assert(sizeof(Uniforms) == 944, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 960, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -424,9 +428,32 @@ enum RenderWorkCounter : uint32_t
     WORK_RESTIR_REUSE_QUERIES = 79,
     WORK_MISS_LIGHT_EVALUATIONS = 80,
     WORK_GUIDE_DISPATCHES = 81,
-    WORK_COUNTER_COUNT = 82,
+    WORK_RESTIR_DIAGNOSTIC_QUERIES = 82,
+    WORK_RESTIR_EFFECTIVE_M = 83,
+    WORK_COUNTER_COUNT = 84,
     WORK_BOUNCE_SLOTS = 16
 };
+
+#define RESTIR_DIAGNOSTIC_PIXEL_COUNT 32u
+#define RESTIR_DIAGNOSTIC_SOURCE_COUNT 3u
+
+struct RestirDiagnosticRecord
+{
+    uint32_t pixelIndex;
+    uint32_t stableLightId;
+    uint32_t selectedSourceIndex;
+    uint32_t sourceCount;
+    uint32_t sourceIndices[RESTIR_DIAGNOSTIC_SOURCE_COUNT];
+    uint32_t sourceM[RESTIR_DIAGNOSTIC_SOURCE_COUNT];
+    float sourceTargets[RESTIR_DIAGNOSTIC_SOURCE_COUNT];
+    float currentTarget;
+    float weightSum;
+    float basicDenominator;
+    float normalization;
+    uint32_t finalVisibility;
+    float contribution[3];
+};
+static_assert(sizeof(RestirDiagnosticRecord) == 84, "ReSTIR diagnostic record ABI changed");
 
 
 // How the depth guide is encoded.

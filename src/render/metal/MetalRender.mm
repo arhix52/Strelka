@@ -33,6 +33,7 @@
 #include <host/integrator_buffer_sizes.h>
 
 #include <fstream>
+#include <limits>
 
 #include <algorithm>
 // The display transform the readback replays; the same header the tonemap
@@ -888,7 +889,7 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, emissiveMeshes) == 832);
     static_assert(offsetof(Uniforms, emissiveTriangles) == 840);
     static_assert(offsetof(Material, baseColorTexture) == 256);
-    static_assert(sizeof(Uniforms) == 944, "Uniforms host/Metal ABI changed");
+    static_assert(sizeof(Uniforms) == 960, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -1919,7 +1920,17 @@ void MetalRender::render(Buffer* output)
             featureIn.hasCurves = mGeometry.hasCurves();
             featureIn.hasOpenPBR = mMaterials.hasOpenPBRMaterials();
             featureIn.auditRenderWork = auditRenderWork;
+            featureIn.restirRayTracedDiagnostic = pUniformData->restirBiasCorrection == 2u;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
+
+            if (featureIn.restirRayTracedDiagnostic &&
+                (featureIn.enableMotionBlur || featureIn.motionBlasBuilt || featureIn.hasCurves))
+            {
+                STRELKA_FATAL("ReSTIR raytraced-diagnostic supports static triangle scenes only");
+                mRenderBusy.store(false, std::memory_order_release);
+                pPool->release();
+                return;
+            }
 
             if (auditRenderWork)
             {
@@ -1947,6 +1958,10 @@ void MetalRender::render(Buffer* output)
             pUniformData->restirSurfaceData0 = mIntegrator.restirSurfaceDataAddress(0);
             pUniformData->restirSurfaceData1 = mIntegrator.restirSurfaceDataAddress(1);
             pUniformData->renderWorkCounters = mIntegrator.renderWorkCounterAddress();
+            pUniformData->sharcHashData =
+                (mFrameUniforms.sharcHashBuffer() ? mFrameUniforms.sharcHashBuffer() : mSceneTablePlaceholder)->gpuAddress();
+            pUniformData->curvePointData = mGeometry.curvePointBuffer() ? mGeometry.curvePointBuffer()->gpuAddress() :
+                                                                          mSceneTablePlaceholder->gpuAddress();
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
             metal::IntegratorFrameRequest frameReq;
@@ -3150,11 +3165,44 @@ std::string MetalRender::renderWorkAuditJson() const
 #endif
     commandBuffers += ']';
 
+    std::string restirDiagnostics = "[";
+    if (const RestirDiagnosticRecord* records = mIntegrator.restirDiagnosticRecords())
+    {
+        bool firstRecord = true;
+        for (uint32_t i = 0; i < RESTIR_DIAGNOSTIC_PIXEL_COUNT; ++i)
+        {
+            const RestirDiagnosticRecord& record = records[i];
+            if (record.pixelIndex == std::numeric_limits<uint32_t>::max())
+            {
+                continue;
+            }
+            std::string sources = "[";
+            for (uint32_t source = 0; source < std::min(record.sourceCount, RESTIR_DIAGNOSTIC_SOURCE_COUNT); ++source)
+            {
+                sources +=
+                    fmt::format("{}{{\"id\":{},\"M\":{},\"target\":{:.9g}}}", source == 0u ? "" : ",",
+                                record.sourceIndices[source], record.sourceM[source], record.sourceTargets[source]);
+            }
+            sources += ']';
+            restirDiagnostics += fmt::format(
+                "{}{{\"pixel\":[{},{}],\"stableLightId\":{},\"selectedSourceId\":{},\"sources\":{},"
+                "\"currentTarget\":{:.9g},\"weightSum\":{:.9g},\"basicDenominator\":{:.9g},"
+                "\"normalization\":{:.9g},\"finalVisibility\":{},\"contribution\":[{:.9g},{:.9g},{:.9g}]}}",
+                firstRecord ? "" : ",", record.pixelIndex % width, record.pixelIndex / width, record.stableLightId,
+                record.selectedSourceIndex, sources, record.currentTarget, record.weightSum, record.basicDenominator,
+                record.normalization, record.finalVisibility, record.contribution[0], record.contribution[1],
+                record.contribution[2]);
+            firstRecord = false;
+        }
+    }
+    restirDiagnostics += ']';
+
     return fmt::format(
         "{{\"frames\":{},\"pixels\":{},\"spp\":{},\"gpuTimeMs\":{:.3f},"
         "\"generatedPrimaryRays\":{},\"extendRays\":{},\"guideOnlyRays\":{},\"shadowRays\":{},"
         "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
-        "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},"
+        "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},\"restirDiagnosticQueries\":{},"
+        "\"restirEffectiveM\":{:.6f},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
         "\"finalRestirVisibilityRays\":{},"
         "\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
@@ -3170,21 +3218,27 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"memory\":{{\"wavefrontAllocatedBytes\":{},\"restirAllocatedBytes\":{},"
         "\"restirAccessedWithNeeBytes\":0}},"
         "\"manualAnalyticLightTests\":{},\"missLightEvaluations\":{},"
-        "\"dispatchCount\":{},\"pipelineDispatches\":{},\"commandBuffers\":{}}}",
-        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs, c[WORK_PRIMARY_RAYS],
-        array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE), c[WORK_INTERSECTION_QUERIES],
-        c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES], c[WORK_RESTIR_CANDIDATE_QUERIES],
-        c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES],
-        c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
-        c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
+        "\"dispatchCount\":{},\"pipelineDispatches\":{},\"commandBuffers\":{},"
+        "\"restirDiagnostics\":{}}}",
+        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs,
+        c[WORK_PRIMARY_RAYS], array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE),
+        c[WORK_INTERSECTION_QUERIES], c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES],
+        c[WORK_RESTIR_CANDIDATE_QUERIES], c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_DIAGNOSTIC_QUERIES],
+        c[WORK_RESTIR_FINAL_ITEMS] != 0u ?
+            static_cast<double>(c[WORK_RESTIR_EFFECTIVE_M]) / static_cast<double>(c[WORK_RESTIR_FINAL_ITEMS]) :
+            0.0,
+        c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES], c[WORK_RESTIR_FINAL_VISIBILITY_RAYS],
+        c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES], c[WORK_PRIMARY_RAYS],
+        roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,
         dispatched(WORK_MISS_ITEMS_BASE), shadowActive, dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
         roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_FINAL_ITEMS],
-        restirFusedDispatchCount != 0u ? roundedThreads(c[WORK_RESTIR_FINAL_ITEMS]) : 0u, mRenderWorkAsCounts.blasBuilds,
-        mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits, mRenderWorkMaxTlasRefitsPerFrame,
-        mRenderWorkLightCounts.uploads, mRenderWorkMaxLightUploadsPerFrame, mRenderWorkLightCounts.temporalMappingUpdates,
-        mRenderWorkMaxTemporalMappingsPerFrame, mIntegrator.queueBytes(), mIntegrator.restirBytes(),
-        c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal, dispatches, commandBuffers);
+        restirFusedDispatchCount != 0u ? roundedThreads(c[WORK_RESTIR_FINAL_ITEMS]) : 0u,
+        mRenderWorkAsCounts.blasBuilds, mRenderWorkAsCounts.tlasBuilds, mRenderWorkAsCounts.tlasRefits,
+        mRenderWorkMaxTlasRefitsPerFrame, mRenderWorkLightCounts.uploads, mRenderWorkMaxLightUploadsPerFrame,
+        mRenderWorkLightCounts.temporalMappingUpdates, mRenderWorkMaxTemporalMappingsPerFrame, mIntegrator.queueBytes(),
+        mIntegrator.restirBytes(), c[WORK_MANUAL_ANALYTIC_LIGHT_TESTS], c[WORK_MISS_LIGHT_EVALUATIONS], dispatchTotal,
+        dispatches, commandBuffers, restirDiagnostics);
 }
 
 Buffer* MetalRender::createBuffer(const BufferDesc& desc)

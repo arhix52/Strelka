@@ -235,9 +235,9 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.restirDebugMode = (uint32_t)std::clamp<int64_t>(*v, 0, 2);
     if (auto v = tbl["render"]["restir_bias_correction"].value<std::string>())
     {
-        if (*v != "off" && *v != "basic")
-            throw std::runtime_error("restir_bias_correction must be 'off' or 'basic'");
-        cfg.restirBiasCorrection = *v == "basic" ? 1u : 0u;
+        if (*v != "off" && *v != "basic" && *v != "raytraced-diagnostic")
+            throw std::runtime_error("restir_bias_correction must be 'off', 'basic', or 'raytraced-diagnostic'");
+        cfg.restirBiasCorrection = *v == "raytraced-diagnostic" ? 2u : *v == "basic" ? 1u : 0u;
     }
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
         cfg.estimatorMode = (uint32_t)*v;

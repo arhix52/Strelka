@@ -35,6 +35,7 @@ public:
     // Debug-only counters. This bit selects a separately specialised pipeline;
     // ordinary Release kernels contain no atomics or counter loads.
     static constexpr uint32_t kRenderWorkAudit = 1u << 13;
+    static constexpr uint32_t kRestirRayTracedDiagnostic = 1u << 14;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -86,6 +87,7 @@ struct IntegratorFeatureInputs
     bool hasOpenPBR = false;
     bool useMetal4 = false;
     bool auditRenderWork = false;
+    bool restirRayTracedDiagnostic = false;
 };
 
 inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in)
@@ -117,6 +119,8 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kMetal4;
     if (in.auditRenderWork)
         features |= WavefrontFeatures::kRenderWorkAudit;
+    if (in.restirRayTracedDiagnostic)
+        features |= WavefrontFeatures::kRestirRayTracedDiagnostic;
     return WavefrontFeatures(features);
 }
 

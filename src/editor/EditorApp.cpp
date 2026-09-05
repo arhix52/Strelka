@@ -999,7 +999,7 @@ void EditorApp::runBenchmark()
         "render/pt/restirBiasCorrection",
         std::min(envUint("STRELKA_RESTIR_BIAS_CORRECTION",
                          m_settingsManager->getAs<uint32_t>("render/pt/restirBiasCorrection")),
-                 1u));
+                 2u));
     const bool requestedRestir = m_settingsManager->getAs<bool>("render/pt/restirDIEnabled");
     // One submission per frame, so the number is the tracer's cost and not the
     // inter-band gaps of the responsiveness split.

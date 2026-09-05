@@ -56,7 +56,8 @@ int main(int argc, const char* argv[])
         ("restir-neighbors", "ReSTIR spatial neighbors",     cxxopts::value<uint32_t>())
         ("restir-max-age", "ReSTIR reservoir maximum age",   cxxopts::value<uint32_t>())
         ("restir-debug", "ReSTIR debug mode",                cxxopts::value<uint32_t>())
-        ("restir-bias-correction", "ReSTIR bias correction: off, basic", cxxopts::value<std::string>())
+        ("restir-bias-correction", "ReSTIR bias correction: off, basic, raytraced-diagnostic",
+         cxxopts::value<std::string>())
         ("profile-stages", "Report per-stage GPU timings",   cxxopts::value<bool>()->implicit_value("true"))
         ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-frames", "Audited frames for moving-light harness", cxxopts::value<uint32_t>())
@@ -205,12 +206,12 @@ int main(int argc, const char* argv[])
     if (result.count("restir-bias-correction"))
     {
         const std::string mode = result["restir-bias-correction"].as<std::string>();
-        if (mode != "off" && mode != "basic")
+        if (mode != "off" && mode != "basic" && mode != "raytraced-diagnostic")
         {
-            STRELKA_FATAL("--restir-bias-correction must be off or basic");
+            STRELKA_FATAL("--restir-bias-correction must be off, basic, or raytraced-diagnostic");
             return 1;
         }
-        cfg.restirBiasCorrection = mode == "basic" ? 1u : 0u;
+        cfg.restirBiasCorrection = mode == "raytraced-diagnostic" ? 2u : mode == "basic" ? 1u : 0u;
     }
     if (result.count("profile-stages"))
     {

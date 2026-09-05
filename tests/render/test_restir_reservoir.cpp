@@ -157,7 +157,7 @@ TEST_CASE("ReSTIR M limit preserves reservoir normalization")
 TEST_CASE("ReSTIR temporal history M clamp is bias-mode independent")
 {
     const RestirReservoirState expanded{ 1024.0f, 2.0f, 512u, RESTIR_RESERVOIR_VALID };
-    for (const unsigned int biasMode : { 0u, 1u })
+    for (const unsigned int biasMode : { 0u, 1u, 2u })
     {
         RestirReservoirState history = expanded;
         restirReservoirLimitHistoryM(history, 2u, 8u);
@@ -165,6 +165,36 @@ TEST_CASE("ReSTIR temporal history M clamp is bias-mode independent")
         CHECK(history.M == 16u);
         CHECK(restirReservoirNormalization(history) == doctest::Approx(restirReservoirNormalization(expanded)));
     }
+}
+
+TEST_CASE("ray-traced normalization removes an occluded source from BASIC support")
+{
+    // RTXDI SpatialResampling.hlsli, BASIC/RAY_TRACED normalization:
+    // https://github.com/NVIDIA-RTX/RTXDI-Library/blob/main/Include/Rtxdi/DI/SpatialResampling.hlsli
+    const float target[2][2] = { { 1.0f, 4.0f }, { 1.0f, 2.0f } };
+    const float visibility[2][2] = { { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+    const RestirReservoirState merged{ 2.0f, 1.0f, 2u, RESTIR_RESERVOIR_VALID };
+    const float off = restirReservoirNormalization(merged);
+    RestirReservoirState basic = merged;
+    restirReservoirApplyBasicNormalization(basic, target[0][0], target[0][0] + target[1][0]);
+    RestirReservoirState rayTraced = merged;
+    restirReservoirApplyBasicNormalization(
+        rayTraced, target[0][0], target[0][0] * visibility[0][0] + target[1][0] * visibility[1][0]);
+    CHECK(off == doctest::Approx(1.0f));
+    CHECK(restirReservoirNormalization(basic) == doctest::Approx(1.0f));
+    CHECK(restirReservoirNormalization(rayTraced) == doctest::Approx(2.0f));
+    CHECK(target[0][1] * visibility[0][1] + target[1][1] * visibility[1][1] == doctest::Approx(6.0f));
+}
+
+TEST_CASE("compatible invalid ReSTIR source still contributes M")
+{
+    RestirReservoirState merged{ 4.0f, 2.0f, 1u, RESTIR_RESERVOIR_VALID };
+    const RestirReservoirState invalidSource{ 0.0f, 0.0f, 4u, 0u };
+    CHECK_FALSE(
+        restirReservoirUpdate(merged, restirReservoirMergeWeight(invalidSource, 2.0f), 0.0f, invalidSource.M, 0.5f));
+    CHECK(merged.M == 5u);
+    restirReservoirApplyBasicNormalization(merged, 2.0f, 1u * 2.0f + 4u * 3.0f);
+    CHECK(restirReservoirNormalization(merged) == doctest::Approx(4.0f / 14.0f));
 }
 
 TEST_CASE("ReSTIR sample key preserves category and stable ID")
