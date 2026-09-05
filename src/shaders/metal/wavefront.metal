@@ -756,6 +756,12 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
 // ---------------------------------------------------------------------------
 // extend -- closest hit
 // ---------------------------------------------------------------------------
+static inline device HitRecord* wavefrontHitRecord(device char* records, uint32_t index)
+{
+    const size_t stride = SPEC_RESTIR ? sizeof(RestirReservoir) : sizeof(HitRecord);
+    return (device HitRecord*)(records + size_t(index) * stride);
+}
+
 template <typename T>
 static void extendImpl(uint gid,
                        constant Uniforms& uniforms,
@@ -763,7 +769,7 @@ static void extendImpl(uint gid,
                        typename T::structure accelerationStructure,
                        typename T::structure volumeAccelerationStructure,
                        device const PathRay* rays,
-                       device HitRecord* hits,
+                       device char* hits,
                        constant uint32_t& sampleIdx,
                        device const uint32_t* queue,
                        device const uint32_t* control,
@@ -928,7 +934,7 @@ static void extendImpl(uint gid,
         mediumRec.primitiveId = 0u;
         mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
         mediumRec.distance = mediumScatterT;
-        hits[tid] = mediumRec;
+        *wavefrontHitRecord(hits, tid) = mediumRec;
         queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
         return;
     }
@@ -954,7 +960,7 @@ static void extendImpl(uint gid,
     rec.barycentrics =
         (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
     rec.distance = hit.distance;
-    hits[tid] = rec;
+    *wavefrontHitRecord(hits, tid) = rec;
     queuePush(hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
 }
 
@@ -964,7 +970,7 @@ static void extendImpl(uint gid,
         uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
         constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                          \
         TRAITS::structure accelerationStructure [[buffer(2)]], device const PathRay* rays [[buffer(3)]],               \
-        device HitRecord* hits [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],                              \
+        device char* hits [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],                                   \
         device const uint32_t* queue [[buffer(6)]], device const uint32_t* control [[buffer(7)]],                      \
         device uint32_t* hitQueue [[buffer(8)]], device atomic_uint* hitCounter [[buffer(9)]],                         \
         device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                     \
@@ -1964,7 +1970,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            device Material* materials [[buffer(4)]],
                            device PathState* paths [[buffer(5)]],
                            device PathRay* rays [[buffer(21)]],
-                           device HitRecord* hits [[buffer(6)]],
+                           device char* hits [[buffer(6)]],
                            device float4* radianceOut [[buffer(7)]],
                            device IorStack* iorStacks [[buffer(8)]],
                            device const GeometryEntry* geometryEntries [[buffer(9)]],
@@ -2044,7 +2050,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const float3 sampledThroughput = throughput;
 
     float3 radiance = float3(0.0f);
-    const HitRecord rec = hits[tid];
+    const HitRecord rec = *wavefrontHitRecord(hits, tid);
 
     // Apply enclosing IOR absorption once before all vertex branches; rec.distance is the segment just travelled.
     // Subsurface walks carry their own extinction, while bounded volumes can still overlap enclosing glass.
@@ -3535,7 +3541,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     auditWork(uniforms, WORK_RESTIR_TEMPORAL_REJECT_SURFACE);
                 }
             }
-            ((device RestirReservoir*)hits)[tid] = reservoir;
+            *((device RestirReservoir*)(hits + size_t(tid) * sizeof(RestirReservoir))) = reservoir;
             currentHistory[tid] = surface;
             const uint32_t restirSlot =
                 atomic_fetch_add_explicit((device atomic_uint*)&control[WF_CTRL_RESTIR], 1u, memory_order_relaxed);

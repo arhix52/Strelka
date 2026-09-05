@@ -1946,6 +1946,7 @@ void MetalRender::render(Buffer* output)
             featureIn.restirRayTracedDiagnostic = pUniformData->restirBiasCorrection == 2u ||
                                                   pUniformData->restirInitialVisibility != 0u ||
                                                   (auditRenderWork && pUniformData->restirFinalVisibilityReuse != 0u);
+            featureIn.restir = pUniformData->restirDIEnabled != 0u;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
 
             if (featureIn.restirRayTracedDiagnostic && (featureIn.enableMotionBlur || featureIn.motionBlasBuilt))
@@ -2344,6 +2345,11 @@ void MetalRender::render(Buffer* output)
                                             " -- a bystander of a GPU reset, so the chunk and workload below are not "
                                             "the cause; the causing chunk reports its own error if it reaches us" :
                                             "");
+                                    if (error->debugDescription())
+                                    {
+                                        STRELKA_ERROR("Metal 4 command-buffer detail: {}",
+                                                      error->debugDescription()->utf8String());
+                                    }
                                     STRELKA_ERROR("Metal 4 failed workload: PT={}x{} spp={} depth={} features=0x{:x}",
                                                   width, height, samplesThisLaunch, maxDepth, features);
                                     if (groupIndex < state->groups.size())

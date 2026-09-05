@@ -834,8 +834,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             }
             else
             {
-                bind(scene.placeholderBuffer, 0, 25);
-                bind(scene.placeholderBuffer, 0, 26);
+                table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 25);
+                table->setResource(variant->extendTableStatic->gpuResourceID(), 26);
             }
             bind(scene.curveSegmentBuffer, 0, 27);
             bind(mIorStatsBuffer, 0, 28);
@@ -875,6 +875,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 {
                     table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 18);
                     table->setResource(variant->restirSpatialDiagnosticTable->gpuResourceID(), 19);
+                }
+                else
+                {
+                    table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 18);
+                    table->setResource(variant->extendTableStatic->gpuResourceID(), 19);
                 }
                 if (scene.environment && scene.environment->state().mapTexture)
                 {
@@ -1571,6 +1576,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&auditRenderWork, MTL::DataTypeBool, (NS::UInteger)12);
     const bool restirRayTracedDiagnostic = (features & WavefrontFeatures::kRestirRayTracedDiagnostic) != 0;
     values->setConstantValue(&restirRayTracedDiagnostic, MTL::DataTypeBool, (NS::UInteger)13);
+    const bool restir = (features & WavefrontFeatures::kRestir) != 0;
+    values->setConstantValue(&restir, MTL::DataTypeBool, (NS::UInteger)14);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };

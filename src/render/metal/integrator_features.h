@@ -36,6 +36,7 @@ public:
     // ordinary Release kernels contain no atomics or counter loads.
     static constexpr uint32_t kRenderWorkAudit = 1u << 13;
     static constexpr uint32_t kRestirRayTracedDiagnostic = 1u << 14;
+    static constexpr uint32_t kRestir = 1u << 15;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -88,6 +89,7 @@ struct IntegratorFeatureInputs
     bool useMetal4 = false;
     bool auditRenderWork = false;
     bool restirRayTracedDiagnostic = false;
+    bool restir = false;
 };
 
 inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in)
@@ -121,6 +123,8 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kRenderWorkAudit;
     if (in.restirRayTracedDiagnostic)
         features |= WavefrontFeatures::kRestirRayTracedDiagnostic;
+    if (in.restir)
+        features |= WavefrontFeatures::kRestir;
     return WavefrontFeatures(features);
 }
 

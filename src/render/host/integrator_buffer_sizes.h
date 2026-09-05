@@ -114,7 +114,7 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
     layout.sharcUpdatePaths = ((width + updateScale - 1u) / updateScale) * ((height + updateScale - 1u) / updateScale);
     layout.sharcUpdateStateBytes = (size_t)layout.sharcUpdatePaths * sz.sharcUpdateState;
     layout.pathRayBytes = (size_t)pixels * sz.pathRay;
-    layout.hitBytes = (size_t)pixels * sz.hitRecord;
+    layout.hitBytes = (size_t)pixels * std::max(sz.hitRecord, restirEnabled ? sz.restirReservoir : size_t{ 0 });
     layout.iorStackBytes = (size_t)pixels * sz.iorStack;
     layout.radianceBytes = (size_t)pixels * sz.radiance;
     layout.guideRayBytes = (size_t)pixels * sz.guideRay;

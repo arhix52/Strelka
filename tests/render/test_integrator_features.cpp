@@ -52,6 +52,10 @@ TEST_CASE("packWavefrontFeatures sets each independent flag")
     in = {};
     in.useMetal4 = true;
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kMetal4));
+
+    in = {};
+    in.restir = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kRestir));
 }
 
 TEST_CASE("packWavefrontFeatures motion blur needs enable and a mover")
