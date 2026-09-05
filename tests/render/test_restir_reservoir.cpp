@@ -154,6 +154,19 @@ TEST_CASE("ReSTIR M limit preserves reservoir normalization")
     CHECK(restirReservoirNormalization(reservoir) == doctest::Approx(before));
 }
 
+TEST_CASE("ReSTIR temporal history M clamp is bias-mode independent")
+{
+    const RestirReservoirState expanded{ 1024.0f, 2.0f, 512u, RESTIR_RESERVOIR_VALID };
+    for (const unsigned int biasMode : { 0u, 1u })
+    {
+        RestirReservoirState history = expanded;
+        restirReservoirLimitHistoryM(history, 2u, 8u);
+        CAPTURE(biasMode);
+        CHECK(history.M == 16u);
+        CHECK(restirReservoirNormalization(history) == doctest::Approx(restirReservoirNormalization(expanded)));
+    }
+}
+
 TEST_CASE("ReSTIR sample key preserves category and stable ID")
 {
     RestirLightSample sample{};

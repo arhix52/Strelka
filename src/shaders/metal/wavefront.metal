@@ -3055,11 +3055,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         previousReservoir.state.M != 0u && age < uniforms.reservoirMaxAge &&
                         restirSurfaceHistoryCompatible(surface, oldSurface))
                     {
-                        if (uniforms.restirBiasCorrection != 0u)
-                        {
-                            restirReservoirLimitM(
-                                previousReservoir.state, reservoir.state.M * max(uniforms.reservoirMaxAge, 1u));
-                        }
+                        restirReservoirLimitHistoryM(
+                            previousReservoir.state, reservoir.state.M, max(uniforms.reservoirMaxAge, 1u));
                         const LightConnection previousConnection = reconnectRestirSample(
                             uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
                             motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);

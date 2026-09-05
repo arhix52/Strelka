@@ -101,6 +101,13 @@ DEVICE_FUNC void restirReservoirLimitM(THREAD_REF RestirReservoirState& reservoi
     }
 }
 
+DEVICE_FUNC void restirReservoirLimitHistoryM(THREAD_REF RestirReservoirState& reservoir,
+                                              unsigned int currentM,
+                                              unsigned int maxHistoryLength)
+{
+    restirReservoirLimitM(reservoir, currentM * maxHistoryLength);
+}
+
 DEVICE_FUNC bool restirSurfaceCompatible(float currentDepth,
                                          float previousDepth,
                                          float normalDot,
