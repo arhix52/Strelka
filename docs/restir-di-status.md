@@ -74,3 +74,11 @@ Manifest SHA-256 `cec235160109b775b4492b3a62879e22ff75b064d2ae18777e0ed418187030
 The static `raytraced-diagnostic` oracle follows current RTXDI source visibility and reuses the exact final-shadow traversal. At 320p Occluded it preserves mean but raises window spread/rMSE; BASIC tail energy is lower than OFF (9.87% vs 10.52%). The 32-pixel dump found no rejected source in the denominator, selected-source mismatch, double factor, or blocked nonzero RGB.
 
 Audit: production candidate/reuse queries remain 0, final visibility <= eligible, and the diagnostic rays are counted separately. Classification: A; the former BASIC failure was implementation error, not final contribution/shadow/MIS. Ray-traced mode remains diagnostic-only for static triangle scenes.
+
+## Moving-light temporal reuse (2026-09-05)
+
+Analytic light slots are stable IDs. A double-buffered light table plus O(lights) previous/current mapping preserves rectangle, disc, sphere and radiance/transform edits; deleted, disabled or type-changed slots reject only their reservoir. BASIC evaluates the current sample with current data and its temporal denominator with previous light/surface/instance data. Environment and emissive topology invalidate only their sample class.
+
+Three linear-HDR motion sequences retained 449k temporal merges at 320x240; delete produced 36 local unmapped rejects. The 512-light audit retained 114,425 temporal merges with BLAS rebuilds 0, refit/upload/mapping max 1/frame, candidate/reuse queries 0 and final rays 114,427 <= 159,744 eligible hits. Moving emissive instance reuse retained 18,150 temporal merges.
+
+At 1080p moving c1/T/S2: NEE/OFF/BASIC mean `1.00049/1.00027/1.00021`, rMSE `.23375/.23303/.23304`, GPU `58.7/69.3/79.3 ms`, storage `0/208/232 B/px`. Static output is byte-identical; BASIC timing deltas from the manifest are `-1.2/+1.4/-0.8%` for Uniform/Distributed/Occluded. Manifest hash remains `cec235160109b775b4492b3a62879e22ff75b064d2ae18777e0ed4181870309f`.

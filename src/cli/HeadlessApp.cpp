@@ -466,7 +466,8 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<bool>("render/pt/denoise", m_config.denoise);
     m_settings->setAs<uint32_t>("render/pt/profileStages", m_config.profileStages ? 1u : 0u);
     m_settings->setAs<uint32_t>(
-        "render/pt/auditRenderWork", m_config.auditRenderWork && m_config.auditMovingLights == 0 ? 1u : 0u);
+        "render/pt/auditRenderWork",
+        m_config.auditRenderWork && m_config.auditMovingLights == 0 && !m_config.auditMovingNode ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/risCandidates", m_config.risCandidates);
     m_settings->setAs<bool>("render/pt/restirDIEnabled", m_config.restirDIEnabled);
     m_settings->setAs<uint32_t>("render/pt/initialCandidateCount", m_config.initialCandidateCount);
@@ -786,11 +787,17 @@ int HeadlessApp::run()
     for (uint32_t i = 0; i < m_config.auditMovingLights; ++i)
     {
         Scene::UniformLightDesc light;
-        light.type = LIGHT_TYPE_SPHERE;
+        light.type = m_config.auditMovingLights == 1u ? LIGHT_TYPE_SPHERE :
+                                                        (i % 3u == 0u ? LIGHT_TYPE_RECT :
+                                                         i % 3u == 1u ? LIGHT_TYPE_DISC :
+                                                                        LIGHT_TYPE_SPHERE);
         light.name = fmt::format("audit moving light {}", i);
         light.position = glm::vec3((float(i % 32u) - 15.5f) * 0.08f, 0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f);
-        light.radius = 0.015f;
-        light.intensity = 0.02f;
+        light.radius = 0.15f;
+        light.width = 0.3f;
+        light.height = 0.3f;
+        light.intensity = 1.0f;
+        light.enabled = m_config.auditMotionSequence != 2u || i < (3u * m_config.auditMovingLights) / 4u;
         light.visibleToCamera = false;
         auditMovingLightIds.push_back(m_scene->createLight(light));
     }
@@ -818,10 +825,13 @@ int HeadlessApp::run()
 
     const auto startTime = high_resolution_clock::now();
     bool announced = false;
-    if (!auditMovingLightIds.empty())
+    const bool moveAuditNode = m_config.auditMovingNode && *m_config.auditMovingNode < m_scene->getNodes().size();
+    if (!auditMovingLightIds.empty() || moveAuditNode)
     {
         // Build scene and canonical analytic-light BLAS before counters start.
         m_render->renderSync(outputBuf.get());
+        const glm::vec3 auditCameraPosition = m_scene->getCamera(0).position;
+        const Scene::Node auditNode = moveAuditNode ? m_scene->getNodes()[*m_config.auditMovingNode] : Scene::Node{};
         auto moveAuditLights = [&](uint32_t frame) {
             for (uint32_t i = 0; i < auditMovingLightIds.size(); ++i)
             {
@@ -829,7 +839,27 @@ int HeadlessApp::run()
                 const float phase = float(frame) * 0.2f + float(i) * 0.01f;
                 light.position = glm::vec3((float(i % 32u) - 15.5f) * 0.08f + std::sin(phase) * 0.02f,
                                            0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f + std::cos(phase) * 0.02f);
+                if (m_config.auditMotionSequence == 1u && frame == 10u && i == 0u)
+                {
+                    light.position.x += 0.5f;
+                    light.intensity *= 8.0f;
+                }
+                if (m_config.auditMotionSequence == 2u && i >= (3u * auditMovingLightIds.size()) / 4u)
+                    light.enabled = frame >= 10u && frame < 12u;
                 m_scene->setLight(auditMovingLightIds[i], light);
+            }
+            if (m_config.auditMotionSequence == 1u)
+            {
+                Camera& camera = m_scene->getCamera(0);
+                camera.position = auditCameraPosition + glm::vec3(std::sin(float(frame) * 0.15f) * 0.02f, 0.0f, 0.0f);
+                camera.updateViewMatrix();
+            }
+            if (moveAuditNode)
+            {
+                const glm::float3 translation =
+                    auditNode.translation + glm::float3(std::sin(float(frame) * 0.2f) * 0.1f, 0.0f, 0.0f);
+                m_scene->setNodeLocalTransform(
+                    *m_config.auditMovingNode, translation, auditNode.rotation, auditNode.scale);
             }
         };
         // Warm moving transforms, the refittable TLAS and the temporal mapping.
@@ -849,6 +879,10 @@ int HeadlessApp::run()
             moveAuditLights(frame + 8u);
             m_render->renderSync(outputBuf.get());
             printProgress(frame + 1u, frames, m_render->getLastRenderTimeMs());
+        }
+        while (m_config.auditFreeze && m_sharedCtx->mSubframeIndex < m_config.spp)
+        {
+            m_render->renderSync(outputBuf.get());
         }
     }
     else

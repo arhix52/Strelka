@@ -62,6 +62,10 @@ int main(int argc, const char* argv[])
         ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-frames", "Audited frames for moving-light harness", cxxopts::value<uint32_t>())
         ("audit-moving-lights", "Add moving analytic lights for render-work audit", cxxopts::value<uint32_t>())
+        ("audit-motion-sequence", "Moving-light sequence: 0 smooth, 1 camera/abrupt, 2 add/delete",
+         cxxopts::value<uint32_t>())
+        ("audit-freeze", "Refine final moving-light frame to --spp", cxxopts::value<bool>()->implicit_value("true"))
+        ("audit-moving-node", "Move one emissive scene node", cxxopts::value<uint32_t>())
         ("capture",      "Capture one steady-state frame to a .gputrace for Xcode (as large as the scene on the device)", cxxopts::value<std::string>())
         ("camera",       "Camera index",                    cxxopts::value<int>())
         ("frame-node",    "Frame scene node like editor F",  cxxopts::value<uint32_t>())
@@ -225,6 +229,12 @@ int main(int argc, const char* argv[])
         cfg.auditFrames = std::min(result["audit-frames"].as<uint32_t>(), 1024u);
     if (result.count("audit-moving-lights"))
         cfg.auditMovingLights = std::min(result["audit-moving-lights"].as<uint32_t>(), 4096u);
+    if (result.count("audit-motion-sequence"))
+        cfg.auditMotionSequence = std::min(result["audit-motion-sequence"].as<uint32_t>(), 2u);
+    if (result.count("audit-freeze"))
+        cfg.auditFreeze = result["audit-freeze"].as<bool>();
+    if (result.count("audit-moving-node"))
+        cfg.auditMovingNode = result["audit-moving-node"].as<uint32_t>();
 #ifdef NDEBUG
     if (cfg.auditRenderWork)
     {
@@ -232,7 +242,7 @@ int main(int argc, const char* argv[])
         return 1;
     }
 #endif
-    if (cfg.auditFrames != 0u && cfg.auditMovingLights == 0u && !cfg.auditRenderWork)
+    if (cfg.auditFrames != 0u && cfg.auditMovingLights == 0u && !cfg.auditMovingNode && !cfg.auditRenderWork)
     {
         STRELKA_FATAL("--audit-frames without moving lights requires --audit-render-work");
         return 1;
