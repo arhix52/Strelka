@@ -53,30 +53,22 @@ Validation: Debug/Release Metal compile; actual MTLDevice static/active/moving r
 
 Commits: `7b0292e` Pack ReSTIR reservoir and history; `d182945` Fuse spatial and final ReSTIR passes; `ef58741` Add ReSTIR basic bias correction. Dominant bottleneck: 104-B same-frame shading cache and selected-sample BSDF/material evaluation.
 
-## Static reuse bias correction (2026-09-05)
+## Canonical OFF/BASIC validation (2026-09-05)
 
-`restirBiasCorrection = off | basic`. OFF is RTXDI OFF: source targets affect merge weights, but normalization evaluates only the selected sample at the current surface. BASIC evaluates it at current plus every compatible temporal/spatial source and uses `W = wSum*pSelectedSource/(pCurrent*sum(Mi*pi))`; RAY_TRACED is not implemented.
-Target audit: initial, temporal, spatial-source and final all call `evaluateRestirConnection`; reconstructed position, Ng/Ns, textured material/UV/LOD, BSDF, light radiance/PDF, sidedness and MIS are identical. Diffuse, glossy and transmission smoke passed; complementary BSDF-hit MIS was unchanged. Light/material/geometry edits invalidate history.
-The 20-B history cannot rebuild an exact textured BSDF. BASIC ping-pongs the existing 104-B exact shading record: 312 B/px, 617.0 MiB at 1080p (+104 B/px, +205.7 MiB); OFF stays 208 B/px. No visibility is evaluated during reuse.
+Both production modes clamp imported temporal M to `maxHistoryLength * currentM`; candidate generation, rejection, RNG, accepted sources, dispatches and visibility work are identical. OFF finalizes with `1/M`. BASIC follows RTXDI 3.1 (`f12037f`): `pi / sum(Mi*pi)`, with source targets evaluated on their own current/previous surfaces and no visibility rays.
 
-Three fixed 128-frame Sobol windows, 320x240, long NEE reference. Cells are c1 | c2; merges are accepted T/S per frame (k), then mean effective M:
+The old .5225/.2692 rMSE values are valid linear HDR. The newer .0711/.0553 values are invalid: that command omitted `--tonemap none`, clipped EXR to 1, then labelled it linear. The canonical harness now requires linear float EXR, all-pixel ROI and one reference per scene.
 
-| scene/stage | mean ratio / rMSE | T/S k | M |
-|---|---|---:|---:|
-| Uniform I | 1.0000/.0810 \| .9999/.0806 | 0/0 \| 0/0 | 1.00 \| 2.00 |
-| Uniform T | 1.0162/.0888 \| 1.0060/.0857 | 31.0/0 \| 33.0/0 | 7.88 \| 16.16 |
-| Uniform S2 | 1.0729/.1101 \| 1.0351/.0880 | 0/31.2 \| 0/47.8 | 2.08 \| 4.80 |
-| Uniform T/S2 | 1.0210/.0851 \| 1.0079/.0821 | 34.6/70.2 \| 35.0/71.8 | 51.26 \| 102.63 |
-| Distributed I | .9987/.0955 \| .9987/.0955 | 0/0 \| 0/0 | 1.00 \| 2.00 |
-| Distributed T | .9987/.0955 \| .9987/.0955 | 44.4/0 \| 44.4/0 | 8.48 \| 16.95 |
-| Distributed S2 | .9987/.0955 \| .9987/.0955 | 0/93.8 \| 0/93.8 | 2.98 \| 5.95 |
-| Distributed T/S2 | .9987/.0955 \| .9987/.0955 | 44.4/93.8 \| 44.4/93.8 | 52.00 \| 104.00 |
-| Occluded I | .9994/.0944 \| 1.0010/.0837 | 0/0 \| 0/0 | 1.00 \| 2.00 |
-| Occluded T | .9996/.0945 \| 1.0011/.0839 | 1.04/0 \| 1.21/0 | 4.00 \| 7.57 |
-| Occluded S2 | .9998/.0915 \| 1.0012/.0823 | 0/.71 \| 0/1.11 | 1.44 \| 3.02 |
-| Occluded T/S2 | 1.0000/.0881 \| 1.0013/.0811 | 1.16/1.31 \| 1.16/1.31 | 23.75 \| 42.80 |
+Target surface ledger: position, ray, Ng/Ns/frame, material/UV/LOD, throughput, geometry/instance/primitive identity and sample/medium. A 64-B union stores an exact evaluated core closure when possible, otherwise identity+barycentrics for exact geometry/material refetch. Two records replace the old 2x104-B cache: BASIC 232 B/px (458.8 MiB), OFF 208 B/px, NEE 0.
 
-First stable shift is temporal on Uniform (+1.6% c1), then spatial (+7.3%); Initial stays within 0.1%. BASIC also caps temporal history to `maxAge*currentM`, instead of importing spatially-expanded M.
+1080p, depth 4, three disjoint 128-frame Sobol windows, 512-frame NEE reference:
 
-1080p Release, three equal-frame windows: Uniform OFF→BASIC c1 `1.0319/.0870→1.0135/.0821`, c2 BASIC `1.0064/.0811`; Distributed `.9992/.0732→.9992/.0732`, c2 `.9992/.0732`; Occluded `.9996/.0562→1.0002/.0563`, c2 `1.0001/.0543`. GPU ms OFF/BASIC1/BASIC2: Uniform 81.3/98.9/106.9, Distributed 70.6/76.3/81.1, Occluded 23.0/23.2/23.3.
-Equal NEE-time mean/rMSE: Uniform `1.0594/.1109→1.0346/.1113` (c2 `1.0150/.1109`); Distributed `.9943/.0711→.9939/.0736` (c2 `.9935/.0760`); Occluded `.9976/.0553→.9976/.0551` (c2 `.9985/.0511`). Audit: candidate/reuse queries 0; final visibility <= eligible; full Debug ctest 3/3 PASS.
+| scene | NEE mean/rMSE | OFF c1 | BASIC c1 | BASIC c2 | GPU ms NEE/OFF/B1/B2 |
+|---|---:|---:|---:|---:|---:|
+| Uniform | 1.0000/.0811 | 1.0133/.0821 | 1.0135/.0821 | 1.0063/.0811 | 73.1/102.4/116.1/126.4 |
+| Distributed | 1.0001/.6107 | 1.0048/.5475 | 1.0049/.5475 | 1.0027/.5463 | 74.2/81.4/84.8/93.2 |
+| Occluded | .9998/.1606 | 1.0528/.1837 | 1.0992/.2171 | 1.0441/.1737 | 23.5/25.4/25.6/25.9 |
+
+OFF/BASIC Debug work audit: 0 candidate/reuse queries, identical accepted merges and dispatches, final rays <= eligible. Compact vs 104-B BASIC: Uniform rMSE 1.3e-6; mixed diffuse/glossy/transmission rMSE 9.6e-9; mean ratio 1.0000000.
+
+OPEN: BASIC does not reduce c1 mean bias on the unclipped Occluded reference and Uniform overhead is +13.7 ms, not <=9 ms. No heuristic or RAY_TRACED correction was added.

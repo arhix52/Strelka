@@ -54,7 +54,7 @@ TEST_CASE("temporal basic normalization uses previous-frame source target")
 TEST_CASE("basic correction removes support shift retained by off")
 {
     // RTXDI DI spatial BASIC:
-    // https://github.com/NVIDIA-RTX/RTXDI/blob/main/Libraries/Rtxdi/Include/Rtxdi/DI/SpatialResampling.hlsli
+    // https://github.com/NVIDIA-RTX/RTXDI-Library/blob/main/Include/Rtxdi/DI/SpatialResampling.hlsli#L242-L296
     // Two M=2 sources have disjoint target support over two unit-contribution samples.
     RestirReservoirState merged{};
     CHECK(restirReservoirUpdate(merged, 2.0f, 1.0f, 2u, 0.0f));
