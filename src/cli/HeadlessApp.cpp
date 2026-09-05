@@ -566,13 +566,13 @@ void HeadlessApp::populateSettings()
     }
 }
 
-void HeadlessApp::saveOutput(Buffer* buf)
+void HeadlessApp::saveOutput(Buffer* buf, const std::string& path)
 {
     const uint32_t w = buf->width();
     const uint32_t h = buf->height();
     const float* data = static_cast<const float*>(buf->getHostPointer());
 
-    const fs::path outPath(m_config.outputPath);
+    const fs::path outPath(path.empty() ? m_config.outputPath : path);
     if (outPath.has_parent_path())
     {
         fs::create_directories(outPath.parent_path());
@@ -582,7 +582,7 @@ void HeadlessApp::saveOutput(Buffer* buf)
     if (ext == ".exr")
     {
         const char* err = nullptr;
-        const int ret = SaveEXR(data, static_cast<int>(w), static_cast<int>(h), 4, 0, m_config.outputPath.c_str(), &err);
+        const int ret = SaveEXR(data, static_cast<int>(w), static_cast<int>(h), 4, 0, outPath.string().c_str(), &err);
         if (ret != TINYEXR_SUCCESS)
         {
             STRELKA_ERROR("Failed to save EXR: {}", err ? err : "unknown");
@@ -665,10 +665,10 @@ void HeadlessApp::saveOutput(Buffer* buf)
                 pixels[i * 4 + k] = static_cast<uint8_t>(std::lround(v * 255.0f));
             }
         }
-        if (!stbi_write_png(m_config.outputPath.c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels.data(),
+        if (!stbi_write_png(outPath.string().c_str(), static_cast<int>(w), static_cast<int>(h), 4, pixels.data(),
                             static_cast<int>(w * 4)))
         {
-            STRELKA_ERROR("Failed to save PNG: {}", m_config.outputPath);
+            STRELKA_ERROR("Failed to save PNG: {}", outPath.string());
         }
     }
     else
@@ -784,6 +784,16 @@ int HeadlessApp::run()
 
     std::vector<uint32_t> auditMovingLightIds;
     auditMovingLightIds.reserve(m_config.auditMovingLights);
+    const bool localManyLayout = m_config.auditMotionSequence == 3u;
+    auto auditLightBase = [&](uint32_t i) {
+        if (!localManyLayout)
+            return glm::vec3((float(i % 32u) - 15.5f) * 0.08f, 0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f);
+        const uint32_t room = (i / 256u) & 15u;
+        const uint32_t slot = i & 255u;
+        const float x = -9.0f + 6.0f * float(room & 3u) + (float(slot & 15u) - 7.5f) * 0.32f;
+        const float z = -9.0f + 6.0f * float(room >> 2u) + (float(slot >> 4u) - 7.5f) * 0.32f;
+        return glm::vec3(x, 2.35f + 0.35f * float((i * 17u) & 31u) / 31.0f, z);
+    };
     for (uint32_t i = 0; i < m_config.auditMovingLights; ++i)
     {
         Scene::UniformLightDesc light;
@@ -792,11 +802,11 @@ int HeadlessApp::run()
                                                          i % 3u == 1u ? LIGHT_TYPE_DISC :
                                                                         LIGHT_TYPE_SPHERE);
         light.name = fmt::format("audit moving light {}", i);
-        light.position = glm::vec3((float(i % 32u) - 15.5f) * 0.08f, 0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f);
-        light.radius = 0.15f;
-        light.width = 0.3f;
-        light.height = 0.3f;
-        light.intensity = 1.0f;
+        light.position = auditLightBase(i);
+        light.radius = localManyLayout ? 0.04f : 0.15f;
+        light.width = localManyLayout ? 0.08f : 0.3f;
+        light.height = localManyLayout ? 0.08f : 0.3f;
+        light.intensity = localManyLayout ? 35.0f + 90.0f * float((i * 29u) & 63u) / 63.0f : 1.0f;
         light.enabled = m_config.auditMotionSequence != 2u || i < (3u * m_config.auditMovingLights) / 4u;
         light.visibleToCamera = false;
         auditMovingLightIds.push_back(m_scene->createLight(light));
@@ -835,10 +845,13 @@ int HeadlessApp::run()
         auto moveAuditLights = [&](uint32_t frame) {
             for (uint32_t i = 0; i < auditMovingLightIds.size(); ++i)
             {
+                if (localManyLayout && (i & 7u) != 0u)
+                    continue;
                 Scene::UniformLightDesc light = m_scene->getLightsDesc()[auditMovingLightIds[i]];
                 const float phase = float(frame) * 0.2f + float(i) * 0.01f;
-                light.position = glm::vec3((float(i % 32u) - 15.5f) * 0.08f + std::sin(phase) * 0.02f,
-                                           0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f + std::cos(phase) * 0.02f);
+                light.position = auditLightBase(i);
+                light.position.x += std::sin(phase) * (localManyLayout ? 0.06f : 0.02f);
+                light.position.z += std::cos(phase) * (localManyLayout ? 0.06f : 0.02f);
                 if (m_config.auditMotionSequence == 1u && frame == 10u && i == 0u)
                 {
                     light.position.x += 0.5f;
@@ -848,10 +861,12 @@ int HeadlessApp::run()
                     light.enabled = frame >= 10u && frame < 12u;
                 m_scene->setLight(auditMovingLightIds[i], light);
             }
-            if (m_config.auditMotionSequence == 1u)
+            if (m_config.auditMotionSequence == 1u || localManyLayout)
             {
                 Camera& camera = m_scene->getCamera(0);
-                camera.position = auditCameraPosition + glm::vec3(std::sin(float(frame) * 0.15f) * 0.02f, 0.0f, 0.0f);
+                camera.position =
+                    auditCameraPosition +
+                    glm::vec3(std::sin(float(frame) * 0.15f) * (localManyLayout ? 0.04f : 0.02f), 0.0f, 0.0f);
                 camera.updateViewMatrix();
             }
             if (moveAuditNode)
@@ -878,9 +893,22 @@ int HeadlessApp::run()
         {
             moveAuditLights(frame + 8u);
             m_render->renderSync(outputBuf.get());
-            printProgress(frame + 1u, frames, m_render->getLastRenderTimeMs());
+            double frameGpuMs = m_render->getLastRenderTimeMs();
+            while (m_config.auditFreeze && !m_config.auditFramePrefix.empty() &&
+                   m_sharedCtx->mSubframeIndex < m_config.spp)
+            {
+                m_render->renderSync(outputBuf.get());
+                frameGpuMs += m_render->getLastRenderTimeMs();
+            }
+            if (!m_config.auditFramePrefix.empty())
+            {
+                saveOutput(outputBuf.get(), fmt::format("{}-{:02}.exr", m_config.auditFramePrefix, frame + 8u));
+                std::cout << fmt::format("\nSTRELKA_AUDIT_FRAME {} GPU={:.3f} ms spp={}\n", frame + 8u, frameGpuMs,
+                                         m_sharedCtx->mSubframeIndex);
+            }
+            printProgress(frame + 1u, frames, frameGpuMs);
         }
-        while (m_config.auditFreeze && m_sharedCtx->mSubframeIndex < m_config.spp)
+        while (m_config.auditFreeze && m_config.auditFramePrefix.empty() && m_sharedCtx->mSubframeIndex < m_config.spp)
         {
             m_render->renderSync(outputBuf.get());
         }

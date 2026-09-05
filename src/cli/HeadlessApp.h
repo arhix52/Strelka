@@ -59,6 +59,7 @@ struct RenderConfig
     uint32_t auditMotionSequence = 0;
     bool auditFreeze = false;
     std::optional<uint32_t> auditMovingNode;
+    std::string auditFramePrefix;
     std::string capturePath; // --capture: one steady-state frame to a .gputrace
     // Render below the output resolution and let MetalFX scale up. Off by
     // default because it changes what the image *is*, which an offline render
@@ -226,7 +227,7 @@ public:
 
 private:
     void populateSettings();
-    void saveOutput(Buffer* buf);
+    void saveOutput(Buffer* buf, const std::string& path = {});
     void printProgress(uint32_t currentSpp, uint32_t totalSpp, double lastRenderMs);
 
     RenderConfig m_config;
