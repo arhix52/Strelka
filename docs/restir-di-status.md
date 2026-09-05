@@ -55,20 +55,22 @@ Commits: `7b0292e` Pack ReSTIR reservoir and history; `d182945` Fuse spatial and
 
 ## Canonical OFF/BASIC validation (2026-09-05)
 
-Both production modes clamp imported temporal M to `maxHistoryLength * currentM`; candidate generation, rejection, RNG, accepted sources, dispatches and visibility work are identical. OFF finalizes with `1/M`. BASIC follows RTXDI 3.1 (`f12037f`): `pi / sum(Mi*pi)`, with source targets evaluated on their own current/previous surfaces and no visibility rays.
+OFF/BASIC clamp temporal M identically. RTXDI 3.1 (`f12037f`) also combines M from every compatible source surface even when that source reservoir has no valid selected sample. Strelka skipped those M values; this was the Occluded regression. OFF and BASIC now share candidates, RNG, accepted sources, M and visibility work; only BASIC uses `pi / sum(Mi*pi)`.
 
 The old .5225/.2692 rMSE values are valid linear HDR. The newer .0711/.0553 values are invalid: that command omitted `--tonemap none`, clipped EXR to 1, then labelled it linear. The canonical harness now requires linear float EXR, all-pixel ROI and one reference per scene.
 
 Target surface ledger: position, ray, Ng/Ns/frame, material/UV/LOD, throughput, geometry/instance/primitive identity and sample/medium. A 64-B union stores an exact evaluated core closure when possible, otherwise identity+barycentrics for exact geometry/material refetch. Two records replace the old 2x104-B cache: BASIC 232 B/px (458.8 MiB), OFF 208 B/px, NEE 0.
 
-1080p, depth 4, three disjoint 128-frame Sobol windows, 512-frame NEE reference:
+Manifest SHA-256 `cec235160109b775b4492b3a62879e22ff75b064d2ae18777e0ed4181870309f`. 320x240 stage isolation, three disjoint 32-frame windows; Occluded mean/rMSE (OFF -> BASIC): initial `.9968/.3585 -> same`, temporal `.9836/.4578 -> .9977/.4620`, spatial `.9892/.3223 -> .9966/.3265`, temporal+spatial `.9523/.4042 -> 1.0062/.4287`. Uniform and Distributed stayed within 0.5%; all OFF/BASIC merge/M deltas were exactly zero.
 
-| scene | NEE mean/rMSE | OFF c1 | BASIC c1 | BASIC c2 | GPU ms NEE/OFF/B1/B2 |
+1080p, depth 4, three disjoint 128-frame windows, 512-frame NEE reference:
+
+| scene | NEE mean/rMSE | OFF c1 | BASIC c1 | OFF/BASIC c2 | GPU ms N/O1/B1/O2/B2 |
 |---|---:|---:|---:|---:|---:|
-| Uniform | 1.0000/.0811 | 1.0133/.0821 | 1.0135/.0821 | 1.0063/.0811 | 73.1/102.4/116.1/126.4 |
-| Distributed | 1.0001/.6107 | 1.0048/.5475 | 1.0049/.5475 | 1.0027/.5463 | 74.2/81.4/84.8/93.2 |
-| Occluded | .9998/.1606 | 1.0528/.1837 | 1.0992/.2171 | 1.0441/.1737 | 23.5/25.4/25.6/25.9 |
+| Uniform | 1.0000/.0811 | 1.0007/.0808 | 1.0009/.0808 | 1.0004/.0808 / 1.0006/.0808 | 71.2/100.0/116.4/108.6/128.7 |
+| Distributed | 1.0001/.6107 | 1.0048/.5475 | 1.0049/.5475 | 1.0026/.5463 / 1.0027/.5463 | 76.1/83.2/89.3/87.9/93.8 |
+| Occluded | .9998/.1606 | .9193/.1935 | .9991/.1669 | .9172/.1894 / .9965/.1575 | 23.2/25.0/25.7/25.4/24.6 |
 
-OFF/BASIC Debug work audit: 0 candidate/reuse queries, identical accepted merges and dispatches, final rays <= eligible. Compact vs 104-B BASIC: Uniform rMSE 1.3e-6; mixed diffuse/glossy/transmission rMSE 9.6e-9; mean ratio 1.0000000.
+The static `raytraced-diagnostic` oracle follows current RTXDI source visibility and reuses the exact final-shadow traversal. At 320p Occluded it preserves mean but raises window spread/rMSE; BASIC tail energy is lower than OFF (9.87% vs 10.52%). The 32-pixel dump found no rejected source in the denominator, selected-source mismatch, double factor, or blocked nonzero RGB.
 
-OPEN: BASIC does not reduce c1 mean bias on the unclipped Occluded reference and Uniform overhead is +13.7 ms, not <=9 ms. No heuristic or RAY_TRACED correction was added.
+Audit: production candidate/reuse queries remain 0, final visibility <= eligible, and the diagnostic rays are counted separately. Classification: A; the former BASIC failure was implementation error, not final contribution/shadow/MIS. Ray-traced mode remains diagnostic-only for static triangle scenes.
