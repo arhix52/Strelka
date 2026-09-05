@@ -456,17 +456,18 @@ void MetalWavefrontIntegrator::beginRenderWorkAudit()
 {
     constexpr size_t diagnosticBytes =
         RESTIR_DIAGNOSTIC_PIXEL_COUNT * (sizeof(uint32_t) + sizeof(RestirDiagnosticRecord));
+    constexpr size_t lightIdBytes = RESTIR_AUDIT_LIGHT_ID_WORDS * sizeof(uint32_t);
     if (!mRenderWorkCounterBuffer)
     {
-        mRenderWorkCounterBuffer =
-            mDevice->newBuffer(WORK_COUNTER_COUNT * sizeof(uint32_t) + diagnosticBytes, MTL::ResourceStorageModeShared);
+        mRenderWorkCounterBuffer = mDevice->newBuffer(
+            WORK_COUNTER_COUNT * sizeof(uint32_t) + lightIdBytes + diagnosticBytes, MTL::ResourceStorageModeShared);
         mResidencyDirty = true;
     }
     if (mRenderWorkCounterBuffer)
     {
         memset(mRenderWorkCounterBuffer->contents(), 0, mRenderWorkCounterBuffer->length());
         auto* words = static_cast<uint32_t*>(mRenderWorkCounterBuffer->contents());
-        auto* pixels = words + WORK_COUNTER_COUNT;
+        auto* pixels = words + WORK_COUNTER_COUNT + RESTIR_AUDIT_LIGHT_ID_WORDS;
         std::fill_n(pixels, RESTIR_DIAGNOSTIC_PIXEL_COUNT, std::numeric_limits<uint32_t>::max());
         // NOLINTNEXTLINE(concurrency-mt-unsafe) -- audit setup precedes worker threads.
         if (const char* value = std::getenv("STRELKA_RESTIR_DIAGNOSTIC_PIXELS"))
@@ -506,8 +507,17 @@ const RestirDiagnosticRecord* MetalWavefrontIntegrator::restirDiagnosticRecords(
     }
     const auto* words = static_cast<const uint32_t*>(mRenderWorkCounterBuffer->contents());
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    return reinterpret_cast<const RestirDiagnosticRecord*>(words + WORK_COUNTER_COUNT + RESTIR_DIAGNOSTIC_PIXEL_COUNT);
+    return reinterpret_cast<const RestirDiagnosticRecord*>(words + WORK_COUNTER_COUNT + RESTIR_AUDIT_LIGHT_ID_WORDS +
+                                                           RESTIR_DIAGNOSTIC_PIXEL_COUNT);
 }
+
+#ifndef NDEBUG
+const uint32_t* MetalWavefrontIntegrator::restirAuditLightIdWords() const
+{
+    const auto* words = renderWorkCounters();
+    return words ? words + WORK_COUNTER_COUNT : nullptr;
+}
+#endif
 
 uint64_t MetalWavefrontIntegrator::renderWorkCounterAddress() const
 {

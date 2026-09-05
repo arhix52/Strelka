@@ -9,6 +9,7 @@
 
 #include "MetalRender.h"
 
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -2994,6 +2995,15 @@ void MetalRender::renderSync(Buffer* output)
                 mRenderWorkCounters[i] += counters[i];
             }
         }
+#ifndef NDEBUG
+        if (const uint32_t* lightWords = mIntegrator.restirAuditLightIdWords())
+        {
+            uint32_t diversity = 0;
+            for (uint32_t i = 0; i < RESTIR_AUDIT_LIGHT_ID_WORDS; ++i)
+                diversity += std::popcount(lightWords[i]);
+            mRestirSelectedLightDiversity.push_back(diversity);
+        }
+#endif
         for (const auto& [label, count] : mIntegrator.renderWorkDispatches())
         {
             mRenderWorkDispatches[label] += count;
@@ -3137,6 +3147,12 @@ std::string MetalRender::renderWorkAuditJson() const
         out += ']';
         return out;
     };
+    auto shortArray = [&](uint32_t base, uint32_t count) {
+        std::string out = "[";
+        for (uint32_t i = 0; i < count; ++i)
+            out += fmt::format("{}{}", i == 0u ? "" : ",", c[base + i]);
+        return out + ']';
+    };
     auto sum = [&](uint32_t base) {
         uint64_t total = 0;
         for (uint32_t i = 0; i < WORK_BOUNCE_SLOTS; ++i)
@@ -3192,6 +3208,13 @@ std::string MetalRender::renderWorkAuditJson() const
 #endif
     commandBuffers += ']';
 
+    std::string selectedLightDiversity = "[";
+#ifndef NDEBUG
+    for (size_t i = 0; i < mRestirSelectedLightDiversity.size(); ++i)
+        selectedLightDiversity += fmt::format("{}{}", i == 0u ? "" : ",", mRestirSelectedLightDiversity[i]);
+#endif
+    selectedLightDiversity += ']';
+
     std::string restirDiagnostics = "[";
     if (const RestirDiagnosticRecord* records = mIntegrator.restirDiagnosticRecords())
     {
@@ -3232,6 +3255,11 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"restirEffectiveM\":{:.6f},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
         "\"temporalRejects\":{{\"surface\":{},\"unmapped\":{},\"type\":{},\"environment\":{},\"mesh\":{}}},"
+        "\"restirUtility\":{{\"temporalSelected\":{},\"temporalTargetPositive\":{},"
+        "\"temporalDuplicateCurrent\":{},\"temporalSelectedDuplicateCurrent\":{},"
+        "\"finalSources\":[{},{},{}],\"finalHistory\":{},\"finalHistoryRays\":{},\"finalHistoryVisible\":{},"
+        "\"ageHistogram\":{},\"effectiveMHistogram\":{},\"targetRatioLog2Histogram\":{},"
+        "\"selectedLightDiversity\":{}}},"
         "\"finalRestirVisibilityRays\":{},"
         "\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
         "\"kernelThreads\":{{\"generate\":{{\"active\":{},\"dispatched\":{}}},"
@@ -3258,6 +3286,13 @@ std::string MetalRender::renderWorkAuditJson() const
         c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES], c[WORK_RESTIR_TEMPORAL_REJECT_SURFACE],
         c[WORK_RESTIR_TEMPORAL_REJECT_UNMAPPED], c[WORK_RESTIR_TEMPORAL_REJECT_TYPE],
         c[WORK_RESTIR_TEMPORAL_REJECT_ENVIRONMENT], c[WORK_RESTIR_TEMPORAL_REJECT_MESH],
+        c[WORK_RESTIR_TEMPORAL_SELECTED], c[WORK_RESTIR_TEMPORAL_TARGET_POSITIVE],
+        c[WORK_RESTIR_TEMPORAL_DUPLICATE_CURRENT], c[WORK_RESTIR_TEMPORAL_SELECTED_DUPLICATE_CURRENT],
+        c[WORK_RESTIR_FINAL_SOURCE_INITIAL], c[WORK_RESTIR_FINAL_SOURCE_TEMPORAL], c[WORK_RESTIR_FINAL_SOURCE_SPATIAL],
+        c[WORK_RESTIR_FINAL_HISTORY], c[WORK_RESTIR_FINAL_HISTORY_RAYS], c[WORK_RESTIR_FINAL_HISTORY_VISIBLE],
+        shortArray(WORK_RESTIR_AGE_HISTOGRAM_BASE, RESTIR_AUDIT_AGE_BINS),
+        shortArray(WORK_RESTIR_M_HISTOGRAM_BASE, RESTIR_AUDIT_M_BINS),
+        shortArray(WORK_RESTIR_TARGET_RATIO_HISTOGRAM_BASE, RESTIR_AUDIT_TARGET_RATIO_BINS), selectedLightDiversity,
         c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
         c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,

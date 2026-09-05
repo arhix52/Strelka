@@ -163,6 +163,9 @@ public:
     void beginRenderWorkAudit();
     const uint32_t* renderWorkCounters() const;
     const RestirDiagnosticRecord* restirDiagnosticRecords() const;
+#ifndef NDEBUG
+    const uint32_t* restirAuditLightIdWords() const;
+#endif
     uint64_t renderWorkCounterAddress() const;
     const std::map<std::string, uint64_t>& renderWorkDispatches() const
     {

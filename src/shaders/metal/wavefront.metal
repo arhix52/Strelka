@@ -147,7 +147,7 @@ static inline device RestirDiagnosticRecord* restirDiagnosticRecord(constant Uni
         return nullptr;
     }
     device uint32_t* words = (device uint32_t*)uniforms.renderWorkCounters;
-    device uint32_t* pixels = words + WORK_COUNTER_COUNT;
+    device uint32_t* pixels = words + WORK_COUNTER_COUNT + RESTIR_AUDIT_LIGHT_ID_WORDS;
     device RestirDiagnosticRecord* records = (device RestirDiagnosticRecord*)(pixels + RESTIR_DIAGNOSTIC_PIXEL_COUNT);
     for (uint32_t i = 0u; i < RESTIR_DIAGNOSTIC_PIXEL_COUNT; ++i)
     {
@@ -157,6 +157,25 @@ static inline device RestirDiagnosticRecord* restirDiagnosticRecord(constant Uni
         }
     }
     return nullptr;
+}
+
+static inline void auditRestirLightId(constant Uniforms& uniforms, uint32_t lightId)
+{
+    if (SPEC_RENDER_WORK_AUDIT && lightId < RESTIR_AUDIT_LIGHT_ID_WORDS * 32u)
+    {
+        device atomic_uint* words = uniforms.renderWorkCounters + WORK_COUNTER_COUNT;
+        atomic_fetch_or_explicit(&words[lightId >> 5u], 1u << (lightId & 31u), memory_order_relaxed);
+    }
+}
+
+static inline uint32_t restirMHistogramBin(uint32_t M)
+{
+    return M <= 1u ? 0u : min(32u - clz(M - 1u), RESTIR_AUDIT_M_BINS - 1u);
+}
+
+static inline uint32_t restirTargetRatioHistogramBin(float ratio)
+{
+    return uint32_t(clamp(floor(log2(ratio)) + 4.0f, 0.0f, float(RESTIR_AUDIT_TARGET_RATIO_BINS - 1u)));
 }
 
 static inline void restirDiagnosticVisibility(constant Uniforms& uniforms, uint32_t pixelIndex, float3 contribution)
@@ -3194,14 +3213,34 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                 previousSampleType == RESTIR_SAMPLE_INVALID ? WORK_RESTIR_TEMPORAL_REJECT_SURFACE :
                                                                               WORK_RESTIR_TEMPORAL_REJECT_UNMAPPED);
                         }
+                        bool previousDuplicateCurrent = false;
                         if (previousValid && previousLightValid)
                         {
+                            previousDuplicateCurrent =
+                                previousSampleAtCurrent.typeAndLightId == reservoir.sample.typeAndLightId &&
+                                previousSampleAtCurrent.data0 == reservoir.sample.data0 &&
+                                previousSampleAtCurrent.data1 == reservoir.sample.data1 &&
+                                previousSampleAtCurrent.data2 == reservoir.sample.data2;
+                            if (previousDuplicateCurrent)
+                            {
+                                auditWork(uniforms, WORK_RESTIR_TEMPORAL_DUPLICATE_CURRENT);
+                            }
                             const LightConnection previousConnection = reconnectRestirSample(
                                 uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
                                 motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousSampleAtCurrent);
                             previousEvaluation =
                                 evaluateRestirConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
                                                          openpbrPrepared, uniforms.misHeuristic);
+                            if (previousEvaluation.target > 0.0f)
+                            {
+                                auditWork(uniforms, WORK_RESTIR_TEMPORAL_TARGET_POSITIVE);
+                                if (reservoir.state.target > 0.0f)
+                                {
+                                    const float targetRatio = previousEvaluation.target / reservoir.state.target;
+                                    auditWork(uniforms, WORK_RESTIR_TARGET_RATIO_HISTOGRAM_BASE +
+                                                            restirTargetRatioHistogramBin(targetRatio));
+                                }
+                            }
                         }
                         const bool temporalSourceCompatible = !previousValid || previousLightValid;
                         bool selectedHistory = false;
@@ -3220,6 +3259,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             if (selectedHistory)
                             {
                                 reservoir.sample = previousSampleAtCurrent;
+                                auditWork(uniforms, WORK_RESTIR_TEMPORAL_SELECTED);
+                                if (previousDuplicateCurrent)
+                                    auditWork(uniforms, WORK_RESTIR_TEMPORAL_SELECTED_DUPLICATE_CURRENT);
                             }
                             if (uniforms.restirBiasCorrection != 0u)
                             {
@@ -3838,9 +3880,21 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                               (min(uniforms.spatialNeighborCount, 16u) + 1u);
         restirReservoirLimitM(reservoir.state, maxM);
         auditWork(uniforms, WORK_RESTIR_EFFECTIVE_M, reservoir.state.M);
+        auditWork(uniforms, WORK_RESTIR_M_HISTOGRAM_BASE + restirMHistogramBin(reservoir.state.M));
         currentReservoirs[tid] = reservoir;
         return;
     }
+
+    const bool selectedSpatial = selectedSourceIndex != tid;
+    const bool selectedHistory = selectedAge != 0u;
+    auditWork(uniforms, selectedSpatial ? WORK_RESTIR_FINAL_SOURCE_SPATIAL :
+                        selectedHistory ? WORK_RESTIR_FINAL_SOURCE_TEMPORAL :
+                                          WORK_RESTIR_FINAL_SOURCE_INITIAL);
+    if (selectedHistory)
+        auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY);
+    auditWork(uniforms, WORK_RESTIR_AGE_HISTOGRAM_BASE + min(selectedAge, RESTIR_AUDIT_AGE_BINS - 1u));
+    if (restirSampleType(reservoir.sample) == RESTIR_SAMPLE_ANALYTIC)
+        auditRestirLightId(uniforms, restirSampleLightId(reservoir.sample));
 
     const LightConnection connection =
         reconnectRestirSample(uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
@@ -3946,6 +4000,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                           (min(uniforms.spatialNeighborCount, 16u) + 1u);
     restirReservoirLimitM(reservoir.state, maxM);
     auditWork(uniforms, WORK_RESTIR_EFFECTIVE_M, reservoir.state.M);
+    auditWork(uniforms, WORK_RESTIR_M_HISTOGRAM_BASE + restirMHistogramBin(reservoir.state.M));
     currentReservoirs[tid] = reservoir;
     if (diagnosticRecord != nullptr)
     {
@@ -3986,11 +4041,13 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     sr.pixelIndex = tid;
     sr.medium = medium;
     sr.sharcRadiance = packed_float3(float3(0.0f));
-    sr.sharcPathIndex = tid;
+    sr.sharcPathIndex = tid | (SPEC_RENDER_WORK_AUDIT && selectedHistory ? RESTIR_AUDIT_HISTORY_BIT : 0u);
     sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
     shadowRays[slot] = sr;
     auditWork(uniforms, WORK_RESTIR_FINAL_VISIBILITY_RAYS);
+    if (selectedHistory)
+        auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_RAYS);
 }
 
 // ---------------------------------------------------------------------------
@@ -4737,6 +4794,10 @@ static void shadowImpl(uint gid,
         return;
     }
     const ShadowRay sr = shadowRays[gid];
+    const bool restirHistoryRay =
+        SPEC_RENDER_WORK_AUDIT && bounce == 0u && (sr.sharcPathIndex & RESTIR_AUDIT_HISTORY_BIT) != 0u;
+    const uint32_t sharcPathIndex =
+        SPEC_RENDER_WORK_AUDIT ? sr.sharcPathIndex & RESTIR_AUDIT_PATH_INDEX_MASK : sr.sharcPathIndex;
     auditWork(uniforms, WORK_SHADOW_RAYS_BASE + min(bounce, WORK_BOUNCE_SLOTS - 1u));
     // Opaque validation scenes issue exactly one hardware query per shadow ray.
     // Alpha restart walks may issue more and remain classified separately in
@@ -4790,11 +4851,13 @@ static void shadowImpl(uint gid,
             if (bounce == 0u)
             {
                 restirDiagnosticVisibility(uniforms, sr.pixelIndex, weight);
+                if (restirHistoryRay)
+                    auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
             }
             radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
             if (SPEC_SHARC_UPDATE)
             {
-                const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sr.sharcPathIndex);
+                const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sharcPathIndex);
                 const SharcUpdateState updateState = sharcUpdates[updateIndex];
                 sharcPropagate(updateState, sharcAccumulation, sharcRadiance, uniforms,
                                (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u);
@@ -4855,11 +4918,13 @@ static void shadowImpl(uint gid,
     if (bounce == 0u)
     {
         restirDiagnosticVisibility(uniforms, sr.pixelIndex, weight);
+        if (restirHistoryRay)
+            auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
     }
     radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
     if (SPEC_SHARC_UPDATE)
     {
-        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sr.sharcPathIndex);
+        const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sharcPathIndex);
         const SharcUpdateState updateState = sharcUpdates[updateIndex];
         sharcPropagate(updateState, sharcAccumulation, sharcRadiance, uniforms,
                        (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u);
