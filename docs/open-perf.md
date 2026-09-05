@@ -19,15 +19,16 @@ this file targets:
 | recorded here (2026-08-21) | 8.10 | 8.60 | 18.30 | -- |
 | after the light-correctness batch | 39.3 | 216.6 | 40.5 | 12.1 |
 | after the four fixes below | 31.3 | 47.4 | 30.7 | 11.6 |
-| with the lights in the BVH (5) | **19.5** | **30.0** | **30.8** | **11.7** |
+| with the lights in the BVH (5) | 19.5 | 30.0 | 30.8 | 11.7 |
+| with the quick factorisation (6) | **18.9** | **28.2** | **27.3** | **12.5** |
 
 kids_room was 24x its recorded number and is now 3.5x; the residue is real work
 (exact intersection, exact densities) and the shadow rays that carry it. At
 1280x720 `max_depth` 4, where the entries below were found: kids_room 86.7 ->
-12.1, iso_bathroom 15.0 -> 6.8, pine_scene 17.8 -> 13.1, chess_set 5.7 -> 5.5.
+11.2, iso_bathroom 15.0 -> 6.5, pine_scene 17.8 -> 12.5, chess_set 5.7 -> 5.5.
 The ladder is unchanged across all four, all 33 rows.
 
-What the five were, in the order they were found:
+What the six were, in the order they were found:
 
 1. **The representability check ran per ray, per light.**
    `analyticEllipsoidIsRepresentable()` builds a scaled affine basis and probes
@@ -70,6 +71,76 @@ What the five were, in the order they were found:
    -- neither has an analytic emitter with a surface. Verified bit-exact against
    the walks in three steps (structure, then the radiance path, then the shadow
    path), which is also how the ball in (2) was caught.
+6. **The affine factorisation ran per ray for lights that could not need it.**
+   `scaledAffineBasis()` equilibrates a light's axes by powers of two before
+   forming the determinant and the adjugate -- twelve `frexp` and twelve
+   `ldexp` -- and it exists because the determinant is cubic in the axis scale:
+   a light with axes of 1e13 overflows a float without it, which is what the
+   1e13 and 2e18 lights in `test_light_pdf.cpp` are. Inside the range a scene
+   authored in metres uses, it buys nothing. A quick path for axis scales in
+   [1e-10, 1e10], with the same conditioning test deciding and the exact path
+   still there for everything outside, plus carrying the adjugate in the basis
+   rather than reforming it in every solve: kids_room 12.0 -> 11.2,
+   iso_bathroom 6.8 -> 6.5, pine_scene 13.0 -> 12.5.
+   `tests/render/test_procedural_analytic_lights.cpp` drives axis scales across
+   both bounds and requires the solve to invert the axes it was handed on
+   either side.
+
+### What the profile says now, and what it does not
+
+Re-measured 2026-09-05 after (5), one steady-state launch at 1280x720 depth 4:
+
+| | kids_room | iso_bathroom | pine_scene |
+|---|---|---|---|
+| stall `no_instruction` | 30.0 | 18.1 | 16.3 |
+| stall `long_scoreboard` | 4.6 | 5.5 | 18.1 |
+| instruction cache hit | 99.83 % | 99.79 % | 99.89 % |
+| `imc_miss` | 0.00 | 0.00 | 0.00 |
+| DRAM | 15.2 % | 21.6 % | 53.9 % |
+| SM throughput | 8.7 % | 9.6 % | 8.9 % |
+| registers / occupancy | 255 / 32.6 % | 255 / 32.2 % | 255 / 32.8 % |
+| active lanes of 32 | 13.2 | 18.6 | 12.2 |
+
+Two different scenes: kids_room and iso_bathroom wait on instruction issue,
+pine_scene waits on memory. Nothing here is an instruction-cache problem, on
+the same evidence as the section below.
+
+Where the frame goes on kids_room, by removing pieces and measuring (12.0
+ms/sample at the time):
+
+| | ms | share |
+|---|---|---|
+| `connectToLight` -- selection, exact sampling, densities | 4.9 | 41 % |
+| the rest of the next-event scaffolding (MIS, the RIS loop) | 1.6 | 13 % |
+| `bsdf_eval` inside next-event estimation | 0.9 | 7.5 % |
+| tracing the shadow ray | 0.9 | 7.5 % |
+| everything else (BSDF sampling, traversal, shading) | 3.7 | 31 % |
+
+Read that against the PC samples, which rank differently: the top line by
+samples is the sheen albedo table (`standard_pbr.h:278` -- 11.5 % of kids_room's
+samples, 20.5 % of iso_bathroom's, 24.1 % of pine_scene's, and most of the
+frame's `long_scoreboard`). Replacing the lookup with a constant makes kids_room
+*slower*, 13.6 against 12.0. Sample rank is where warps wait, not what the frame
+costs; this file has now made that mistake twice.
+
+Three things measured and not worth doing:
+
+* **A cache of the factored basis in a buffer beside the light table.** The
+  natural form of (6): factor each light once on the host, index it by light id
+  on the device. It is slower -- kids_room 14.3 against 12.0 -- because
+  `ScaledAffineBasis` is 88 bytes and the light id is divergent, so every
+  connection and every intersection pays an uncoalesced read of it instead of
+  arithmetic that was already in registers. The quick path in (6) is what
+  remained after this was thrown away.
+* **Widening the shader-reorder hint.** `optixReorder` is worth a great deal
+  already: turning it off costs kids_room 12.0 -> 15.6, iso_bathroom 6.8 -> 9.2,
+  pine_scene 13.0 -> 22.9. Adding the medium flag and the bounce depth to the
+  hint, 5 bits to 8, makes all three worse (12.5 / 7.2 / 13.4): the groups get
+  smaller than the coherence they buy.
+* **Capping registers.** `STRELKA_OPTIX_MAX_REGISTERS` 128 is worth 1.7 % on
+  kids_room, 96 nothing, 72 costs 22 %. Spill is not the problem either --
+  `LDL`/`STL` are 2.6-3.5 % of PC samples despite 3.2 GB of local loads and
+  2.2 GB of local stores per launch.
 
 ### The stall is not what this file used to say, and not what it looks like
 

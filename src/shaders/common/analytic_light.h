@@ -143,6 +143,12 @@ struct ScaledAffineBasis
     float3 x{};
     float3 y{};
     float3 z{};
+    // The adjugate rows. Functions of the basis alone, and both the solve and
+    // the representability test want all three, so they are carried rather than
+    // formed again at each use.
+    float3 cofactorX{};
+    float3 cofactorY{};
+    float3 cofactorZ{};
     CompensatedFloat determinant{};
     int objectExponentX = 0;
     int objectExponentY = 0;
@@ -249,9 +255,9 @@ DEVICE_FUNC bool affineComponentwiseInverseRowIsStable(float3 inverseNumeratorRo
 DEVICE_FUNC bool affineEllipsoidPointMapIsRepresentable(const THREAD_REF ScaledAffineBasis& basis)
 {
     const float determinant = compensatedValue(basis.determinant);
-    const float3 cofactorX = accurateCross(basis.y, basis.z);
-    const float3 cofactorY = accurateCross(basis.z, basis.x);
-    const float3 cofactorZ = accurateCross(basis.x, basis.y);
+    const float3 cofactorX = basis.cofactorX;
+    const float3 cofactorY = basis.cofactorY;
+    const float3 cofactorZ = basis.cofactorZ;
     return basis.valid &&
            affineComponentwiseInverseRowIsStable(cofactorX, basis.x, basis.y, basis.z, basis.objectExponentX,
                                                  basis.objectExponentX, basis.objectExponentY, basis.objectExponentZ,
@@ -282,6 +288,50 @@ DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, floa
     if (!(scaleX > 0.0f) || !(scaleY > 0.0f) || !(scaleZ > 0.0f))
     {
         return result;
+    }
+
+    // The equilibration below exists to keep the determinant and the adjugate
+    // representable when the authored axes differ by many orders of magnitude:
+    // the determinant is cubic in the axis scale, so a light with axes of 1e13
+    // overflows a float outright. It costs twelve frexp and twelve ldexp, and
+    // it buys nothing at all for a light authored in the range a scene in
+    // metres uses. Inside this window the products cannot overflow and cannot
+    // fall into the denormals, so the axes are used as they are and the same
+    // conditioning test decides. Everything outside it falls through to the
+    // exact path below, which is what tests/render/test_light_pdf.cpp's 1e13
+    // and 2e18 lights exercise.
+    const float widest = fmaxf(scaleX, fmaxf(scaleY, scaleZ));
+    const float narrowest = fminf(scaleX, fminf(scaleY, scaleZ));
+    if (widest < 1.0e10f && narrowest > 1.0e-10f)
+    {
+        result.x = axisX;
+        result.y = axisY;
+        result.z = axisZ;
+        result.determinant = compensatedDotCrossExpansion(axisX, axisY, axisZ);
+        const float fastDeterminant = compensatedValue(result.determinant);
+        const float3 fastCofactorX = accurateCross(axisY, axisZ);
+        const float3 fastCofactorY = accurateCross(axisZ, axisX);
+        const float3 fastCofactorZ = accurateCross(axisX, axisY);
+        const float fastMatrixNorm = fmaxf(fabsf(axisX.x) + fabsf(axisY.x) + fabsf(axisZ.x),
+                                           fmaxf(fabsf(axisX.y) + fabsf(axisY.y) + fabsf(axisZ.y),
+                                                 fabsf(axisX.z) + fabsf(axisY.z) + fabsf(axisZ.z)));
+        const float fastAdjugateNorm = fmaxf(fabsf(fastCofactorX.x) + fabsf(fastCofactorX.y) + fabsf(fastCofactorX.z),
+                                             fmaxf(fabsf(fastCofactorY.x) + fabsf(fastCofactorY.y) +
+                                                       fabsf(fastCofactorY.z),
+                                                   fabsf(fastCofactorZ.x) + fabsf(fastCofactorZ.y) +
+                                                       fabsf(fastCofactorZ.z)));
+        if (fabsf(fastDeterminant) > 9.313225746154785e-10f * fastMatrixNorm * fastAdjugateNorm)
+        {
+            result.cofactorX = fastCofactorX;
+            result.cofactorY = fastCofactorY;
+            result.cofactorZ = fastCofactorZ;
+            result.valid = true;
+            return result;
+        }
+        // Ill-conditioned inside the window as well: start over on the exact
+        // path rather than reporting what the quick test could not certify.
+        ScaledAffineBasis restart;
+        result = restart;
     }
 
     int exponentX = 0;
@@ -344,6 +394,9 @@ DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, floa
         return result;
     }
 
+    result.cofactorX = cofactorX;
+    result.cofactorY = cofactorY;
+    result.cofactorZ = cofactorZ;
     result.objectExponentX = exponentX - globalExponent;
     result.objectExponentY = exponentY - globalExponent;
     result.objectExponentZ = exponentZ - globalExponent;
@@ -524,9 +577,6 @@ DEVICE_FUNC bool solveAffineCoordinates(
         objectCoordinates = make_float3(0.0f);
         return false;
     }
-    const float3 cofactorX = accurateCross(basis.y, basis.z);
-    const float3 cofactorY = accurateCross(basis.z, basis.x);
-    const float3 cofactorZ = accurateCross(basis.x, basis.y);
     float3 scaledCoordinates = make_float3(
         compensatedValue(divideCompensated(compensatedDotCrossExpansion(offset, basis.y, basis.z), basis.determinant)),
         compensatedValue(divideCompensated(compensatedDotCrossExpansion(offset, basis.z, basis.x), basis.determinant)),
@@ -549,9 +599,9 @@ DEVICE_FUNC bool solveAffineCoordinates(
                         fmaf(-basis.z.z, scaledCoordinates.z,
                              fmaf(-basis.y.z, scaledCoordinates.y, fmaf(-basis.x.z, scaledCoordinates.x, offset.z))));
         const float3 correction = make_float3(
-            compensatedValue(divideCompensated(compensatedDotExpansion(residual, cofactorX), basis.determinant)),
-            compensatedValue(divideCompensated(compensatedDotExpansion(residual, cofactorY), basis.determinant)),
-            compensatedValue(divideCompensated(compensatedDotExpansion(residual, cofactorZ), basis.determinant)));
+            compensatedValue(divideCompensated(compensatedDotExpansion(residual, basis.cofactorX), basis.determinant)),
+            compensatedValue(divideCompensated(compensatedDotExpansion(residual, basis.cofactorY), basis.determinant)),
+            compensatedValue(divideCompensated(compensatedDotExpansion(residual, basis.cofactorZ), basis.determinant)));
         scaledCoordinates += correction;
     }
     objectCoordinates = make_float3(scaleFloatExponent(scaledCoordinates.x, -basis.objectExponentX),
