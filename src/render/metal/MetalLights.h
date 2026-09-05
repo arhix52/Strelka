@@ -94,6 +94,20 @@ public:
     {
         return mAuditCounts;
     }
+#ifndef NDEBUG
+    float proposalCollision() const
+    {
+        return mProposalCollision;
+    }
+    float proposalEntropy() const
+    {
+        return mProposalEntropy;
+    }
+    bool temporalMappingInjective() const
+    {
+        return mTemporalMappingInjective;
+    }
+#endif
     /// For the Metal 4 residency set: an argument table names these by handle,
     /// and a handle whose allocation is not resident is a page fault rather than
     /// a validation message.
@@ -126,6 +140,11 @@ private:
     /// 4K slide each time would make the light unusable to author with.
     std::vector<std::string> mProjectorImagePaths;
     AuditCounts mAuditCounts;
+#ifndef NDEBUG
+    float mProposalCollision = 0.0f;
+    float mProposalEntropy = 0.0f;
+    bool mTemporalMappingInjective = true;
+#endif
 };
 
 } // namespace oka::metal

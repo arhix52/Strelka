@@ -110,6 +110,25 @@ DEVICE_FUNC void restirReservoirLimitHistoryM(THREAD_REF RestirReservoirState& r
     restirReservoirLimitM(reservoir, currentM * maxHistoryLength);
 }
 
+DEVICE_FUNC unsigned int restirSampleSequenceBase(bool frameJitter,
+                                                  bool accumulationEnabled,
+                                                  bool temporalReuseEnabled,
+                                                  unsigned int frameIndex,
+                                                  unsigned int samplesPerLaunch,
+                                                  unsigned int subframeIndex)
+{
+    return frameJitter || !accumulationEnabled || temporalReuseEnabled ?
+               frameIndex * (samplesPerLaunch > 0u ? samplesPerLaunch : 1u) :
+               subframeIndex;
+}
+
+DEVICE_FUNC void restirReservoirDiscardSample(THREAD_REF RestirReservoirState& reservoir)
+{
+    reservoir.weightSum = 0.0f;
+    reservoir.target = 0.0f;
+    reservoir.ageAndFlags &= ~RESTIR_RESERVOIR_VALID;
+}
+
 DEVICE_FUNC bool restirSurfaceCompatible(float currentDepth,
                                          float previousDepth,
                                          float normalDot,

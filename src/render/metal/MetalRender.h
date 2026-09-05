@@ -325,6 +325,8 @@ private:
     std::vector<AuditedCommandBuffer> mRenderWorkCommandBuffers;
     uint64_t mNextRenderWorkCommandBufferId = 1;
     std::vector<uint32_t> mRestirSelectedLightDiversity;
+    std::vector<RestirCandidateAuditRecord> mRestirCandidateAuditRecords;
+    bool mRestirTemporalMappingInjective = true;
 #endif
     void retainCommandBufferForSync(MTL::CommandBuffer* pCmd);
 

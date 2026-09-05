@@ -10,6 +10,7 @@
 #include <log.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -155,6 +156,14 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     const LightSelectionTable selection = buildLightSelectionAlias(powers);
 #ifndef NDEBUG
     ++mAuditCounts.temporalMappingUpdates;
+    mProposalCollision = 0.0f;
+    mProposalEntropy = 0.0f;
+    for (const LightSelectionEntry& entry : selection.entries)
+    {
+        mProposalCollision += entry.pdf * entry.pdf;
+        if (entry.pdf > 0.0f)
+            mProposalEntropy -= entry.pdf * std::log(entry.pdf);
+    }
 #endif
     mTotalPower = selection.totalPower;
 
@@ -194,6 +203,18 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
             previousToCurrent[i] = temporalLightMapping(&mCpuLights[i], &lightDescs[i], static_cast<uint32_t>(i));
             currentToPrevious[i] = temporalLightMapping(&lightDescs[i], &mCpuLights[i], static_cast<uint32_t>(i));
         }
+#ifndef NDEBUG
+        mTemporalMappingInjective = true;
+        std::vector<bool> seenCurrent(lightDescs.size(), false);
+        for (size_t i = 0; i < mCpuLights.size(); ++i)
+        {
+            const uint32_t mapped = previousToCurrent[i];
+            if (mapped < seenCurrent.size() && seenCurrent[mapped])
+                mTemporalMappingInjective = false;
+            if (mapped < seenCurrent.size())
+                seenCurrent[mapped] = true;
+        }
+#endif
     }
 
     if (allocationSize == 0)

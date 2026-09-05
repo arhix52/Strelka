@@ -167,6 +167,22 @@ TEST_CASE("ReSTIR temporal history M clamp is bias-mode independent")
     }
 }
 
+TEST_CASE("temporal ReSTIR advances candidate sequence across accumulation resets")
+{
+    CHECK(restirSampleSequenceBase(false, true, false, 17u, 1u, 0u) == 0u);
+    CHECK(restirSampleSequenceBase(false, true, true, 17u, 1u, 0u) == 17u);
+    CHECK(restirSampleSequenceBase(false, true, true, 18u, 2u, 0u) == 36u);
+}
+
+TEST_CASE("initial visibility discard keeps reservoir population")
+{
+    RestirReservoirState reservoir{ 8.0f, 2.0f, 7u, RESTIR_RESERVOIR_VALID | 3u };
+    restirReservoirDiscardSample(reservoir);
+    CHECK(reservoir.M == 7u);
+    CHECK((reservoir.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u);
+    CHECK(restirReservoirNormalization(reservoir) == 0.0f);
+}
+
 TEST_CASE("ray-traced normalization removes an occluded source from BASIC support")
 {
     // RTXDI SpatialResampling.hlsli, BASIC/RAY_TRACED normalization:

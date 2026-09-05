@@ -885,11 +885,11 @@ void MetalRender::init()
     static_assert(offsetof(::Vertex, uv) == 20);
     static_assert(offsetof(::Vertex, uv1) == 24);
     static_assert(offsetof(::Vertex, color) == 28);
-    static_assert(offsetof(Uniforms, openpbrParams) == 808);
-    static_assert(offsetof(Uniforms, openpbrTextures) == 816);
-    static_assert(offsetof(Uniforms, guideRays) == 824);
-    static_assert(offsetof(Uniforms, emissiveMeshes) == 832);
-    static_assert(offsetof(Uniforms, emissiveTriangles) == 840);
+    static_assert(offsetof(Uniforms, openpbrParams) == 816);
+    static_assert(offsetof(Uniforms, openpbrTextures) == 824);
+    static_assert(offsetof(Uniforms, guideRays) == 832);
+    static_assert(offsetof(Uniforms, emissiveMeshes) == 840);
+    static_assert(offsetof(Uniforms, emissiveTriangles) == 848);
     static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(sizeof(Uniforms) == 1008, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
@@ -1942,13 +1942,14 @@ void MetalRender::render(Buffer* output)
             featureIn.hasCurves = mGeometry.hasCurves();
             featureIn.hasOpenPBR = mMaterials.hasOpenPBRMaterials();
             featureIn.auditRenderWork = auditRenderWork;
-            featureIn.restirRayTracedDiagnostic = pUniformData->restirBiasCorrection == 2u;
+            featureIn.restirRayTracedDiagnostic =
+                pUniformData->restirBiasCorrection == 2u || pUniformData->restirInitialVisibility != 0u;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
 
             if (featureIn.restirRayTracedDiagnostic &&
                 (featureIn.enableMotionBlur || featureIn.motionBlasBuilt || featureIn.hasCurves))
             {
-                STRELKA_FATAL("ReSTIR raytraced-diagnostic supports static triangle scenes only");
+                STRELKA_FATAL("ReSTIR visibility diagnostics support static triangle scenes only");
                 mRenderBusy.store(false, std::memory_order_release);
                 pPool->release();
                 return;
@@ -3003,6 +3004,15 @@ void MetalRender::renderSync(Buffer* output)
                 diversity += std::popcount(lightWords[i]);
             mRestirSelectedLightDiversity.push_back(diversity);
         }
+        if (const RestirCandidateAuditRecord* records = mIntegrator.restirCandidateAuditRecords())
+        {
+            for (uint32_t i = 0; i < RESTIR_DIAGNOSTIC_PIXEL_COUNT; ++i)
+            {
+                if (records[i].frameIndex != std::numeric_limits<uint32_t>::max())
+                    mRestirCandidateAuditRecords.push_back(records[i]);
+            }
+        }
+        mRestirTemporalMappingInjective &= mLights.temporalMappingInjective();
 #endif
         for (const auto& [label, count] : mIntegrator.renderWorkDispatches())
         {
@@ -3247,11 +3257,44 @@ std::string MetalRender::renderWorkAuditJson() const
     }
     restirDiagnostics += ']';
 
+    std::string candidateAudit = "[";
+#ifndef NDEBUG
+    for (size_t i = 0; i < mRestirCandidateAuditRecords.size(); ++i)
+    {
+        const RestirCandidateAuditRecord& record = mRestirCandidateAuditRecords[i];
+        const auto sample = [](const RestirLightSample& s) {
+            return fmt::format("[{},{},{},{}]", s.typeAndLightId, s.data0, s.data1, s.data2);
+        };
+        candidateAudit += fmt::format(
+            "{}{{\"frame\":{},\"sample\":{},\"pixel\":[{},{}],"
+            "\"rng\":{{\"seed\":{},\"sampleIndex\":{},\"depth\":{},\"lightDimension\":{}}},"
+            "\"streamSeeds\":[{},{},{}],\"currentSample\":{},\"historySample\":{},"
+            "\"mappedHistorySample\":{},\"mappedLightId\":{},\"parity\":[{},{}],"
+            "\"bufferAddresses\":[\"0x{:x}\",\"0x{:x}\"],\"pmfCollision\":{:.9g},"
+            "\"pmfEntropy\":{:.9g}}}",
+            i == 0u ? "" : ",", record.frameIndex, record.sampleIndex, record.pixelIndex % width,
+            record.pixelIndex / width, record.rngSeed, record.rngSampleIndex, record.rngDepth, record.lightDimension,
+            record.initialStreamSeed, record.temporalStreamSeed, record.spatialStreamSeed, sample(record.currentSample),
+            sample(record.historySample), sample(record.mappedHistorySample), record.mappedLightId,
+            record.currentBufferIndex, record.historyBufferIndex,
+            mIntegrator.restirReservoirAddress(record.currentBufferIndex),
+            mIntegrator.restirReservoirAddress(record.historyBufferIndex), record.proposalCollision,
+            record.proposalEntropy);
+    }
+#endif
+    candidateAudit += ']';
+#ifndef NDEBUG
+    const char* mappingInjective = mRestirTemporalMappingInjective ? "true" : "false";
+#else
+    const char* mappingInjective = "true";
+#endif
+
     return fmt::format(
         "{{\"frames\":{},\"pixels\":{},\"spp\":{},\"gpuTimeMs\":{:.3f},"
         "\"generatedPrimaryRays\":{},\"extendRays\":{},\"guideOnlyRays\":{},\"shadowRays\":{},"
         "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
         "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},\"restirDiagnosticQueries\":{},"
+        "\"restirInitialVisibilityQueries\":{},"
         "\"restirEffectiveM\":{:.6f},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
         "\"temporalRejects\":{{\"surface\":{},\"unmapped\":{},\"type\":{},\"environment\":{},\"mesh\":{}}},"
@@ -3260,6 +3303,8 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"finalSources\":[{},{},{}],\"finalHistory\":{},\"finalHistoryRays\":{},\"finalHistoryVisible\":{},"
         "\"ageHistogram\":{},\"effectiveMHistogram\":{},\"targetRatioLog2Histogram\":{},"
         "\"selectedLightDiversity\":{}}},"
+        "\"candidateIndependence\":{{\"sameLight\":{},\"exactSample\":{},\"mappingInjective\":{},"
+        "\"records\":{}}},"
         "\"finalRestirVisibilityRays\":{},"
         "\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
         "\"kernelThreads\":{{\"generate\":{{\"active\":{},\"dispatched\":{}}},"
@@ -3276,10 +3321,10 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"manualAnalyticLightTests\":{},\"missLightEvaluations\":{},"
         "\"dispatchCount\":{},\"pipelineDispatches\":{},\"commandBuffers\":{},"
         "\"restirDiagnostics\":{}}}",
-        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs,
-        c[WORK_PRIMARY_RAYS], array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE),
-        c[WORK_INTERSECTION_QUERIES], c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES],
-        c[WORK_RESTIR_CANDIDATE_QUERIES], c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_DIAGNOSTIC_QUERIES],
+        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs, c[WORK_PRIMARY_RAYS],
+        array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE), c[WORK_INTERSECTION_QUERIES],
+        c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES], c[WORK_RESTIR_CANDIDATE_QUERIES],
+        c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_DIAGNOSTIC_QUERIES], c[WORK_RESTIR_INITIAL_VISIBILITY_QUERIES],
         c[WORK_RESTIR_FINAL_ITEMS] != 0u ?
             static_cast<double>(c[WORK_RESTIR_EFFECTIVE_M]) / static_cast<double>(c[WORK_RESTIR_FINAL_ITEMS]) :
             0.0,
@@ -3293,6 +3338,7 @@ std::string MetalRender::renderWorkAuditJson() const
         shortArray(WORK_RESTIR_AGE_HISTOGRAM_BASE, RESTIR_AUDIT_AGE_BINS),
         shortArray(WORK_RESTIR_M_HISTOGRAM_BASE, RESTIR_AUDIT_M_BINS),
         shortArray(WORK_RESTIR_TARGET_RATIO_HISTOGRAM_BASE, RESTIR_AUDIT_TARGET_RATIO_BINS), selectedLightDiversity,
+        c[WORK_RESTIR_TEMPORAL_SAME_LIGHT], c[WORK_RESTIR_TEMPORAL_DUPLICATE_CURRENT], mappingInjective, candidateAudit,
         c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
         c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,

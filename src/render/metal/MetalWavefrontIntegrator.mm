@@ -455,7 +455,8 @@ void MetalWavefrontIntegrator::resetStageProfilingMetal4()
 void MetalWavefrontIntegrator::beginRenderWorkAudit()
 {
     constexpr size_t diagnosticBytes =
-        RESTIR_DIAGNOSTIC_PIXEL_COUNT * (sizeof(uint32_t) + sizeof(RestirDiagnosticRecord));
+        RESTIR_DIAGNOSTIC_PIXEL_COUNT *
+        (sizeof(uint32_t) + sizeof(RestirDiagnosticRecord) + sizeof(RestirCandidateAuditRecord));
     constexpr size_t lightIdBytes = RESTIR_AUDIT_LIGHT_ID_WORDS * sizeof(uint32_t);
     if (!mRenderWorkCounterBuffer)
     {
@@ -490,8 +491,21 @@ void MetalWavefrontIntegrator::beginRenderWorkAudit()
         {
             records[i].pixelIndex = pixels[i];
         }
+        auto* candidateRecords = reinterpret_cast<RestirCandidateAuditRecord*>(records + RESTIR_DIAGNOSTIC_PIXEL_COUNT);
+        for (uint32_t i = 0; i < RESTIR_DIAGNOSTIC_PIXEL_COUNT; ++i)
+        {
+            candidateRecords[i].pixelIndex = pixels[i];
+            candidateRecords[i].frameIndex = std::numeric_limits<uint32_t>::max();
+        }
     }
     mRenderWorkDispatches.clear();
+}
+
+const RestirCandidateAuditRecord* MetalWavefrontIntegrator::restirCandidateAuditRecords() const
+{
+    const RestirDiagnosticRecord* records = restirDiagnosticRecords();
+    return records ? reinterpret_cast<const RestirCandidateAuditRecord*>(records + RESTIR_DIAGNOSTIC_PIXEL_COUNT) :
+                     nullptr;
 }
 
 const uint32_t* MetalWavefrontIntegrator::renderWorkCounters() const

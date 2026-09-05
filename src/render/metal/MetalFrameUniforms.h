@@ -192,6 +192,7 @@ private:
         uint32_t reservoirMaxAge = 0;
         uint32_t restirDebugMode = 0;
         uint32_t restirBiasCorrection = 0;
+        uint32_t restirInitialVisibility = 0;
     };
 
     MTL::Device* mDevice = nullptr;

@@ -159,6 +159,19 @@ static inline device RestirDiagnosticRecord* restirDiagnosticRecord(constant Uni
     return nullptr;
 }
 
+static inline device RestirCandidateAuditRecord* restirCandidateAuditRecord(constant Uniforms& uniforms,
+                                                                            uint32_t pixelIndex)
+{
+    device RestirDiagnosticRecord* diagnostic = restirDiagnosticRecord(uniforms, pixelIndex);
+    if (diagnostic == nullptr)
+        return nullptr;
+    device uint32_t* words = (device uint32_t*)uniforms.renderWorkCounters;
+    device uint32_t* pixels = words + WORK_COUNTER_COUNT + RESTIR_AUDIT_LIGHT_ID_WORDS;
+    device RestirDiagnosticRecord* records = (device RestirDiagnosticRecord*)(pixels + RESTIR_DIAGNOSTIC_PIXEL_COUNT);
+    const uint32_t slot = uint32_t(diagnostic - records);
+    return ((device RestirCandidateAuditRecord*)(records + RESTIR_DIAGNOSTIC_PIXEL_COUNT)) + slot;
+}
+
 static inline void auditRestirLightId(constant Uniforms& uniforms, uint32_t lightId)
 {
     if (SPEC_RENDER_WORK_AUDIT && lightId < RESTIR_AUDIT_LIGHT_ID_WORDS * 32u)
@@ -453,9 +466,10 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
     // the monotonic display frame: camera motion resets subframeIndex, and using
     // it there would retrace the same path and hand MetalFX correlated noise.
     // SHARC has its own temporal sequence for the same reason.
-    const bool temporalSequence = uniforms.useFrameJitter != 0u || uniforms.enableAccumulation == 0u;
     const uint32_t sequenceBase =
-        temporalSequence ? uniforms.frameIndex * max(uniforms.samples_per_launch, 1u) : uniforms.subframeIndex;
+        restirSampleSequenceBase(uniforms.useFrameJitter != 0u, uniforms.enableAccumulation != 0u,
+                                 uniforms.restirDIEnabled != 0u && uniforms.temporalReuseEnabled != 0u,
+                                 uniforms.frameIndex, uniforms.samples_per_launch, uniforms.subframeIndex);
     const uint32_t sequenceIndex = SPEC_SHARC_UPDATE ? uniforms.sharcFrameIndex : sequenceBase + sampleIdx;
     SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp);
     s.depth = depth;
@@ -3096,6 +3110,13 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
+            if (restirInitial && uniforms.restirInitialVisibility == 2u)
+            {
+                auditWork(uniforms, WORK_RESTIR_INITIAL_VISIBILITY_QUERIES);
+                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, conn, instances,
+                                             materials, geometryEntries, vertexBuffer, indexBuffer))
+                    continue;
+            }
             const float w = candidate.target / conn.pdf;
             // Reuse eLightId under a new scramble so adding RIS does not shift later Sobol dimensions.
             SamplerState arng = crng;
@@ -3110,9 +3131,36 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         reservoir.state.M = candidates;
+        if (restirInitial && uniforms.restirInitialVisibility == 1u &&
+            (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u)
+        {
+            auditWork(uniforms, WORK_RESTIR_INITIAL_VISIBILITY_QUERIES);
+            if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, bestConn, instances,
+                                         materials, geometryEntries, vertexBuffer, indexBuffer))
+                restirReservoirDiscardSample(reservoir.state);
+        }
         if (restirInitial)
         {
             const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
+            device RestirCandidateAuditRecord* candidateAudit = restirCandidateAuditRecord(uniforms, tid);
+            if (candidateAudit != nullptr)
+            {
+                candidateAudit->pixelIndex = tid;
+                candidateAudit->frameIndex = uniforms.frameIndex;
+                candidateAudit->sampleIndex = sampleIdx;
+                candidateAudit->rngSeed = rng.seed;
+                candidateAudit->rngSampleIndex = rng.sampleIdx;
+                candidateAudit->rngDepth = rng.depth;
+                candidateAudit->lightDimension = uint32_t(SampleDimension::eLightId);
+                candidateAudit->initialStreamSeed = hash_combine(rng.seed, 0x51633e2du);
+                candidateAudit->temporalStreamSeed = hash_combine(rng.seed, 0x68bc21ebu);
+                candidateAudit->spatialStreamSeed = hash_combine(rng.seed, 0x3c6ef372u);
+                candidateAudit->currentSample = reservoir.sample;
+                candidateAudit->currentBufferIndex = oddFrame ? 1u : 0u;
+                candidateAudit->historyBufferIndex = oddFrame ? 0u : 1u;
+                candidateAudit->proposalCollision = uniforms.restirProposalCollision;
+                candidateAudit->proposalEntropy = uniforms.restirProposalEntropy;
+            }
             device RestirSurfaceHistory* currentHistory = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
             device char* currentSurfaceData = uniforms.restirBiasCorrection != 0u ?
                                                   (oddFrame ? uniforms.restirSurfaceData1 : uniforms.restirSurfaceData0) :
@@ -3200,6 +3248,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             previousValid ? remapRestirSample(uniforms, lights, previousReservoir.sample, true,
                                                               previousSampleAtCurrent) :
                                             RESTIR_LIGHT_UNMAPPED;
+                        if (candidateAudit != nullptr)
+                        {
+                            candidateAudit->historySample = previousReservoir.sample;
+                            candidateAudit->mappedHistorySample = previousSampleAtCurrent;
+                            candidateAudit->mappedLightId = previousLightMapping;
+                        }
                         const bool previousLightValid = previousLightMapping != RESTIR_LIGHT_UNMAPPED &&
                                                         previousLightMapping != RESTIR_LIGHT_TYPE_CHANGED;
                         if (previousValid && !previousLightValid)
@@ -3216,6 +3270,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         bool previousDuplicateCurrent = false;
                         if (previousValid && previousLightValid)
                         {
+                            if (previousSampleAtCurrent.typeAndLightId == reservoir.sample.typeAndLightId)
+                                auditWork(uniforms, WORK_RESTIR_TEMPORAL_SAME_LIGHT);
                             previousDuplicateCurrent =
                                 previousSampleAtCurrent.typeAndLightId == reservoir.sample.typeAndLightId &&
                                 previousSampleAtCurrent.data0 == reservoir.sample.data0 &&
@@ -3275,7 +3331,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                                                         selectedAtPreviousSample);
                                 if (selectedPreviousMapping != RESTIR_LIGHT_UNMAPPED &&
                                     selectedPreviousMapping != RESTIR_LIGHT_TYPE_CHANGED &&
-                                    (!selectedHistory || SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC))
+                                    (!selectedHistory ||
+                                     (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && uniforms.restirBiasCorrection == 2u)))
                                 {
                                     const RestirTargetSurface previousStored =
                                         ((device const RestirTargetSurface*)previousSurfaceData)[previousIndex];
@@ -3317,7 +3374,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                 {
                                     previousTarget = 0.0f;
                                 }
-                                if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && previousTarget > 0.0f)
+                                if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && uniforms.restirBiasCorrection == 2u &&
+                                    previousTarget > 0.0f)
                                 {
                                     auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
                                     if (!restirDiagnosticVisible(diagnosticAccelerationStructure,
@@ -3935,7 +3993,8 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            if (selectedSourceIndex == neighborIndex && !SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC)
+            if (selectedSourceIndex == neighborIndex &&
+                !(SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && uniforms.restirBiasCorrection == 2u))
             {
                 selectedSourceTarget = neighbor.state.target;
                 sourceTargetSum += float(neighbor.state.M) * selectedSourceTarget;
@@ -3968,7 +4027,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                 neighborSi, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
             float neighborTarget = restirTargetOnly(selectedAtNeighbor, neighborSi, neighborIsFibre, neighborNeeFrame,
                                                     neighborIsOpenPBR, neighborOpenpbrPrepared, uniforms.misHeuristic);
-            if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && neighborTarget > 0.0f)
+            if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && uniforms.restirBiasCorrection == 2u && neighborTarget > 0.0f)
             {
                 auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
                 if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, selectedAtNeighbor,

@@ -239,6 +239,12 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
             throw std::runtime_error("restir_bias_correction must be 'off', 'basic', or 'raytraced-diagnostic'");
         cfg.restirBiasCorrection = *v == "raytraced-diagnostic" ? 2u : *v == "basic" ? 1u : 0u;
     }
+    if (auto v = tbl["render"]["restir_initial_visibility"].value<std::string>())
+    {
+        if (*v != "off" && *v != "selected" && *v != "candidates")
+            throw std::runtime_error("restir_initial_visibility must be 'off', 'selected', or 'candidates'");
+        cfg.restirInitialVisibility = *v == "candidates" ? 2u : *v == "selected" ? 1u : 0u;
+    }
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
         cfg.estimatorMode = (uint32_t)*v;
     if (auto v = tbl["render"]["split_aov"].value<bool>())
@@ -477,6 +483,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/reservoirMaxAge", m_config.reservoirMaxAge);
     m_settings->setAs<uint32_t>("render/pt/restirDebugMode", m_config.restirDebugMode);
     m_settings->setAs<uint32_t>("render/pt/restirBiasCorrection", m_config.restirBiasCorrection);
+    m_settings->setAs<uint32_t>("render/pt/restirInitialVisibility", m_config.restirInitialVisibility);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);

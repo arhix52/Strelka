@@ -58,6 +58,8 @@ int main(int argc, const char* argv[])
         ("restir-debug", "ReSTIR debug mode",                cxxopts::value<uint32_t>())
         ("restir-bias-correction", "ReSTIR bias correction: off, basic, raytraced-diagnostic",
          cxxopts::value<std::string>())
+        ("restir-initial-visibility", "Diagnostic initial visibility: off, selected, candidates",
+         cxxopts::value<std::string>())
         ("profile-stages", "Report per-stage GPU timings",   cxxopts::value<bool>()->implicit_value("true"))
         ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-frames", "Audited frames for moving-light harness", cxxopts::value<uint32_t>())
@@ -217,6 +219,16 @@ int main(int argc, const char* argv[])
             return 1;
         }
         cfg.restirBiasCorrection = mode == "raytraced-diagnostic" ? 2u : mode == "basic" ? 1u : 0u;
+    }
+    if (result.count("restir-initial-visibility"))
+    {
+        const std::string mode = result["restir-initial-visibility"].as<std::string>();
+        if (mode != "off" && mode != "selected" && mode != "candidates")
+        {
+            STRELKA_FATAL("--restir-initial-visibility must be off, selected, or candidates");
+            return 1;
+        }
+        cfg.restirInitialVisibility = mode == "candidates" ? 2u : mode == "selected" ? 1u : 0u;
     }
     if (result.count("profile-stages"))
     {

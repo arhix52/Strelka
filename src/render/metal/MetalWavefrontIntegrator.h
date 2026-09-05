@@ -19,6 +19,7 @@
 #include <vector>
 
 struct RestirDiagnosticRecord;
+struct RestirCandidateAuditRecord;
 
 namespace oka::metal
 {
@@ -163,6 +164,7 @@ public:
     void beginRenderWorkAudit();
     const uint32_t* renderWorkCounters() const;
     const RestirDiagnosticRecord* restirDiagnosticRecords() const;
+    const RestirCandidateAuditRecord* restirCandidateAuditRecords() const;
 #ifndef NDEBUG
     const uint32_t* restirAuditLightIdWords() const;
 #endif

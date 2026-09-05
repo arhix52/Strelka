@@ -170,6 +170,14 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->reservoirMaxAge = settings.getAs<uint32_t>("render/pt/reservoirMaxAge");
     pUniformData->restirDebugMode = settings.getAs<uint32_t>("render/pt/restirDebugMode");
     pUniformData->restirBiasCorrection = std::min(settings.getAs<uint32_t>("render/pt/restirBiasCorrection"), 2u);
+    pUniformData->restirInitialVisibility = std::min(settings.getAs<uint32_t>("render/pt/restirInitialVisibility"), 2u);
+#ifndef NDEBUG
+    pUniformData->restirProposalCollision = in.lights ? in.lights->proposalCollision() : 0.0f;
+    pUniformData->restirProposalEntropy = in.lights ? in.lights->proposalEntropy() : 0.0f;
+#else
+    pUniformData->restirProposalCollision = 0.0f;
+    pUniformData->restirProposalEntropy = 0.0f;
+#endif
     // PT accumulation and MetalFX history solve different problems. The former
     // remains the converged scene-linear result; the latter must see a fresh,
     // coherently jittered launch whose color, depth, motion and material guides
@@ -496,6 +504,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     settingsChanged |= (mPrevSettings.reservoirMaxAge != pUniformData->reservoirMaxAge);
     settingsChanged |= (mPrevSettings.restirDebugMode != pUniformData->restirDebugMode);
     settingsChanged |= (mPrevSettings.restirBiasCorrection != pUniformData->restirBiasCorrection);
+    settingsChanged |= (mPrevSettings.restirInitialVisibility != pUniformData->restirInitialVisibility);
 
     mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
     mPrevSettings.samplerType = samplerType;
@@ -528,6 +537,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     mPrevSettings.reservoirMaxAge = pUniformData->reservoirMaxAge;
     mPrevSettings.restirDebugMode = pUniformData->restirDebugMode;
     mPrevSettings.restirBiasCorrection = pUniformData->restirBiasCorrection;
+    mPrevSettings.restirInitialVisibility = pUniformData->restirInitialVisibility;
 
     /* settingsChanged reported via FillResult; orchestrator resets subframe/history */
 

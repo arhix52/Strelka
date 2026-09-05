@@ -311,6 +311,9 @@ struct Uniforms
     uint32_t restirDebugMode;
     uint32_t restirHistoryValid;
     uint32_t restirBiasCorrection;
+    uint32_t restirInitialVisibility;
+    float restirProposalCollision;
+    float restirProposalEntropy;
 
     /// The OpenPBR parameter block for material i, or null when no material in
     /// the scene is MATERIAL_TYPE_OPENPBR.
@@ -463,7 +466,9 @@ enum RenderWorkCounter : uint32_t
     WORK_RESTIR_AGE_HISTOGRAM_BASE = 99,
     WORK_RESTIR_M_HISTOGRAM_BASE = 121,
     WORK_RESTIR_TARGET_RATIO_HISTOGRAM_BASE = 129,
-    WORK_COUNTER_COUNT = 138,
+    WORK_RESTIR_INITIAL_VISIBILITY_QUERIES = 138,
+    WORK_RESTIR_TEMPORAL_SAME_LIGHT = 139,
+    WORK_COUNTER_COUNT = 140,
     WORK_BOUNCE_SLOTS = 16
 };
 
@@ -494,6 +499,29 @@ struct RestirDiagnosticRecord
     float contribution[3];
 };
 static_assert(sizeof(RestirDiagnosticRecord) == 84, "ReSTIR diagnostic record ABI changed");
+
+struct RestirCandidateAuditRecord
+{
+    uint32_t pixelIndex;
+    uint32_t frameIndex;
+    uint32_t sampleIndex;
+    uint32_t rngSeed;
+    uint32_t rngSampleIndex;
+    uint32_t rngDepth;
+    uint32_t lightDimension;
+    uint32_t initialStreamSeed;
+    uint32_t temporalStreamSeed;
+    uint32_t spatialStreamSeed;
+    RestirLightSample currentSample;
+    RestirLightSample historySample;
+    RestirLightSample mappedHistorySample;
+    uint32_t mappedLightId;
+    uint32_t currentBufferIndex;
+    uint32_t historyBufferIndex;
+    float proposalCollision;
+    float proposalEntropy;
+};
+static_assert(sizeof(RestirCandidateAuditRecord) == 108, "ReSTIR candidate audit ABI changed");
 
 
 // How the depth guide is encoded.
