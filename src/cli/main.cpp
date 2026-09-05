@@ -272,7 +272,8 @@ int main(int argc, const char* argv[])
         return 1;
     }
 #endif
-    if (cfg.auditFrames != 0u && cfg.auditMovingLights == 0u && !cfg.auditMovingNode && !cfg.auditRenderWork)
+    if (cfg.auditFrames != 0u && cfg.auditMovingLights == 0u && !cfg.auditMovingNode && !cfg.auditRenderWork &&
+        cfg.auditFramePrefix.empty())
     {
         STRELKA_FATAL("--audit-frames without moving lights requires --audit-render-work");
         return 1;

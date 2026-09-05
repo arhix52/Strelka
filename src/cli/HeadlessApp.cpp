@@ -805,6 +805,7 @@ int HeadlessApp::run()
     auditMovingLightIds.reserve(m_config.auditMovingLights);
     const bool localManyLayout = m_config.auditMotionSequence == 3u;
     const bool balancedLayout = m_config.auditMotionSequence == 4u;
+    const bool cameraOnlyLayout = m_config.auditMotionSequence == 5u;
     auto auditLightBase = [&](uint32_t i) {
         if (!localManyLayout)
             return glm::vec3((float(i % 32u) - 15.5f) * 0.08f, 0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f);
@@ -826,9 +827,9 @@ int HeadlessApp::run()
         light.radius = localManyLayout ? 0.04f : 0.15f;
         light.width = localManyLayout ? 0.08f : 0.3f;
         light.height = localManyLayout ? 0.08f : 0.3f;
-        light.intensity = localManyLayout ? 35.0f + 90.0f * float((i * 29u) & 63u) / 63.0f :
-                          balancedLayout  ? 20.0f :
-                                            1.0f;
+        light.intensity = localManyLayout                    ? 35.0f + 90.0f * float((i * 29u) & 63u) / 63.0f :
+                          balancedLayout || cameraOnlyLayout ? 20.0f :
+                                                               1.0f;
         light.enabled = m_config.auditMotionSequence != 2u || i < (3u * m_config.auditMovingLights) / 4u;
         light.visibleToCamera = false;
         auditMovingLightIds.push_back(m_scene->createLight(light));
@@ -867,6 +868,8 @@ int HeadlessApp::run()
         auto moveAuditLights = [&](uint32_t frame) {
             for (uint32_t i = 0; i < auditMovingLightIds.size(); ++i)
             {
+                if (cameraOnlyLayout)
+                    continue;
                 if (localManyLayout && (i & 7u) != 0u)
                     continue;
                 Scene::UniformLightDesc light = m_scene->getLightsDesc()[auditMovingLightIds[i]];
@@ -883,7 +886,7 @@ int HeadlessApp::run()
                     light.enabled = frame >= 10u && frame < 12u;
                 m_scene->setLight(auditMovingLightIds[i], light);
             }
-            if (m_config.auditMotionSequence == 1u || localManyLayout || balancedLayout)
+            if (m_config.auditMotionSequence == 1u || localManyLayout || balancedLayout || cameraOnlyLayout)
             {
                 Camera& camera = m_scene->getCamera(0);
                 camera.position =
