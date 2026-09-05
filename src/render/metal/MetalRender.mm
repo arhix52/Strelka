@@ -788,7 +788,8 @@ bool MetalRender::memoryReport(MemoryReport& report) const
         // material maps: they are owned by the light domain and survive a
         // material reload, so counting them there would show them vanishing and
         // reappearing for reasons that have nothing to do with them.
-        size_t lightBytes = bufBytes(mLights.buffer()) + bufBytes(mLights.iesBuffer());
+        size_t lightBytes = bufBytes(mLights.buffer()) + bufBytes(mLights.retainedPreviousBuffer()) +
+                            bufBytes(mLights.temporalMappingBuffer()) + bufBytes(mLights.iesBuffer());
         for (MTL::Texture* t : mLights.projectorTextures())
         {
             lightBytes += texBytes(t);
@@ -889,7 +890,7 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, emissiveMeshes) == 832);
     static_assert(offsetof(Uniforms, emissiveTriangles) == 840);
     static_assert(offsetof(Material, baseColorTexture) == 256);
-    static_assert(sizeof(Uniforms) == 960, "Uniforms host/Metal ABI changed");
+    static_assert(sizeof(Uniforms) == 1008, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -1044,6 +1045,8 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mAccel.emissiveTriangleBuffer());
     add(mMaterials.buffer());
     add(mLights.buffer());
+    add(mLights.retainedPreviousBuffer());
+    add(mLights.temporalMappingBuffer());
     add(mLights.iesBuffer());
     // The light buffer names these by handle and nothing else does. Metal 4 has
     // no useResource to fall back on, so a projector's slide that the argument
@@ -1160,6 +1163,8 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.primitiveAccelerationStructures = &mAccel.primitiveAccelerationStructures();
     b.materialBuffer = mMaterials.buffer() ? mMaterials.buffer() : mSceneTablePlaceholder;
     b.lightBuffer = mLights.buffer();
+    b.previousLightBuffer = mLights.previousBuffer();
+    b.lightTemporalMappingBuffer = mLights.temporalMappingBuffer();
     b.iesBuffer = mLights.iesBuffer();
     b.geometryEntryBuffer = mGeometry.geometryEntryBuffer() ? mGeometry.geometryEntryBuffer() : mSceneTablePlaceholder;
     b.placeholderBuffer = mSceneTablePlaceholder;
@@ -1317,6 +1322,7 @@ void MetalRender::render(Buffer* output)
     if (width != mTemporalHistoryWidth || height != mTemporalHistoryHeight)
     {
         mResetDenoiseHistory = true;
+        mResetRestirHistory = true;
         mTemporalHistoryWidth = width;
         mTemporalHistoryHeight = height;
     }
@@ -1711,6 +1717,7 @@ void MetalRender::render(Buffer* output)
     if (metal::temporal_history::projectionChanged(currView.mCamMatrices, mPrevView.mCamMatrices))
     {
         mResetDenoiseHistory = true;
+        mResetRestirHistory = true;
     }
 
     // Turning the denoiser on hands it a history from whenever it last ran.
@@ -1769,6 +1776,12 @@ void MetalRender::render(Buffer* output)
     fin.enableCameraMotionBlur = enableCameraMotionBlur;
     fin.pausedBlurRefine = mPausedBlurRefine;
     fin.resetDenoiseHistory = mResetDenoiseHistory;
+    fin.resetRestirHistory = mResetRestirHistory;
+    fin.restirEnvironmentHistoryValid = mRestirEnvironmentHistoryValid;
+    fin.restirMeshHistoryValid = mRestirMeshHistoryValid;
+    fin.previousNumEmissiveMeshes = mPreviousNumEmissiveMeshes;
+    fin.previousMeshLightSelectionPdf = mPreviousMeshLightSelectionPdf;
+    fin.previousEnvSelectionPdf = mPreviousEnvSelectionPdf;
     fin.hasPrevFramePose = mHasPrevFramePose;
     fin.noPrevPose = mNoPrevPose;
     fin.camera = &camera;
@@ -1781,12 +1794,20 @@ void MetalRender::render(Buffer* output)
     {
         ctx.mSubframeIndex = 0;
         mResetDenoiseHistory = true;
+        mResetRestirHistory = true;
         mFrameUniforms.requestSharcReset();
         // Re-fill so subframeIndex/exposure paths see the reset.
         fin.subframeIndex = 0;
         fin.resetDenoiseHistory = true;
+        fin.resetRestirHistory = true;
         filled = mFrameUniforms.fill(fin);
     }
+
+    mPreviousNumEmissiveMeshes = filled.uniforms->numEmissiveMeshes;
+    mPreviousMeshLightSelectionPdf = filled.uniforms->meshLightSelectionPdf;
+    mPreviousEnvSelectionPdf = filled.uniforms->hasEnvMap ? filled.uniforms->envMapColorTint.w : 0.0f;
+    mRestirEnvironmentHistoryValid = true;
+    mRestirMeshHistoryValid = true;
 
     // Record the display transform this slot's frame is being encoded with.
     // A screenshot is taken frames later, after the user has stopped moving
@@ -1964,6 +1985,7 @@ void MetalRender::render(Buffer* output)
                                                                           mSceneTablePlaceholder->gpuAddress();
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
+            mLights.markFrameEncoded();
             metal::IntegratorFrameRequest frameReq;
             frameReq.uniformBuffer = pUniformBuffer;
             frameReq.output = output;
@@ -2413,6 +2435,7 @@ void MetalRender::render(Buffer* output)
                     pPool->release();
                     mPrevView = currView;
                     mResetDenoiseHistory = false;
+                    mResetRestirHistory = false;
                     mHasPrevFramePose = true;
                     ctx.mFrameNumber++;
                     return;
@@ -2544,6 +2567,7 @@ void MetalRender::render(Buffer* output)
                 std::memcpy(in.worldToView, glm::value_ptr(currView.mCamMatrices.view), sizeof(in.worldToView));
                 std::memcpy(in.viewToClip, glm::value_ptr(currView.mCamMatrices.perspective), sizeof(in.viewToClip));
                 mResetDenoiseHistory = false;
+                mResetRestirHistory = false;
                 mPost.metalFx().encodeDenoise(pCmd, in);
                 mHasDenoisedFrame = true;
 
@@ -2577,6 +2601,7 @@ void MetalRender::render(Buffer* output)
                 tin.depthReversed = denoiseDepthReversed(pUniformData->denoiseDepthMode, pUniformData->projectionType);
                 tin.resetHistory = mResetDenoiseHistory;
                 mResetDenoiseHistory = false;
+                mResetRestirHistory = false;
                 mPost.metalFx().encodeTemporal(pCmd, false, tin);
 
                 if (mPost.tonemapperTexPSO())
@@ -2636,6 +2661,7 @@ void MetalRender::render(Buffer* output)
             pPool->release();
             mPrevView = currView;
             mResetDenoiseHistory = false;
+            mResetRestirHistory = false;
             mHasPrevFramePose = true;
             ctx.mFrameNumber++;
             return;
@@ -2763,6 +2789,7 @@ void MetalRender::render(Buffer* output)
     mPrevView = currView;
 
     mResetDenoiseHistory = false;
+    mResetRestirHistory = false;
     mHasPrevFramePose = true;
     ctx.mFrameNumber++;
 }
@@ -3204,6 +3231,7 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},\"restirDiagnosticQueries\":{},"
         "\"restirEffectiveM\":{:.6f},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
+        "\"temporalRejects\":{{\"surface\":{},\"unmapped\":{},\"type\":{},\"environment\":{},\"mesh\":{}}},"
         "\"finalRestirVisibilityRays\":{},"
         "\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
         "\"kernelThreads\":{{\"generate\":{{\"active\":{},\"dispatched\":{}}},"
@@ -3227,9 +3255,11 @@ std::string MetalRender::renderWorkAuditJson() const
         c[WORK_RESTIR_FINAL_ITEMS] != 0u ?
             static_cast<double>(c[WORK_RESTIR_EFFECTIVE_M]) / static_cast<double>(c[WORK_RESTIR_FINAL_ITEMS]) :
             0.0,
-        c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES], c[WORK_RESTIR_FINAL_VISIBILITY_RAYS],
-        c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES], c[WORK_PRIMARY_RAYS],
-        roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
+        c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES], c[WORK_RESTIR_TEMPORAL_REJECT_SURFACE],
+        c[WORK_RESTIR_TEMPORAL_REJECT_UNMAPPED], c[WORK_RESTIR_TEMPORAL_REJECT_TYPE],
+        c[WORK_RESTIR_TEMPORAL_REJECT_ENVIRONMENT], c[WORK_RESTIR_TEMPORAL_REJECT_MESH],
+        c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
+        c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,
         dispatched(WORK_MISS_ITEMS_BASE), shadowActive, dispatched(WORK_SHADOW_RAYS_BASE), c[WORK_GUIDE_ACTIVE_ITEMS],
         roundedThreads(c[WORK_GUIDE_ACTIVE_ITEMS]), c[WORK_RESTIR_FINAL_ITEMS],
@@ -3270,6 +3300,7 @@ void MetalRender::handleSceneChanges()
         return;
 
     bool needReset = false;
+    bool needRestirReset = false;
     bool needSharcReset = false;
     const bool responsiveSharc = getSettings()->getAs<bool>("render/pt/sharcMetalResponsive");
     const bool geometryChanged = any(changes & ChangeBits::Geometry);
@@ -3284,6 +3315,8 @@ void MetalRender::handleSceneChanges()
     {
         createMetalMaterials();
         needReset = true;
+        needRestirReset = true;
+        mRestirMeshHistoryValid = false;
         needSharcReset = true;
     }
     if (geometryChanged)
@@ -3296,6 +3329,8 @@ void MetalRender::handleSceneChanges()
         mGeometry.buildBuffers(mScene);
         rebuildAccelerationStructures();
         needReset = true;
+        needRestirReset |= !any(changes & ChangeBits::Lights);
+        mRestirMeshHistoryValid = false;
         needSharcReset = true;
     }
     else if (materialsChanged)
@@ -3330,6 +3365,7 @@ void MetalRender::handleSceneChanges()
             }
         }
         needReset = true;
+        mRestirEnvironmentHistoryValid = false;
         needSharcReset |= !responsiveSharc;
     }
 
@@ -3347,6 +3383,7 @@ void MetalRender::handleSceneChanges()
     {
         ctx.mSubframeIndex = 0;
         mResetDenoiseHistory = true;
+        mResetRestirHistory |= needRestirReset;
         if (needSharcReset)
         {
             mFrameUniforms.requestSharcReset();
@@ -3379,6 +3416,7 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         mReportedFirstPartialFrame = false;
         // New scene: nothing from before relates to it.
         mResetDenoiseHistory = true;
+        mResetRestirHistory = true;
         mFrameUniforms.requestSharcReset();
         mHasPrevFramePose = false;
         mShutterIntervalActive = false;

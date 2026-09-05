@@ -3176,83 +3176,132 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         restirReservoirLimitHistoryM(
                             previousReservoir.state, reservoir.state.M, max(uniforms.reservoirMaxAge, 1u));
                         RestirEvaluation previousEvaluation = {};
-                        if (previousValid)
+                        RestirLightSample previousSampleAtCurrent = {};
+                        const uint32_t previousLightMapping =
+                            previousValid ? remapRestirSample(uniforms, lights, previousReservoir.sample, true,
+                                                              previousSampleAtCurrent) :
+                                            RESTIR_LIGHT_UNMAPPED;
+                        const bool previousLightValid = previousLightMapping != RESTIR_LIGHT_UNMAPPED &&
+                                                        previousLightMapping != RESTIR_LIGHT_TYPE_CHANGED;
+                        if (previousValid && !previousLightValid)
+                        {
+                            const uint32_t previousSampleType = restirSampleType(previousReservoir.sample);
+                            auditWork(
+                                uniforms,
+                                previousLightMapping == RESTIR_LIGHT_TYPE_CHANGED ? WORK_RESTIR_TEMPORAL_REJECT_TYPE :
+                                previousSampleType == RESTIR_SAMPLE_ENVIRONMENT ? WORK_RESTIR_TEMPORAL_REJECT_ENVIRONMENT :
+                                previousSampleType == RESTIR_SAMPLE_EMISSIVE_TRIANGLE ? WORK_RESTIR_TEMPORAL_REJECT_MESH :
+                                previousSampleType == RESTIR_SAMPLE_INVALID ? WORK_RESTIR_TEMPORAL_REJECT_SURFACE :
+                                                                              WORK_RESTIR_TEMPORAL_REJECT_UNMAPPED);
+                        }
+                        if (previousValid && previousLightValid)
                         {
                             const LightConnection previousConnection = reconnectRestirSample(
                                 uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
-                                motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousReservoir.sample);
+                                motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousSampleAtCurrent);
                             previousEvaluation =
                                 evaluateRestirConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
                                                          openpbrPrepared, uniforms.misHeuristic);
                         }
-                        const uint32_t currentM = reservoir.state.M;
-                        SamplerState temporalRng = rng;
-                        temporalRng.seed = hash_combine(temporalRng.seed, 0x68bc21ebu);
-                        const bool selectedHistory = restirReservoirUpdate(
-                            reservoir.state,
-                            restirReservoirMergeWeight(previousReservoir.state, previousEvaluation.target),
-                            previousEvaluation.target, previousReservoir.state.M,
-                            random<SampleDimension::eLightId>(temporalRng, uniforms.samplerType));
-                        auditWork(uniforms, WORK_RESTIR_TEMPORAL_MERGES);
-                        if (selectedHistory)
+                        const bool temporalSourceCompatible = !previousValid || previousLightValid;
+                        bool selectedHistory = false;
+                        if (temporalSourceCompatible)
                         {
-                            reservoir.sample = previousReservoir.sample;
-                        }
-                        if (uniforms.restirBiasCorrection != 0u)
-                        {
-                            const float currentTarget = reservoir.state.target;
-                            float previousTarget = previousReservoir.state.target;
-                            LightConnection selectedAtPrevious = {};
-                            if (!selectedHistory || SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC)
+                            const uint32_t currentM = reservoir.state.M;
+                            SamplerState temporalRng = rng;
+                            temporalRng.seed = hash_combine(temporalRng.seed, 0x68bc21ebu);
+                            selectedHistory = restirReservoirUpdate(
+                                reservoir.state,
+                                restirReservoirMergeWeight(previousReservoir.state, previousEvaluation.target),
+                                previousEvaluation.target, previousReservoir.state.M,
+                                random<SampleDimension::eLightId>(temporalRng, uniforms.samplerType));
+                            if (previousLightValid)
+                                auditWork(uniforms, WORK_RESTIR_TEMPORAL_MERGES);
+                            if (selectedHistory)
                             {
-                                const RestirTargetSurface previousStored =
-                                    ((device const RestirTargetSurface*)previousSurfaceData)[previousIndex];
-                                SurfaceInteraction previousSi;
-                                bool previousIsFibre, previousIsOpenPBR;
-                                ShadedFrame previousNeeFrame;
-                                OpenPBR_PreparedBsdf previousOpenpbrPrepared;
-                                float previousCurveRadius;
-                                float4x4 previousObjectToWorld = float4x4(1.0f);
-                                if (!restirTargetIsDirect(previousStored))
-                                {
-                                    const auto previousInstance = prevInstances[previousStored.instanceIndex];
-                                    previousObjectToWorld =
-                                        float4x4(float4(float3(previousInstance.transformationMatrix[0]), 0.0f),
-                                                 float4(float3(previousInstance.transformationMatrix[1]), 0.0f),
-                                                 float4(float3(previousInstance.transformationMatrix[2]), 0.0f),
-                                                 float4(float3(previousInstance.transformationMatrix[3]), 1.0f));
-                                }
-                                rebuildRestirTargetSurface(
-                                    uniforms, previousObjectToWorld, materials, geometryEntries, prevFrameVertexBuffer,
-                                    prevFrameVertexBuffer, indexBuffer, curvePoints, curveSegments, previousStored,
-                                    false, 0.0f, previousSi, previousIsFibre, previousIsOpenPBR, previousNeeFrame,
-                                    previousOpenpbrPrepared, previousCurveRadius);
-                                selectedAtPrevious =
-                                    reconnectRestirSample(uniforms, lights, instances, materials, prevFrameVertexBuffer,
-                                                          prevFrameVertexBuffer, indexBuffer, 0.0f, previousSi,
-                                                          envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
-                                previousTarget =
-                                    restirTargetOnly(selectedAtPrevious, previousSi, previousIsFibre, previousNeeFrame,
-                                                     previousIsOpenPBR, previousOpenpbrPrepared, uniforms.misHeuristic);
+                                reservoir.sample = previousSampleAtCurrent;
                             }
-                            if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && previousTarget > 0.0f)
+                            if (uniforms.restirBiasCorrection != 0u)
                             {
-                                auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
-                                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable,
-                                                             selectedAtPrevious, instances, materials, geometryEntries,
-                                                             vertexBuffer, indexBuffer))
+                                const float currentTarget = reservoir.state.target;
+                                float previousTarget = previousReservoir.state.target;
+                                LightConnection selectedAtPrevious = {};
+                                RestirLightSample selectedAtPreviousSample = previousReservoir.sample;
+                                const uint32_t selectedPreviousMapping =
+                                    selectedHistory ? previousLightMapping :
+                                                      remapRestirSample(uniforms, lights, reservoir.sample, false,
+                                                                        selectedAtPreviousSample);
+                                if (selectedPreviousMapping != RESTIR_LIGHT_UNMAPPED &&
+                                    selectedPreviousMapping != RESTIR_LIGHT_TYPE_CHANGED &&
+                                    (!selectedHistory || SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC))
+                                {
+                                    const RestirTargetSurface previousStored =
+                                        ((device const RestirTargetSurface*)previousSurfaceData)[previousIndex];
+                                    SurfaceInteraction previousSi;
+                                    bool previousIsFibre, previousIsOpenPBR;
+                                    ShadedFrame previousNeeFrame;
+                                    OpenPBR_PreparedBsdf previousOpenpbrPrepared;
+                                    float previousCurveRadius;
+                                    float4x4 previousObjectToWorld = float4x4(1.0f);
+                                    if (!restirTargetIsDirect(previousStored))
+                                    {
+                                        const auto previousInstance = prevInstances[previousStored.instanceIndex];
+                                        previousObjectToWorld =
+                                            float4x4(float4(float3(previousInstance.transformationMatrix[0]), 0.0f),
+                                                     float4(float3(previousInstance.transformationMatrix[1]), 0.0f),
+                                                     float4(float3(previousInstance.transformationMatrix[2]), 0.0f),
+                                                     float4(float3(previousInstance.transformationMatrix[3]), 1.0f));
+                                    }
+                                    rebuildRestirTargetSurface(uniforms, previousObjectToWorld, materials,
+                                                               geometryEntries, prevFrameVertexBuffer,
+                                                               prevFrameVertexBuffer, indexBuffer, curvePoints,
+                                                               curveSegments, previousStored, false, 0.0f, previousSi,
+                                                               previousIsFibre, previousIsOpenPBR, previousNeeFrame,
+                                                               previousOpenpbrPrepared, previousCurveRadius);
+                                    selectedAtPrevious = reconnectRestirSampleContext(
+                                        uniforms, (device UniformLight*)uniforms.previousLights,
+                                        uniforms.previousNumLights, uniforms.previousNumEmissiveMeshes,
+                                        uniforms.previousMeshLightSelectionPdf,
+                                        uniforms.hasEnvMap != 0u && uniforms.restirEnvironmentHistoryValid != 0u,
+                                        uniforms.previousEnvSelectionPdf, prevInstances, materials,
+                                        prevFrameVertexBuffer, prevFrameVertexBuffer, indexBuffer, 0.0f, previousSi,
+                                        envAliasTable, envMapTexture, iesProfiles, selectedAtPreviousSample);
+                                    previousTarget = restirTargetOnly(selectedAtPrevious, previousSi, previousIsFibre,
+                                                                      previousNeeFrame, previousIsOpenPBR,
+                                                                      previousOpenpbrPrepared, uniforms.misHeuristic);
+                                }
+                                else if (selectedPreviousMapping == RESTIR_LIGHT_UNMAPPED ||
+                                         selectedPreviousMapping == RESTIR_LIGHT_TYPE_CHANGED)
                                 {
                                     previousTarget = 0.0f;
                                 }
+                                if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && previousTarget > 0.0f)
+                                {
+                                    auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
+                                    if (!restirDiagnosticVisible(diagnosticAccelerationStructure,
+                                                                 diagnosticFunctionTable, selectedAtPrevious, instances,
+                                                                 materials, geometryEntries, vertexBuffer, indexBuffer))
+                                    {
+                                        previousTarget = 0.0f;
+                                    }
+                                }
+                                const float sourceTargetSum =
+                                    float(currentM) * currentTarget + float(previousReservoir.state.M) * previousTarget;
+                                restirReservoirApplyBasicNormalization(
+                                    reservoir.state, selectedHistory ? previousTarget : currentTarget, sourceTargetSum);
                             }
-                            const float sourceTargetSum =
-                                float(currentM) * currentTarget + float(previousReservoir.state.M) * previousTarget;
-                            restirReservoirApplyBasicNormalization(
-                                reservoir.state, selectedHistory ? previousTarget : currentTarget, sourceTargetSum);
                         }
                         reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) |
                                                       (selectedHistory ? min(age + 1u, RESTIR_RESERVOIR_AGE_MASK) : 0u);
                     }
+                    else
+                    {
+                        auditWork(uniforms, WORK_RESTIR_TEMPORAL_REJECT_SURFACE);
+                    }
+                }
+                else
+                {
+                    auditWork(uniforms, WORK_RESTIR_TEMPORAL_REJECT_SURFACE);
                 }
             }
             ((device RestirReservoir*)hits)[tid] = reservoir;

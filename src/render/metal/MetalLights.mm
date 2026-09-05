@@ -9,8 +9,10 @@
 
 #include <log.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -56,6 +58,21 @@ void MetalLights::release()
         mLightBuffer->release();
         mLightBuffer = nullptr;
     }
+    if (mPreviousLightBuffer)
+    {
+        mPreviousLightBuffer->release();
+        mPreviousLightBuffer = nullptr;
+    }
+    if (mTemporalMappingBuffer)
+    {
+        mTemporalMappingBuffer->release();
+        mTemporalMappingBuffer = nullptr;
+    }
+    mCpuLights.clear();
+    mLightCount = 0;
+    mPreviousLightCount = 0;
+    mTemporalMappingStride = 0;
+    mPendingTemporalMapping = false;
     mTotalPower = 0.0;
     mInfiniteLightCount = 0;
     mInfiniteLightIndexOffset = 0;
@@ -114,6 +131,11 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
 #endif
     loadProjectorImages(projectorImages, textures);
 
+    mPreviousLightCount = mLightCount;
+    mLightCount = static_cast<uint32_t>(lightDescs.size());
+    std::swap(mLightBuffer, mPreviousLightBuffer);
+    mPendingTemporalMapping = mPreviousLightBuffer != nullptr;
+
     // This backend's UniformLight carries one field the host's Scene::Light does
     // not -- the bindless handle of a projector's image -- so the table is built
     // field for field rather than memcpy'd whole. The shared prefix is still one
@@ -149,6 +171,30 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     mInfiniteLightCount = static_cast<uint32_t>(infiniteLightIndices.size());
     mInfiniteLightIndexOffset = lightBufferSize;
     const size_t allocationSize = lightBufferSize + infiniteLightIndices.size() * sizeof(uint32_t);
+
+    const size_t mappingStride = std::max(mCpuLights.size(), lightDescs.size());
+    const size_t mappingBytes = 2 * mappingStride * sizeof(uint32_t);
+    if (mappingBytes != 0 && (!mTemporalMappingBuffer || mTemporalMappingBuffer->length() < mappingBytes))
+    {
+        if (mTemporalMappingBuffer)
+            mTemporalMappingBuffer->release();
+        mTemporalMappingBuffer = mDevice->newBuffer(mappingBytes, MTL::ResourceStorageModeShared);
+    }
+    mTemporalMappingStride = mappingStride;
+    if (mTemporalMappingBuffer && mappingStride != 0)
+    {
+        constexpr uint32_t kUnmapped = std::numeric_limits<uint32_t>::max();
+        auto* previousToCurrent = static_cast<uint32_t*>(mTemporalMappingBuffer->contents());
+        auto* currentToPrevious = previousToCurrent + mappingStride;
+        std::fill_n(previousToCurrent, mappingStride, kUnmapped);
+        std::fill_n(currentToPrevious, mappingStride, kUnmapped);
+        const size_t commonCount = std::min(mCpuLights.size(), lightDescs.size());
+        for (size_t i = 0; i < commonCount; ++i)
+        {
+            previousToCurrent[i] = temporalLightMapping(&mCpuLights[i], &lightDescs[i], static_cast<uint32_t>(i));
+            currentToPrevious[i] = temporalLightMapping(&lightDescs[i], &mCpuLights[i], static_cast<uint32_t>(i));
+        }
+    }
 
     if (allocationSize == 0)
     {
@@ -199,6 +245,7 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
         mIesBuffer = mDevice->newBuffer(packed.size(), MTL::ResourceStorageModeShared);
     }
     memcpy(mIesBuffer->contents(), packed.data(), packed.size());
+    mCpuLights = lightDescs;
 }
 
 } // namespace oka::metal

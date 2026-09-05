@@ -44,6 +44,36 @@ public:
     {
         return mLightBuffer;
     }
+    MTL::Buffer* previousBuffer() const
+    {
+        return mPendingTemporalMapping && mPreviousLightBuffer ? mPreviousLightBuffer : mLightBuffer;
+    }
+    MTL::Buffer* temporalMappingBuffer() const
+    {
+        return mTemporalMappingBuffer;
+    }
+    MTL::Buffer* retainedPreviousBuffer() const
+    {
+        return mPreviousLightBuffer;
+    }
+    uint32_t previousCount() const
+    {
+        return mPendingTemporalMapping ? mPreviousLightCount : mLightCount;
+    }
+    uint64_t previousToCurrentAddress() const
+    {
+        return mPendingTemporalMapping && mTemporalMappingBuffer ? mTemporalMappingBuffer->gpuAddress() : 0u;
+    }
+    uint64_t currentToPreviousAddress() const
+    {
+        return mPendingTemporalMapping && mTemporalMappingBuffer ?
+                   mTemporalMappingBuffer->gpuAddress() + mTemporalMappingStride * sizeof(uint32_t) :
+                   0u;
+    }
+    void markFrameEncoded()
+    {
+        mPendingTemporalMapping = false;
+    }
     MTL::Buffer* iesBuffer() const
     {
         return mIesBuffer;
@@ -79,8 +109,15 @@ private:
 
     MTL::Device* mDevice = nullptr;
     MTL::Buffer* mLightBuffer = nullptr;
+    MTL::Buffer* mPreviousLightBuffer = nullptr;
+    MTL::Buffer* mTemporalMappingBuffer = nullptr;
     MTL::Buffer* mIesBuffer = nullptr;
+    std::vector<Scene::Light> mCpuLights;
     double mTotalPower = 0.0;
+    uint32_t mLightCount = 0;
+    uint32_t mPreviousLightCount = 0;
+    size_t mTemporalMappingStride = 0;
+    bool mPendingTemporalMapping = false;
     uint32_t mInfiniteLightCount = 0;
     size_t mInfiniteLightIndexOffset = 0;
     std::vector<MTL::Texture*> mProjectorTextures;

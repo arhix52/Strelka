@@ -85,6 +85,7 @@ public:
     void resetTemporalHistory() override
     {
         mResetDenoiseHistory = true;
+        mResetRestirHistory = true;
         mFrameUniforms.requestSharcReset();
     }
     /// Rebuilds the display image on the host from the linear frame the slot
@@ -272,6 +273,12 @@ private:
     // settings, which the user may have moved in the meantime.
     PresentationMetadata mPresentation[2]{};
     bool mResetDenoiseHistory = true;
+    bool mResetRestirHistory = true;
+    bool mRestirEnvironmentHistoryValid = true;
+    bool mRestirMeshHistoryValid = true;
+    uint32_t mPreviousNumEmissiveMeshes = 0;
+    float mPreviousMeshLightSelectionPdf = 0.0f;
+    float mPreviousEnvSelectionPdf = 0.0f;
     uint32_t mTemporalHistoryWidth = 0;
     uint32_t mTemporalHistoryHeight = 0;
     /// A denoised frame is present in mPost.denoisedTexture() and belongs to the

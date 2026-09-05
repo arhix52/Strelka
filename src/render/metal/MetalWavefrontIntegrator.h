@@ -55,6 +55,8 @@ struct IntegratorSceneBindings
     const std::vector<MTL::AccelerationStructure*>* primitiveAccelerationStructures = nullptr;
     MTL::Buffer* materialBuffer = nullptr;
     MTL::Buffer* lightBuffer = nullptr;
+    MTL::Buffer* previousLightBuffer = nullptr;
+    MTL::Buffer* lightTemporalMappingBuffer = nullptr;
     MTL::Buffer* iesBuffer = nullptr;
     MTL::Buffer* geometryEntryBuffer = nullptr;
     MTL::Buffer* vertexBuffer = nullptr;

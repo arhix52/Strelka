@@ -76,8 +76,7 @@ constant bool SPEC_SHARC_UPDATE = is_function_constant_defined(kFcSharcUpdate) ?
 // A scene with no OpenPBR material must compile a kernel that does not contain
 // it at all -- see WavefrontFeatures::kOpenPBR.
 constant bool SPEC_OPENPBR = is_function_constant_defined(kFcOpenPBR) ? kFcOpenPBR : false;
-constant bool SPEC_RENDER_WORK_AUDIT =
-    is_function_constant_defined(kFcRenderWorkAudit) ? kFcRenderWorkAudit : false;
+constant bool SPEC_RENDER_WORK_AUDIT = is_function_constant_defined(kFcRenderWorkAudit) ? kFcRenderWorkAudit : false;
 constant bool SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC =
     is_function_constant_defined(kFcRestirRayTracedDiagnostic) ? kFcRestirRayTracedDiagnostic : false;
 
@@ -707,6 +706,88 @@ static float3 restirSampleData3(thread const RestirLightSample& sample)
     return float3(as_type<float>(sample.data0), as_type<float>(sample.data1), as_type<float>(sample.data2));
 }
 
+static float3 restirDistantTangent(float3 axis)
+{
+    return abs(axis.x) > abs(axis.y) ? normalize(float3(-axis.z, 0.0f, axis.x)) :
+                                       normalize(float3(0.0f, axis.z, -axis.y));
+}
+
+static float3 remapRestirDistantDirection(float3 direction,
+                                          device const UniformLight& source,
+                                          device const UniformLight& destination)
+{
+    const float3 sourceAxis = -float3(source.normal);
+    const float3 destinationAxis = -float3(destination.normal);
+    if (all(sourceAxis == destinationAxis) && source.halfAngle == destination.halfAngle)
+        return direction;
+    const float3 sourceTangent = restirDistantTangent(sourceAxis);
+    const float3 sourceBitangent = cross(sourceAxis, sourceTangent);
+    const float3 destinationTangent = restirDistantTangent(destinationAxis);
+    const float3 destinationBitangent = cross(destinationAxis, destinationTangent);
+    const float2 azimuth = float2(dot(direction, sourceTangent), dot(direction, sourceBitangent));
+    const float azimuthLength = length(azimuth);
+    const float2 unitAzimuth = azimuthLength > 0.0f ? azimuth / azimuthLength : float2(1.0f, 0.0f);
+    const float sourceHalfSin = sin(0.5f * distantLightHalfAngle(source.halfAngle));
+    const float q = sourceHalfSin > 0.0f ?
+                        saturate((1.0f - dot(direction, sourceAxis)) / (2.0f * sourceHalfSin * sourceHalfSin)) :
+                        0.0f;
+    const float destinationHalfSin = sin(0.5f * distantLightHalfAngle(destination.halfAngle));
+    const float cosTheta = 1.0f - 2.0f * q * destinationHalfSin * destinationHalfSin;
+    const float sinTheta =
+        2.0f * destinationHalfSin * sqrt(max(q * (1.0f - q * destinationHalfSin * destinationHalfSin), 0.0f));
+    return normalize((unitAzimuth.x * destinationTangent + unitAzimuth.y * destinationBitangent) * sinTheta +
+                     destinationAxis * cosTheta);
+}
+
+static uint32_t remapRestirSample(constant Uniforms& uniforms,
+                                  device UniformLight* currentLights,
+                                  thread const RestirLightSample& source,
+                                  bool previousToCurrent,
+                                  thread RestirLightSample& mapped)
+{
+    mapped = source;
+    const uint32_t type = restirSampleType(source);
+    const uint32_t id = restirSampleLightId(source);
+    if (type == RESTIR_SAMPLE_ANALYTIC)
+    {
+        const uint32_t fromCount = previousToCurrent ? uniforms.previousNumLights : uniforms.numLights;
+        const uint32_t toCount = previousToCurrent ? uniforms.numLights : uniforms.previousNumLights;
+        if (id >= fromCount)
+            return RESTIR_LIGHT_UNMAPPED;
+        device const uint32_t* map =
+            previousToCurrent ? uniforms.previousToCurrentLight : uniforms.currentToPreviousLight;
+        const uint32_t mappedId = map ? map[id] : id;
+        if (mappedId == RESTIR_LIGHT_TYPE_CHANGED)
+            return RESTIR_LIGHT_TYPE_CHANGED;
+        if (mappedId >= toCount)
+            return RESTIR_LIGHT_UNMAPPED;
+        mapped.typeAndLightId = restirSampleKey(type, mappedId);
+        device UniformLight* previousLights = (device UniformLight*)uniforms.previousLights;
+        device UniformLight* sourceLights = previousToCurrent ? previousLights : currentLights;
+        device UniformLight* destinationLights = previousToCurrent ? currentLights : previousLights;
+        device const UniformLight& sourceLight = sourceLights[id];
+        device const UniformLight& destinationLight = destinationLights[mappedId];
+        if (sourceLight.type == LIGHT_TYPE_DISTANT)
+        {
+            const float3 direction =
+                remapRestirDistantDirection(restirSampleData3(source), sourceLight, destinationLight);
+            mapped.data0 = as_type<uint32_t>(direction.x);
+            mapped.data1 = as_type<uint32_t>(direction.y);
+            mapped.data2 = as_type<uint32_t>(direction.z);
+        }
+        return mappedId;
+    }
+    if (type == RESTIR_SAMPLE_ENVIRONMENT)
+        return uniforms.restirEnvironmentHistoryValid != 0u ? 0u : RESTIR_LIGHT_UNMAPPED;
+    if (type == RESTIR_SAMPLE_EMISSIVE_TRIANGLE)
+    {
+        const uint32_t fromCount = previousToCurrent ? uniforms.previousNumEmissiveMeshes : uniforms.numEmissiveMeshes;
+        const uint32_t toCount = previousToCurrent ? uniforms.numEmissiveMeshes : uniforms.previousNumEmissiveMeshes;
+        return uniforms.restirMeshHistoryValid != 0u && id < fromCount && id < toCount ? id : RESTIR_LIGHT_UNMAPPED;
+    }
+    return RESTIR_LIGHT_UNMAPPED;
+}
+
 // Hair TT/TRT lobes transmit across the strand, so fibre lighting must not reject the opposite shading hemisphere.
 static inline bool scattersThroughFibre(thread SurfaceInteraction& si)
 {
@@ -974,8 +1055,8 @@ struct EmissiveTriangleGeometry
     float2 uv2;
 };
 
-static float4x4 emissiveObjectToWorld(constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
-                                      uint32_t instanceId)
+template <typename InstancePointer>
+static float4x4 emissiveObjectToWorld(InstancePointer instances, uint32_t instanceId)
 {
     const auto inst = instances[instanceId];
     return float4x4(
@@ -983,8 +1064,9 @@ static float4x4 emissiveObjectToWorld(constant MTLIndirectAccelerationStructureI
         float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
 }
 
+template <typename InstancePointer>
 static EmissiveTriangleGeometry fetchEmissiveTriangle(constant Uniforms& uniforms,
-                                                      constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                                      InstancePointer instances,
                                                       device const char* vertexBuffer,
                                                       device const char* prevVertexBuffer,
                                                       device const uint32_t* indexBuffer,
@@ -1099,8 +1181,9 @@ static int findEmissiveMesh(constant Uniforms& uniforms, uint32_t instanceId, ui
     return -1;
 }
 
+template <typename InstancePointer>
 static LightConnection connectEmissiveMeshSample(constant Uniforms& uniforms,
-                                                 constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                                 InstancePointer instances,
                                                  device const char* vertexBuffer,
                                                  device const char* prevVertexBuffer,
                                                  device const uint32_t* indexBuffer,
@@ -1112,10 +1195,11 @@ static LightConnection connectEmissiveMeshSample(constant Uniforms& uniforms,
                                                  float motionTime,
                                                  bool volumeEvent,
                                                  float localSelectionPdf,
-                                                 float meshClassPdf)
+                                                 float meshClassPdf,
+                                                 uint32_t numEmissiveMeshes)
 {
     LightConnection connection = makeEmptyConnection();
-    if (meshId >= uniforms.numEmissiveMeshes)
+    if (meshId >= numEmissiveMeshes)
     {
         return connection;
     }
@@ -1197,7 +1281,7 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
                                        random<SampleDimension::eLightPointY>(sampler, uniforms.samplerType));
     return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials, si,
                                      meshId, primitiveId, randomSample, motionTime, volumeEvent, localSelectionPdf,
-                                     meshClassPdf);
+                                     meshClassPdf, uniforms.numEmissiveMeshes);
 }
 
 static EmissiveVisibilitySegment lightVisibilitySegment(thread const LightConnection& connection, float3 shadowOrigin)
@@ -1295,6 +1379,59 @@ LightConnection connectToLight(constant Uniforms& uniforms,
                         analyticSelectionPdf, analyticLightSelectionPdf(lights[lightId]));
 }
 
+template <typename InstancePointer>
+LightConnection reconnectRestirSampleContext(constant Uniforms& uniforms,
+                                             device UniformLight* lights,
+                                             uint32_t numLights,
+                                             uint32_t numEmissiveMeshes,
+                                             float meshLightSelectionPdf,
+                                             bool hasEnvMap,
+                                             float envSelectionPdf,
+                                             InstancePointer instances,
+                                             device const Material* materials,
+                                             device const char* vertexBuffer,
+                                             device const char* prevVertexBuffer,
+                                             device const uint32_t* indexBuffer,
+                                             float motionTime,
+                                             thread SurfaceInteraction& si,
+                                             device const EnvAliasEntry* envAliasTable,
+                                             texture2d<float> envMapTexture,
+                                             device const IesGpuBufferHeader* iesBuffer,
+                                             thread const RestirLightSample& sample)
+{
+    const bool hasAnalytic = SPEC_LIGHTS && numLights > 0u;
+    const bool hasMesh = SPEC_LIGHTS && numEmissiveMeshes > 0u;
+    const bool hasLocal = hasAnalytic || hasMesh;
+    const float localSelectionPdf = SPEC_ENV_MAP && hasEnvMap && hasLocal ? 1.0f - envSelectionPdf : 1.0f;
+    const uint32_t sampleType = restirSampleType(sample);
+    const uint32_t lightId = restirSampleLightId(sample);
+    if (sampleType == RESTIR_SAMPLE_ENVIRONMENT && SPEC_ENV_MAP && hasEnvMap)
+    {
+        const float3 direction = restirSampleData3(sample);
+        const float envPdf =
+            envMapPdf(direction, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation) *
+            (hasLocal ? envSelectionPdf : 1.0f);
+        return connectEnvDirection(uniforms, direction, envPdf, si, envMapTexture, false);
+    }
+    if (sampleType == RESTIR_SAMPLE_ANALYTIC && hasAnalytic && lightId < numLights)
+    {
+        const float analyticClassPdf = hasMesh ? 1.0f - meshLightSelectionPdf : 1.0f;
+        const bool distant = lights[lightId].type == LIGHT_TYPE_DISTANT;
+        const float2 uv = distant ? float2(0.0f) : float2(as_type<float>(sample.data0), as_type<float>(sample.data1));
+        return connectLightSample(uniforms, lights[lightId], lightId, uv, uint2(0u), sample, true, si, false, iesBuffer,
+                                  localSelectionPdf, analyticClassPdf, analyticLightSelectionPdf(lights[lightId]));
+    }
+    if (sampleType == RESTIR_SAMPLE_EMISSIVE_TRIANGLE && hasMesh)
+    {
+        const float meshClassPdf = hasAnalytic ? meshLightSelectionPdf : 1.0f;
+        const float2 uv = float2(as_type<float>(sample.data1), as_type<float>(sample.data2));
+        return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials,
+                                         si, lightId, sample.data0, uv, motionTime, false, localSelectionPdf,
+                                         meshClassPdf, numEmissiveMeshes);
+    }
+    return makeEmptyConnection();
+}
+
 LightConnection reconnectRestirSample(constant Uniforms& uniforms,
                                       device UniformLight* lights,
                                       constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
@@ -1309,37 +1446,10 @@ LightConnection reconnectRestirSample(constant Uniforms& uniforms,
                                       device const IesGpuBufferHeader* iesBuffer,
                                       thread const RestirLightSample& sample)
 {
-    const bool hasAnalytic = SPEC_LIGHTS && uniforms.numLights > 0u;
-    const bool hasMesh = SPEC_LIGHTS && uniforms.numEmissiveMeshes > 0u;
-    const bool hasLocal = hasAnalytic || hasMesh;
-    const float localSelectionPdf =
-        SPEC_ENV_MAP && uniforms.hasEnvMap && hasLocal ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
-    const uint32_t sampleType = restirSampleType(sample);
-    const uint32_t lightId = restirSampleLightId(sample);
-    if (sampleType == RESTIR_SAMPLE_ENVIRONMENT && SPEC_ENV_MAP && uniforms.hasEnvMap)
-    {
-        const float3 direction = restirSampleData3(sample);
-        const float envPdf =
-            envMapPdf(direction, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation) *
-            (hasLocal ? uniforms.envMapColorTint.w : 1.0f);
-        return connectEnvDirection(uniforms, direction, envPdf, si, envMapTexture, false);
-    }
-    if (sampleType == RESTIR_SAMPLE_ANALYTIC && hasAnalytic && lightId < uniforms.numLights)
-    {
-        const float analyticClassPdf = hasMesh ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
-        const bool distant = lights[lightId].type == LIGHT_TYPE_DISTANT;
-        const float2 uv = distant ? float2(0.0f) : float2(as_type<float>(sample.data0), as_type<float>(sample.data1));
-        return connectLightSample(uniforms, lights[lightId], lightId, uv, uint2(0u), sample, true, si, false, iesBuffer,
-                                  localSelectionPdf, analyticClassPdf, analyticLightSelectionPdf(lights[lightId]));
-    }
-    if (sampleType == RESTIR_SAMPLE_EMISSIVE_TRIANGLE && hasMesh)
-    {
-        const float meshClassPdf = hasAnalytic ? uniforms.meshLightSelectionPdf : 1.0f;
-        const float2 uv = float2(as_type<float>(sample.data1), as_type<float>(sample.data2));
-        return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials, si,
-                                         lightId, sample.data0, uv, motionTime, false, localSelectionPdf, meshClassPdf);
-    }
-    return makeEmptyConnection();
+    return reconnectRestirSampleContext(uniforms, lights, uniforms.numLights, uniforms.numEmissiveMeshes,
+                                        uniforms.meshLightSelectionPdf, uniforms.hasEnvMap != 0u,
+                                        uniforms.envMapColorTint.w, instances, materials, vertexBuffer, prevVertexBuffer,
+                                        indexBuffer, motionTime, si, envAliasTable, envMapTexture, iesBuffer, sample);
 }
 
 static float emissiveMeshHitPdf(constant Uniforms& uniforms,

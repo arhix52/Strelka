@@ -8,6 +8,8 @@
 #define RESTIR_SAMPLE_EMISSIVE_TRIANGLE 3u
 #define RESTIR_SAMPLE_TYPE_SHIFT 30u
 #define RESTIR_SAMPLE_ID_MASK 0x3fffffffu
+#define RESTIR_LIGHT_UNMAPPED 0xffffffffu
+#define RESTIR_LIGHT_TYPE_CHANGED 0xfffffffeu
 
 struct RestirLightSample
 {

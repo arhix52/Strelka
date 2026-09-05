@@ -66,7 +66,13 @@ public:
         bool enableCameraMotionBlur = false;
         bool pausedBlurRefine = false;
         bool resetDenoiseHistory = false;
+        bool resetRestirHistory = false;
+        bool restirEnvironmentHistoryValid = true;
+        bool restirMeshHistoryValid = true;
         bool hasPrevFramePose = false;
+        uint32_t previousNumEmissiveMeshes = 0;
+        float previousMeshLightSelectionPdf = 0.0f;
+        float previousEnvSelectionPdf = 0.0f;
         bool noPrevPose = false;
         const oka::Camera* camera = nullptr;
         const CameraView* currView = nullptr;

@@ -18,6 +18,28 @@ using oka::metal::binaryPowerProbability;
 using oka::metal::buildLightSelectionAlias;
 using oka::metal::emitterSelectionProbabilities;
 using oka::metal::environmentLightPower;
+using oka::metal::temporalLightMapping;
+
+TEST_CASE("temporal analytic-light mapping keeps stable compatible IDs")
+{
+    oka::Scene::Light previous{};
+    previous.type = LIGHT_TYPE_SPHERE;
+    previous.color = glm::float4(1.0f);
+    previous.points[0] = glm::float4(0.5f, 0.0f, 0.0f, 0.0f);
+    previous.points[2] = glm::float4(0.0f, 0.5f, 0.0f, 0.0f);
+    previous.points[3] = glm::float4(0.0f, 0.0f, 0.5f, 0.0f);
+    oka::Scene::Light current = previous;
+    current.points[1].x = 4.0f;
+    current.color = glm::float4(8.0f);
+    CHECK(temporalLightMapping(&previous, &current, 17u) == 17u);
+
+    current.type = LIGHT_TYPE_DISC;
+    CHECK(temporalLightMapping(&previous, &current, 17u) == std::numeric_limits<uint32_t>::max() - 1u);
+    current = previous;
+    current.color = glm::float4(0.0f);
+    CHECK(temporalLightMapping(&previous, &current, 17u) == std::numeric_limits<uint32_t>::max());
+    CHECK(temporalLightMapping(&previous, nullptr, 17u) == std::numeric_limits<uint32_t>::max());
+}
 
 TEST_CASE("light selection alias table follows power and excludes zero bins")
 {
@@ -72,8 +94,7 @@ TEST_CASE("categorical bucket draw reaches every bucket beyond the float mantiss
     for (uint32_t bucket = 0u; bucket < bucketCount; ++bucket)
     {
         const uint64_t numerator = uint64_t(bucket) * wordCount;
-        const uint32_t firstWord =
-            static_cast<uint32_t>(numerator == 0u ? 0u : 1u + (numerator - 1u) / bucketCount);
+        const uint32_t firstWord = static_cast<uint32_t>(numerator == 0u ? 0u : 1u + (numerator - 1u) / bucketCount);
         reached[lightAliasBucket(bucketCount, firstWord)] = true;
     }
     CHECK(std::ranges::count(reached, true) == bucketCount);
@@ -255,8 +276,7 @@ TEST_CASE("million-light selection preserves positive support and excludes zero 
     {
         const auto& entry = table.entries[bucket];
         REQUIRE(entry.alias < count);
-        const double bucketMass = double(discreteBucketStateCount(uint32_t(count), uint32_t(bucket))) /
-                                  integerStateCount;
+        const double bucketMass = double(discreteBucketStateCount(uint32_t(count), uint32_t(bucket))) / integerStateCount;
         const double own = entry.alias == bucket ? 1.0 : double(entry.aliasThreshold) / integerStateCount;
         represented[bucket] += bucketMass * own;
         represented[entry.alias] += bucketMass * (1.0 - own);
@@ -494,8 +514,7 @@ TEST_CASE("emissive mesh hierarchy preserves mesh and triangle PMFs")
     constexpr uint32_t draws = 1u << 20u;
     for (uint32_t draw = 0u; draw < draws; ++draw)
     {
-        const uint32_t meshBucket =
-            lightAliasBucket(static_cast<uint32_t>(distribution.meshes.size()), randomWord());
+        const uint32_t meshBucket = lightAliasBucket(static_cast<uint32_t>(distribution.meshes.size()), randomWord());
         const EmissiveMeshLight& meshEntry = distribution.meshes[meshBucket];
         const uint32_t meshId = lightAliasSelect(static_cast<uint32_t>(distribution.meshes.size()), meshBucket,
                                                  randomWord(), meshEntry.aliasThreshold, meshEntry.alias);
@@ -558,8 +577,7 @@ TEST_CASE("OpenPBR emission textures retain emissive mesh proposal support")
     // Mutation: treating the image as a modulation of the authored zero
     // constant removes the emitter from the discrete proposal altogether.
     const double constantOnly = 0.2126 * material.openpbr.emission_color.r +
-                                0.7152 * material.openpbr.emission_color.g +
-                                0.0722 * material.openpbr.emission_color.b;
+                                0.7152 * material.openpbr.emission_color.g + 0.0722 * material.openpbr.emission_color.b;
     CHECK(constantOnly == 0.0);
 }
 
@@ -578,19 +596,17 @@ TEST_CASE("emissive mesh proposal retains interior motion support")
     const glm::mat4 shutterOpen = glm::scale(glm::mat4(1.0f), glm::vec3(0.0f, 1.0f, 1.0f));
     const glm::mat4 shutterClose = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 0.0f, 1.0f));
     const glm::mat4 shutterMiddle = (shutterOpen + shutterClose) * 0.5f;
-    const auto openPower = oka::render::emissiveTrianglePowers(
-        scene, scene.getMeshes()[meshId], material, shutterOpen);
-    const auto closePower = oka::render::emissiveTrianglePowers(
-        scene, scene.getMeshes()[meshId], material, shutterClose);
-    const auto middlePower = oka::render::emissiveTrianglePowers(
-        scene, scene.getMeshes()[meshId], material, shutterMiddle);
+    const auto openPower = oka::render::emissiveTrianglePowers(scene, scene.getMeshes()[meshId], material, shutterOpen);
+    const auto closePower = oka::render::emissiveTrianglePowers(scene, scene.getMeshes()[meshId], material, shutterClose);
+    const auto middlePower =
+        oka::render::emissiveTrianglePowers(scene, scene.getMeshes()[meshId], material, shutterMiddle);
     REQUIRE(openPower.size() == 1u);
     REQUIRE(closePower.size() == 1u);
     REQUIRE(middlePower.size() == 1u);
     REQUIRE(middlePower[0] > 0.0);
 
-    const auto motionSupport = oka::render::emissiveTrianglePowers(
-        scene, scene.getMeshes()[meshId], material, shutterOpen, true);
+    const auto motionSupport =
+        oka::render::emissiveTrianglePowers(scene, scene.getMeshes()[meshId], material, shutterOpen, true);
     REQUIRE(motionSupport.size() == 1u);
     CHECK(motionSupport[0] > 0.0);
 
@@ -689,8 +705,7 @@ TEST_CASE("emissive triangle measure survives overflowing endpoint differences")
     CHECK(sample.point.x == 0.0f);
     CHECK(sample.normal == make_float3(0.0f, 0.0f, 1.0f));
 
-    const long double twiceArea =
-        (2.0L * static_cast<long double>(maxFinite)) * static_cast<long double>(p2.y);
+    const long double twiceArea = (2.0L * static_cast<long double>(maxFinite)) * static_cast<long double>(p2.y);
     CHECK(sample.areaPdf == doctest::Approx(static_cast<double>(2.0L / twiceArea)).epsilon(2e-6));
     CHECK_FALSE(std::isfinite((p1 - p0).x));
 
@@ -703,8 +718,7 @@ TEST_CASE("emissive triangle measure survives overflowing endpoint differences")
     oka::Scene::MaterialDescription material;
     material.params.emission = glm::float3(1.0f);
     material.params.emission_strength = 1.0f;
-    const auto powers = oka::render::emissiveTrianglePowers(
-        scene, scene.getMeshes()[meshId], material, glm::mat4(1.0f));
+    const auto powers = oka::render::emissiveTrianglePowers(scene, scene.getMeshes()[meshId], material, glm::mat4(1.0f));
     REQUIRE(powers.size() == 1u);
     CHECK(powers[0] > 0.0);
     CHECK(std::isfinite(powers[0]));
@@ -712,25 +726,25 @@ TEST_CASE("emissive triangle measure survives overflowing endpoint differences")
 
 TEST_CASE("emissive triangle measure retains exponent-separated endpoint terms")
 {
-    const EmissiveTriangleMeasure normalDensity = emissiveTriangleMeasure(
-        make_float3(2.69389246e33f, 3.64638875e17f, 8.27110457e16f),
-        make_float3(-7.85297065e19f, -23.1444607f, 8.62724393e-39f),
-        make_float3(4.73868002e17f, 1.35268463e-35f, 2.89990249e-18f));
+    const EmissiveTriangleMeasure normalDensity =
+        emissiveTriangleMeasure(make_float3(2.69389246e33f, 3.64638875e17f, 8.27110457e16f),
+                                make_float3(-7.85297065e19f, -23.1444607f, 8.62724393e-39f),
+                                make_float3(4.73868002e17f, 1.35268463e-35f, 2.89990249e-18f));
     CHECK(normalDensity.areaPdf == doctest::Approx(6.784540066654614e-38).epsilon(2e-6));
     CHECK(normalDensity.areaPdf >= std::numeric_limits<float>::min());
     CHECK(dot(normalDensity.normal, normalDensity.normal) == doctest::Approx(1.0f).epsilon(2e-6));
 
-    const EmissiveTriangleMeasure underflowDensity = emissiveTriangleMeasure(
-        make_float3(-1.57713117e36f, 5.03585699e-21f, 2.16896687e28f),
-        make_float3(-6.44862957e-5f, -3.8660869e-31f, -3.72892914e-16f),
-        make_float3(1.50318351e20f, 1.41720677e-20f, -99582920.0f));
+    const EmissiveTriangleMeasure underflowDensity =
+        emissiveTriangleMeasure(make_float3(-1.57713117e36f, 5.03585699e-21f, 2.16896687e28f),
+                                make_float3(-6.44862957e-5f, -3.8660869e-31f, -3.72892914e-16f),
+                                make_float3(1.50318351e20f, 1.41720677e-20f, -99582920.0f));
     CHECK(underflowDensity.areaPdf == 0.0f);
     CHECK(underflowDensity.normal == make_float3(0.0f));
 
-    const EmissiveTriangleMeasure cancelledDensity = emissiveTriangleMeasure(
-        make_float3(-2.96706332e25f, 3.29073524e-17f, 8.87590965e35f),
-        make_float3(1.26941101e-26f, 4.70448121e-33f, 1.92276515e-23f),
-        make_float3(-1.86062789e-6f, 6.83772451e-36f, -41.1517296f));
+    const EmissiveTriangleMeasure cancelledDensity =
+        emissiveTriangleMeasure(make_float3(-2.96706332e25f, 3.29073524e-17f, 8.87590965e35f),
+                                make_float3(1.26941101e-26f, 4.70448121e-33f, 1.92276515e-23f),
+                                make_float3(-1.86062789e-6f, 6.83772451e-36f, -41.1517296f));
     CHECK(cancelledDensity.areaPdf == doctest::Approx(1.2101428097e-30).epsilon(2e-6));
     CHECK(dot(cancelledDensity.normal, cancelledDensity.normal) == doctest::Approx(1.0f).epsilon(2e-6));
 }
@@ -748,8 +762,7 @@ TEST_CASE("emissive mesh power excludes unrepresentable area densities")
     material.params.emission_strength = 1.0f;
 
     CHECK(emissiveTriangleAreaPdf(float3(vertices[0].pos), float3(vertices[1].pos), float3(vertices[2].pos)) == 0.0f);
-    const auto powers = oka::render::emissiveTrianglePowers(
-        scene, scene.getMeshes()[meshId], material, glm::mat4(1.0f));
+    const auto powers = oka::render::emissiveTrianglePowers(scene, scene.getMeshes()[meshId], material, glm::mat4(1.0f));
     REQUIRE(powers.size() == 1u);
     CHECK(powers[0] == 0.0);
 

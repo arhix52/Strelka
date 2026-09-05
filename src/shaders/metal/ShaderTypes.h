@@ -399,10 +399,25 @@ struct Uniforms
 #else
     uint64_t guideQueue;
     uint64_t restirQueue;
-    uint64_t abiTailPadding;
 #endif
+
+#ifdef __METAL_VERSION__
+    device char* previousLights;
+    device const uint32_t* previousToCurrentLight;
+    device const uint32_t* currentToPreviousLight;
+#else
+    uint64_t previousLights;
+    uint64_t previousToCurrentLight;
+    uint64_t currentToPreviousLight;
+#endif
+    uint32_t previousNumLights;
+    uint32_t previousNumEmissiveMeshes;
+    float previousMeshLightSelectionPdf;
+    float previousEnvSelectionPdf;
+    uint32_t restirEnvironmentHistoryValid;
+    uint32_t restirMeshHistoryValid;
 };
-static_assert(sizeof(Uniforms) == 960, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1008, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -430,7 +445,12 @@ enum RenderWorkCounter : uint32_t
     WORK_GUIDE_DISPATCHES = 81,
     WORK_RESTIR_DIAGNOSTIC_QUERIES = 82,
     WORK_RESTIR_EFFECTIVE_M = 83,
-    WORK_COUNTER_COUNT = 84,
+    WORK_RESTIR_TEMPORAL_REJECT_SURFACE = 84,
+    WORK_RESTIR_TEMPORAL_REJECT_UNMAPPED = 85,
+    WORK_RESTIR_TEMPORAL_REJECT_TYPE = 86,
+    WORK_RESTIR_TEMPORAL_REJECT_ENVIRONMENT = 87,
+    WORK_RESTIR_TEMPORAL_REJECT_MESH = 88,
+    WORK_COUNTER_COUNT = 89,
     WORK_BOUNCE_SLOTS = 16
 };
 

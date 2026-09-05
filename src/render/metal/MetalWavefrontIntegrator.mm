@@ -1134,6 +1134,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         e->useResource(mRestirSurfaceDataBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         if (mRestirSurfaceDataBuffer[1])
             e->useResource(mRestirSurfaceDataBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        if (scene.previousLightBuffer)
+            e->useResource(scene.previousLightBuffer, MTL::ResourceUsageRead);
+        if (scene.lightTemporalMappingBuffer)
+            e->useResource(scene.lightTemporalMappingBuffer, MTL::ResourceUsageRead);
     };
     declareResidency(enc);
 

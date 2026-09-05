@@ -142,8 +142,8 @@ inline double analyticLightPower(const Scene::Light& light)
     const double packedDirectionLengthSquared = glm::dot(packedDirection, packedDirection);
     const bool hasFiniteDirection = packedDirectionLengthSquared > 0.0 && std::isfinite(packedDirectionLengthSquared);
     const bool hasFinitePosition = affineVectorIsFinite(glm::float3(light.points[1]));
-    const OrthonormalLightFrame profileFrame = makeOrthonormalLightFrame(
-        glm::float3(light.points[2]), glm::float3(light.points[3]), glm::float3(light.normal));
+    const OrthonormalLightFrame profileFrame =
+        makeOrthonormalLightFrame(glm::float3(light.points[2]), glm::float3(light.points[3]), glm::float3(light.normal));
     double measure = 0.0;
     switch (light.type)
     {
@@ -161,7 +161,7 @@ inline double analyticLightPower(const Scene::Light& light)
     case LIGHT_TYPE_DISC:
         if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
             affineSamplePointRangeIsFinite(glm::float3(light.points[1]), glm::float3(light.points[2]),
-                                          glm::float3(light.points[3]), glm::float3(0.0f)) &&
+                                           glm::float3(light.points[3]), glm::float3(0.0f)) &&
             analyticDiscAreaPdf(glm::float3(light.points[2]), glm::float3(light.points[3])) > 0.0f)
         {
             measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
@@ -237,6 +237,17 @@ inline double analyticLightPower(const Scene::Light& light)
         break;
     }
     return cleanLightPower(luminance * measure);
+}
+
+inline uint32_t temporalLightMapping(const Scene::Light* source, const Scene::Light* destination, uint32_t stableId)
+{
+    if (!source || !destination)
+        return std::numeric_limits<uint32_t>::max();
+    if (source->type != destination->type)
+        return std::numeric_limits<uint32_t>::max() - 1u;
+    if (!(analyticLightPower(*destination) > 0.0))
+        return std::numeric_limits<uint32_t>::max();
+    return stableId;
 }
 
 inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& powers)
@@ -349,9 +360,9 @@ inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& p
     for (size_t bucket = 0; bucket < count; ++bucket)
     {
         const LightSelectionEntry& entry = table.entries[bucket];
-        const double bucketMass = static_cast<double>(
-                                      discreteBucketStateCount(static_cast<uint32_t>(count), static_cast<uint32_t>(bucket))) /
-                                  integerStateCount;
+        const double bucketMass =
+            static_cast<double>(discreteBucketStateCount(static_cast<uint32_t>(count), static_cast<uint32_t>(bucket))) /
+            integerStateCount;
         const double own = entry.alias == bucket ? 1.0 : static_cast<double>(entry.aliasThreshold) / integerStateCount;
         represented[bucket] += bucketMass * own;
         represented[entry.alias] += bucketMass * (1.0 - own);

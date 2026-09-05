@@ -213,11 +213,18 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
         std::memcpy(&pUniformData->worldToClip, glm::value_ptr(worldToClip), sizeof(float4x4));
     }
     pUniformData->denoiseDepthMode = settings.getAs<uint32_t>("render/pt/denoiseDepthMode");
-    // A pose is only usable once one has been captured *and* the frame it belongs
-    // to still corresponds to this one. Anything that resets the history has
-    // already declared that it does not.
-    pUniformData->hasPrevFramePose = (in.hasPrevFramePose && !in.resetDenoiseHistory && !in.noPrevPose) ? 1u : 0u;
-    pUniformData->restirHistoryValid = pUniformData->hasPrevFramePose;
+    pUniformData->hasPrevFramePose = (in.hasPrevFramePose && !in.noPrevPose) ? 1u : 0u;
+    pUniformData->restirHistoryValid = pUniformData->hasPrevFramePose != 0u && !in.resetRestirHistory ? 1u : 0u;
+    pUniformData->previousLights =
+        in.lights && in.lights->previousBuffer() ? in.lights->previousBuffer()->gpuAddress() : 0u;
+    pUniformData->previousToCurrentLight = in.lights ? in.lights->previousToCurrentAddress() : 0u;
+    pUniformData->currentToPreviousLight = in.lights ? in.lights->currentToPreviousAddress() : 0u;
+    pUniformData->previousNumLights = in.lights ? in.lights->previousCount() : 0u;
+    pUniformData->previousNumEmissiveMeshes = in.previousNumEmissiveMeshes;
+    pUniformData->previousMeshLightSelectionPdf = in.previousMeshLightSelectionPdf;
+    pUniformData->previousEnvSelectionPdf = in.previousEnvSelectionPdf;
+    pUniformData->restirEnvironmentHistoryValid = in.restirEnvironmentHistoryValid ? 1u : 0u;
+    pUniformData->restirMeshHistoryValid = in.restirMeshHistoryValid ? 1u : 0u;
     pUniformData->enableMotionBlur = in.enableMotionBlur ? 1 : 0;
     const bool stochasticShutter = isMotionBlurVisible && (!denoising || qualityPlaybackBlur || in.pausedBlurRefine);
     pUniformData->isMotionBlurVisible = (uint32_t)stochasticShutter;
