@@ -176,6 +176,7 @@ TEST_CASE("temporal ReSTIR advances candidate sequence across accumulation reset
 
 TEST_CASE("initial visibility discard keeps reservoir population")
 {
+    // RTXDI InitialSampling.hlsli stores zero visibility by discarding the sample while preserving M.
     RestirReservoirState reservoir{ 8.0f, 2.0f, 7u, RESTIR_RESERVOIR_VALID | 3u };
     restirReservoirDiscardSample(reservoir);
     CHECK(reservoir.M == 7u);

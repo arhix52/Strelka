@@ -46,23 +46,26 @@ def reference_hash(directory):
     return digest.hexdigest()
 
 
-def render_frames(binary, scene, output, width, height, spp, lights, sequence, name, flags):
+def render_frames(binary, scene, output, width, height, spp, lights, sequence, name, flags, freeze=False):
     prefix = output / name
-    text = run(sequence_command(binary, scene, output / f"{name}.exr", prefix, width, height, spp, lights,
-                                sequence, flags))
+    command = sequence_command(binary, scene, output / f"{name}.exr", prefix, width, height, spp, lights,
+                               sequence, flags)
+    if freeze:
+        command.append("--audit-freeze")
+    text = run(command)
     return load_frames(prefix), text
 
 
 def equal_time(binary, scene, output, references, width, height, lights, sequence, name, flags, timing):
     spp = max(1, round(50.0 / timing))
     frames, text = render_frames(binary, scene, output, width, height, spp, lights, sequence,
-                                 f"equal-{name}", flags)
+                                 f"equal-{name}", flags, True)
     measured = float(np.median(gpu_times(text)[3:]))
     corrected = max(1, round(spp * 50.0 / measured))
     if corrected != spp:
         spp = corrected
         frames, text = render_frames(binary, scene, output, width, height, spp, lights, sequence,
-                                     f"equal-{name}", flags)
+                                     f"equal-{name}", flags, True)
         measured = float(np.median(gpu_times(text)[3:]))
     result = frame_metrics(frames, references)
     result.update({"spp": spp, "gpu_ms": measured})
@@ -80,6 +83,8 @@ def main():
     parser.add_argument("--debug-binary", type=Path, default=Path("build/Debug/StrelkaCLI"))
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--height", type=int, default=144)
+    parser.add_argument("--reference-spp", type=int, default=2048)
+    parser.add_argument("--only", choices=("moving_512", "local_many"))
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -88,14 +93,16 @@ def main():
         raise RuntimeError("restir benchmark manifest hash mismatch")
     args.output.mkdir(parents=True, exist_ok=True)
     scenes = {
-        "moving_512": (args.moving_scene.resolve(), args.moving_reference.resolve(), 512, 0),
+        "moving_512": (args.moving_scene.resolve(), args.moving_reference.resolve(), 512, 1),
         "local_many": (args.local_scene.resolve(), args.local_reference.resolve(), 4096, 3),
     }
     result = {"schema": 1, "manifest_sha256": MANIFEST_SHA256, "resolution": [args.width, args.height],
               "frames": list(range(8, 24)), "timing": "rotating order; median of 5 run medians",
-              "tonemap": "none", "clamp": 0, "scenes": {}}
+              "reference_spp_per_frame": args.reference_spp, "tonemap": "none", "clamp": 0, "scenes": {}}
 
     for scene_name, (scene, reference_dir, lights, sequence) in scenes.items():
+        if args.only and scene_name != args.only:
+            continue
         references = load_frames(reference_dir / "reference")
         motions = load_frames(reference_dir / "motion")
         scene_output = args.output / scene_name
@@ -112,8 +119,11 @@ def main():
                 if repetition == 0:
                     quality_frames[name] = frames
 
-        scene_result = {"scene_sha256": sha256(scene), "reference_set_sha256": reference_hash(reference_dir),
-                        "variants": {}}
+        light_config = scene.with_name(f"{scene.stem}_light.json")
+        scene_result = {"scene_sha256": sha256(scene),
+                        "light_config_sha256": sha256(light_config) if light_config.exists() else None,
+                        "reference_set_sha256": reference_hash(reference_dir), "lights": lights,
+                        "motion_sequence": sequence, "variants": {}}
         for name, flags in VARIANTS.items():
             metric = frame_metrics(quality_frames[name], references)
             timing = float(np.median(timing_runs[name]))
