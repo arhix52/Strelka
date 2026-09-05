@@ -65,8 +65,8 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mRestirReservoirBuffer[1]);
     safeRelease(mRestirSurfaceHistoryBuffer[0]);
     safeRelease(mRestirSurfaceHistoryBuffer[1]);
-    safeRelease(mRestirShadingPointBuffer[0]);
-    safeRelease(mRestirShadingPointBuffer[1]);
+    safeRelease(mRestirSurfaceDataBuffer[0]);
+    safeRelease(mRestirSurfaceDataBuffer[1]);
     safeRelease(mMissQueueBuffer);
     for (auto& kv : mVariants)
     {
@@ -137,8 +137,8 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mRestirReservoirBuffer[1]);
     add(mRestirSurfaceHistoryBuffer[0]);
     add(mRestirSurfaceHistoryBuffer[1]);
-    add(mRestirShadingPointBuffer[0]);
-    add(mRestirShadingPointBuffer[1]);
+    add(mRestirSurfaceDataBuffer[0]);
+    add(mRestirSurfaceDataBuffer[1]);
     add(mControlBuffer);
     add(mTraversalDispatchBuffer);
     add(mStageStatsBuffer);
@@ -163,7 +163,7 @@ size_t MetalWavefrontIntegrator::queueBytes() const
            bufBytes(mShadowRayBuffer) + bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) +
            bufBytes(mStageStatsBuffer) + bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
            bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
-           bufBytes(mRestirShadingPointBuffer[0]) + bufBytes(mRestirShadingPointBuffer[1]) +
+           bufBytes(mRestirSurfaceDataBuffer[0]) + bufBytes(mRestirSurfaceDataBuffer[1]) +
            bufBytes(mRenderWorkCounterBuffer);
 }
 
@@ -172,7 +172,7 @@ size_t MetalWavefrontIntegrator::restirBytes() const
     auto bufBytes = [](MTL::Buffer* b) { return b ? b->length() : 0; };
     return bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
            bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
-           bufBytes(mRestirShadingPointBuffer[0]) + bufBytes(mRestirShadingPointBuffer[1]);
+           bufBytes(mRestirSurfaceDataBuffer[0]) + bufBytes(mRestirSurfaceDataBuffer[1]);
 }
 
 // Two timestamps per stage (encoder start and end), so the counter buffer holds
@@ -793,6 +793,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(mRadianceBuffer, 0, 12);
                 bind(mHitBuffer, 0, 13);
                 bind(mControlBuffer, 0, 14);
+                bind(scene.geometryEntryBuffer, 0, 15);
+                bind(scene.curvePointBuffer, 0, 16);
+                bind(scene.curveSegmentBuffer, 0, 17);
                 if (scene.environment && scene.environment->state().mapTexture)
                 {
                     table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
@@ -1071,9 +1074,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         e->useResource(mRestirReservoirBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirSurfaceHistoryBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirSurfaceHistoryBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-        e->useResource(mRestirShadingPointBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
-        if (mRestirShadingPointBuffer[1])
-            e->useResource(mRestirShadingPointBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mRestirSurfaceDataBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        if (mRestirSurfaceDataBuffer[1])
+            e->useResource(mRestirSurfaceDataBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
     };
     declareResidency(enc);
 
@@ -1318,6 +1321,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->setBuffer(mRadianceBuffer, 0, 12);
                 enc->setBuffer(mHitBuffer, 0, 13);
                 enc->setBuffer(mControlBuffer, 0, 14);
+                enc->setBuffer(scene.geometryEntryBuffer, 0, 15);
+                enc->setBuffer(scene.curvePointBuffer ? scene.curvePointBuffer : scene.placeholderBuffer, 0, 16);
+                enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 17);
                 if (scene.environment && scene.environment->state().mapTexture)
                 {
                     enc->setTexture(scene.environment->state().mapTexture, 0);
@@ -1711,8 +1717,8 @@ void MetalWavefrontIntegrator::ensureBuffers(
     release(mRestirReservoirBuffer[1]);
     release(mRestirSurfaceHistoryBuffer[0]);
     release(mRestirSurfaceHistoryBuffer[1]);
-    release(mRestirShadingPointBuffer[0]);
-    release(mRestirShadingPointBuffer[1]);
+    release(mRestirSurfaceDataBuffer[0]);
+    release(mRestirSurfaceDataBuffer[1]);
 
     metal::WavefrontElementSizes sz;
     sz.pathState = sizeof(PathState);
@@ -1728,6 +1734,7 @@ void MetalWavefrontIntegrator::ensureBuffers(
     sz.restirReservoir = sizeof(RestirReservoir);
     sz.restirSurfaceHistory = sizeof(RestirSurfaceHistory);
     sz.restirShadingPoint = sizeof(RestirShadingPoint);
+    sz.restirTargetSurface = sizeof(RestirTargetSurface);
     const metal::WavefrontBufferLayout layout =
         metal::wavefrontBufferLayout(width, height, sz, sharcUpdateDownscale, restirEnabled);
 
@@ -1770,12 +1777,11 @@ void MetalWavefrontIntegrator::ensureBuffers(
             mRestirSurfaceHistoryBuffer[i] =
                 mDevice->newBuffer(layout.restirSurfaceHistoryBytes, MTL::ResourceStorageModePrivate);
         }
-        mRestirShadingPointBuffer[0] =
-            mDevice->newBuffer(layout.restirShadingPointBytes, MTL::ResourceStorageModePrivate);
+        const size_t surfaceBytes = restirBasic ? layout.restirTargetSurfaceBytes : layout.restirShadingPointBytes;
+        mRestirSurfaceDataBuffer[0] = mDevice->newBuffer(surfaceBytes, MTL::ResourceStorageModePrivate);
         if (restirBasic)
         {
-            mRestirShadingPointBuffer[1] =
-                mDevice->newBuffer(layout.restirShadingPointBytes, MTL::ResourceStorageModePrivate);
+            mRestirSurfaceDataBuffer[1] = mDevice->newBuffer(surfaceBytes, MTL::ResourceStorageModePrivate);
         }
     }
 

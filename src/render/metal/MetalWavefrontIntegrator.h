@@ -214,11 +214,11 @@ public:
     {
         return mRestirSurfaceHistoryBuffer[index & 1u] ? mRestirSurfaceHistoryBuffer[index & 1u]->gpuAddress() : 0ull;
     }
-    uint64_t restirShadingPointAddress(uint32_t index) const
+    uint64_t restirSurfaceDataAddress(uint32_t index) const
     {
-        const MTL::Buffer* buffer = mRestirShadingPointBuffer[index & 1u];
+        const MTL::Buffer* buffer = mRestirSurfaceDataBuffer[index & 1u];
         if (!buffer)
-            buffer = mRestirShadingPointBuffer[0];
+            buffer = mRestirSurfaceDataBuffer[0];
         return buffer ? buffer->gpuAddress() : 0ull;
     }
     MTL::Buffer* iorStatsBuffer() const
@@ -288,7 +288,7 @@ private:
     MTL::Buffer* mAovBuffer = nullptr;
     MTL::Buffer* mRestirReservoirBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mRestirSurfaceHistoryBuffer[2] = { nullptr, nullptr };
-    MTL::Buffer* mRestirShadingPointBuffer[2] = { nullptr, nullptr };
+    MTL::Buffer* mRestirSurfaceDataBuffer[2] = { nullptr, nullptr };
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr;

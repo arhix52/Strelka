@@ -906,6 +906,8 @@ void MetalRender::init()
     // mesh or a curve set, and for a curve set how many segments a strand has.
     // One entry per geometry, not per primitive or per ray, so the word is free.
     static_assert(sizeof(GeometryEntry) == 16, "GeometryEntry size changed");
+    static_assert(sizeof(RestirTargetSurface) == 64, "RestirTargetSurface host/Metal ABI changed");
+    static_assert(sizeof(RestirDirectTargetSurface) == 64, "RestirDirectTargetSurface host/Metal ABI changed");
     static_assert(sizeof(AovSample) == 64, "AovSample is written once per pixel per frame; keep an eye on the size");
 
     mDevice = acquireMetalDevice();
@@ -1942,8 +1944,8 @@ void MetalRender::render(Buffer* output)
             pUniformData->restirReservoir1 = mIntegrator.restirReservoirAddress(1);
             pUniformData->restirHistory0 = mIntegrator.restirHistoryAddress(0);
             pUniformData->restirHistory1 = mIntegrator.restirHistoryAddress(1);
-            pUniformData->restirShadingPoints0 = mIntegrator.restirShadingPointAddress(0);
-            pUniformData->restirShadingPoints1 = mIntegrator.restirShadingPointAddress(1);
+            pUniformData->restirSurfaceData0 = mIntegrator.restirSurfaceDataAddress(0);
+            pUniformData->restirSurfaceData1 = mIntegrator.restirSurfaceDataAddress(1);
             pUniformData->renderWorkCounters = mIntegrator.renderWorkCounterAddress();
 
             metal::IntegratorSceneBindings sceneBind = integratorSceneBindings();
@@ -3154,7 +3156,7 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
         "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
-        "\"effectiveReservoirM\":{:.3f},\"finalRestirVisibilityRays\":{},"
+        "\"finalRestirVisibilityRays\":{},"
         "\"firstBounceNeeSamples\":{},\"secondaryNeeSamples\":{},"
         "\"kernelThreads\":{{\"generate\":{{\"active\":{},\"dispatched\":{}}},"
         "\"extend\":{{\"active\":{},\"dispatched\":{}}},\"shade\":{{\"active\":{},\"dispatched\":{}}},"
@@ -3173,9 +3175,6 @@ std::string MetalRender::renderWorkAuditJson() const
         array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE), c[WORK_INTERSECTION_QUERIES],
         c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES], c[WORK_RESTIR_CANDIDATE_QUERIES],
         c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_TEMPORAL_MERGES], c[WORK_RESTIR_SPATIAL_MERGES],
-        c[WORK_RESTIR_VALID_RESERVOIRS] != 0u ?
-            double(c[WORK_RESTIR_EFFECTIVE_M_SUM]) / double(c[WORK_RESTIR_VALID_RESERVOIRS]) :
-            0.0,
         c[WORK_RESTIR_FINAL_VISIBILITY_RAYS], c[WORK_FIRST_BOUNCE_NEE_SAMPLES], c[WORK_SECONDARY_NEE_SAMPLES],
         c[WORK_PRIMARY_RAYS], roundedThreads(static_cast<uint64_t>(width) * height) * mRenderWorkSpp, extendActive,
         dispatched(WORK_EXTEND_RAYS_BASE), shadeActive, dispatched(WORK_SHADE_ITEMS_BASE), missActive,

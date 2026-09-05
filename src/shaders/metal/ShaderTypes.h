@@ -361,15 +361,15 @@ struct Uniforms
     device struct RestirReservoir* restirReservoir1;
     device struct RestirSurfaceHistory* restirHistory0;
     device struct RestirSurfaceHistory* restirHistory1;
-    device struct RestirShadingPoint* restirShadingPoints0;
-    device struct RestirShadingPoint* restirShadingPoints1;
+    device char* restirSurfaceData0;
+    device char* restirSurfaceData1;
 #else
     uint64_t restirReservoir0;
     uint64_t restirReservoir1;
     uint64_t restirHistory0;
     uint64_t restirHistory1;
-    uint64_t restirShadingPoints0;
-    uint64_t restirShadingPoints1;
+    uint64_t restirSurfaceData0;
+    uint64_t restirSurfaceData1;
 #endif
 
     // Present only in the explicitly requested render-work audit variant. The
@@ -424,9 +424,7 @@ enum RenderWorkCounter : uint32_t
     WORK_RESTIR_REUSE_QUERIES = 79,
     WORK_MISS_LIGHT_EVALUATIONS = 80,
     WORK_GUIDE_DISPATCHES = 81,
-    WORK_RESTIR_EFFECTIVE_M_SUM = 82,
-    WORK_RESTIR_VALID_RESERVOIRS = 83,
-    WORK_COUNTER_COUNT = 84,
+    WORK_COUNTER_COUNT = 82,
     WORK_BOUNCE_SLOTS = 16
 };
 
@@ -776,6 +774,43 @@ struct RestirShadingPoint
     uint32_t sampleIdxAndFlags;
 };
 static_assert(sizeof(RestirShadingPoint) == 104, "ReSTIR shading point ABI changed");
+
+#define RESTIR_TARGET_SAMPLE_MASK 0xffffu
+#define RESTIR_TARGET_MEDIUM_SHIFT 16u
+#define RESTIR_TARGET_DIRECT (1u << 31)
+#define RESTIR_TARGET_FRONT_FACE (1u << 30)
+#define RESTIR_TARGET_THIN_WALLED (1u << 29)
+#define RESTIR_TARGET_HAS_TRANSMISSION (1u << 28)
+#define RESTIR_TARGET_HAS_DIFFUSE_TRANSMISSION (1u << 27)
+#define RESTIR_TARGET_MATERIAL_SHIFT 24u
+#define RESTIR_TARGET_MATERIAL_MASK 0x7u
+
+struct RestirTargetSurface
+{
+    packed_float3 position;
+    packed_float3 rayDirection;
+    vector_float2 barycentrics;
+    packed_float3 throughput;
+    float lodBase;
+    uint32_t geomEntryIndex;
+    uint32_t instanceIndex;
+    uint32_t primitiveId;
+    uint32_t sampleIdxAndMedium;
+};
+static_assert(sizeof(RestirTargetSurface) == 64, "ReSTIR target surface ABI changed");
+
+struct RestirDirectTargetSurface
+{
+    packed_float3 position;
+    packed_float3 shadingNormal;
+    packed_float3 rayDirection;
+    packed_float3 albedo;
+    uint32_t flags;
+    float roughness;
+    float metallicOrIor;
+    uint32_t sampleIdxAndMedium;
+};
+static_assert(sizeof(RestirDirectTargetSurface) == 64, "ReSTIR direct target surface ABI changed");
 
 // A deferred occlusion query produced by `shade` and consumed by `shadow`.
 struct ShadowRay

@@ -1675,6 +1675,30 @@ struct RestirEvaluation
     float target;
 };
 
+static float restirTargetOnly(thread const LightConnection& connection,
+                              thread SurfaceInteraction& si,
+                              bool isFibre,
+                              thread const ShadedFrame& neeFrame,
+                              bool isOpenPBR,
+                              thread const OpenPBR_PreparedBsdf& openpbrPrepared,
+                              uint32_t misHeuristic)
+{
+    if (!connection.needsRay || !(connection.pdf > 0.0f) ||
+        !neeProposesDirection(
+            isFibre, neeFrame.frontFace, neeFrame.normalSign * dot(connection.toLight, si.shading_normal)))
+    {
+        return 0.0f;
+    }
+    const BsdfEvalResult evalResult =
+        isOpenPBR ? openpbr_bsdf_eval(openpbrPrepared, si, connection.toLight) : bsdf_eval(si, connection.toLight);
+    if (!(evalResult.pdf > 0.0f))
+    {
+        return 0.0f;
+    }
+    const float misWeight = connection.isDelta ? 1.0f : computeMisWeight(connection.pdf, evalResult.pdf, misHeuristic);
+    return luminance(connection.radiance * evalResult.bsdf * misWeight);
+}
+
 static RestirEvaluation evaluateRestirConnection(thread const LightConnection& connection,
                                                  thread SurfaceInteraction& si,
                                                  bool isFibre,
@@ -1713,15 +1737,51 @@ static bool restirSurfaceHistoryCompatible(thread const RestirSurfaceHistory& cu
                                    (previous.materialIdAndFlags & RESTIR_SURFACE_VALID) != 0u);
 }
 
-static void rebuildRestirShadingPoint(constant Uniforms& uniforms,
-                                      device const Material* materials,
-                                      thread const RestirShadingPoint& stored,
-                                      thread const RestirSurfaceHistory& surface,
-                                      thread SurfaceInteraction& si,
-                                      thread bool& isFibre,
-                                      thread bool& isOpenPBR,
-                                      thread ShadedFrame& neeFrame,
-                                      thread OpenPBR_PreparedBsdf& openpbrPrepared);
+static bool restirCanStoreDirectTarget(thread const SurfaceInteraction& si, bool isFibre, bool isOpenPBR)
+{
+    if (isFibre || isOpenPBR || si.material_type == MATERIAL_TYPE_HAIR ||
+        any(si.shading_normal != si.geometry_normal))
+    {
+        return false;
+    }
+    if (si.material_type != MATERIAL_TYPE_STANDARD_PBR)
+    {
+        return true;
+    }
+    return si.transmission == 0.0f && si.clearcoat == 0.0f && si.anisotropy == 0.0f && si.specular == 0.5f &&
+           all(si.specular_color == float3(1.0f)) && si.iridescence == 0.0f && si.diffuse_transmission == 0.0f &&
+           si.sheen == 0.0f && si.subsurface == 0.0f && si.ior == 1.5f && !si.diffuse_faces_away;
+}
+
+static bool restirTargetIsDirect(thread const RestirTargetSurface& stored)
+{
+    return (stored.geomEntryIndex & RESTIR_TARGET_DIRECT) != 0u;
+}
+
+static float4x4 restirTargetObjectToWorld(constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                          thread const RestirTargetSurface& stored)
+{
+    return restirTargetIsDirect(stored) ? float4x4(1.0f) : emissiveObjectToWorld(instances, stored.instanceIndex);
+}
+
+static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
+                                       float4x4 objectToWorld,
+                                       device const Material* materials,
+                                       device const GeometryEntry* geometryEntries,
+                                       device const char* vertexBuffer,
+                                       device const char* prevVertexBuffer,
+                                       device const uint32_t* indexBuffer,
+                                       device const packed_float3* curvePoints,
+                                       device const uint32_t* curveSegments,
+                                       thread const RestirTargetSurface& stored,
+                                       bool interpolateMotion,
+                                       float motionTime,
+                                       thread SurfaceInteraction& si,
+                                       thread bool& isFibre,
+                                       thread bool& isOpenPBR,
+                                       thread ShadedFrame& neeFrame,
+                                       thread OpenPBR_PreparedBsdf& openpbrPrepared,
+                                       thread float& curveRadius);
 
 kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            constant Uniforms& uniforms [[buffer(0)]],
@@ -2995,8 +3055,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         {
             const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
             device RestirSurfaceHistory* currentHistory = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
-            device RestirShadingPoint* currentShadingPoints =
-                oddFrame ? uniforms.restirShadingPoints1 : uniforms.restirShadingPoints0;
+            device char* currentSurfaceData = uniforms.restirBiasCorrection != 0u ?
+                                                  (oddFrame ? uniforms.restirSurfaceData1 : uniforms.restirSurfaceData0) :
+                                                  uniforms.restirSurfaceData0;
 
             const float3 previousPosition = uniforms.hasPrevFramePose != 0u && !isCurve ?
                                                 previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances,
@@ -3013,23 +3074,40 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             const float2 previousPixelPosition =
                 float2(pixel) + float2(0.5f + uniforms.jitterX, 0.5f + uniforms.jitterY) + motion.offset;
 
-            RestirShadingPoint shadingPoint;
-            shadingPoint.position = packed_float3(worldPosition);
-            shadingPoint.shadingNormal = packed_float3(worldNormal);
-            shadingPoint.tangent = packed_float3(worldTangent);
-            shadingPoint.rayDirection = packed_float3(rayDir);
-            shadingPoint.vertexColor = packed_float3(vertexColor);
-            shadingPoint.throughput = packed_float3(throughput);
-            shadingPoint.uv = uv;
-            shadingPoint.exteriorIor = si.exterior_ior;
-            shadingPoint.lodBase = lodBase;
-            shadingPoint.curveRadius = curveRadius;
-            shadingPoint.tangentSign = tangentSign;
-            shadingPoint.medium = mediumState.medium & MEDIUM_INDEX_MASK;
-            shadingPoint.sampleIdxAndFlags = (sampleIdx & RESTIR_SHADING_SAMPLE_MASK) | RESTIR_SHADING_VALID |
-                                             (isCurve ? RESTIR_SHADING_CURVE : 0u) |
-                                             (motion.reactive == 0.0f ? RESTIR_SHADING_REPROJECTABLE : 0u);
-            currentShadingPoints[tid] = shadingPoint;
+            const uint32_t sampleAndMedium = (sampleIdx & RESTIR_TARGET_SAMPLE_MASK) |
+                                             ((mediumState.medium & MEDIUM_INDEX_MASK) << RESTIR_TARGET_MEDIUM_SHIFT);
+            if (restirCanStoreDirectTarget(si, isFibre, isOpenPBR))
+            {
+                RestirDirectTargetSurface targetSurface;
+                targetSurface.position = packed_float3(worldPosition);
+                targetSurface.shadingNormal = packed_float3(si.shading_normal);
+                targetSurface.rayDirection = packed_float3(rayDir);
+                targetSurface.albedo = packed_float3(si.albedo);
+                targetSurface.flags = RESTIR_TARGET_DIRECT |
+                                      ((si.material_type & RESTIR_TARGET_MATERIAL_MASK) << RESTIR_TARGET_MATERIAL_SHIFT) |
+                                      (si.front_face ? RESTIR_TARGET_FRONT_FACE : 0u) |
+                                      (si.thin_walled ? RESTIR_TARGET_THIN_WALLED : 0u) |
+                                      (si.transmission > 0.0f ? RESTIR_TARGET_HAS_TRANSMISSION : 0u) |
+                                      (si.diffuse_transmission > 0.0f ? RESTIR_TARGET_HAS_DIFFUSE_TRANSMISSION : 0u);
+                targetSurface.roughness = si.roughness;
+                targetSurface.metallicOrIor = si.material_type == MATERIAL_TYPE_STANDARD_PBR ? si.metallic : si.ior;
+                targetSurface.sampleIdxAndMedium = sampleAndMedium;
+                ((device RestirDirectTargetSurface*)currentSurfaceData)[tid] = targetSurface;
+            }
+            else
+            {
+                RestirTargetSurface targetSurface;
+                targetSurface.position = packed_float3(worldPosition);
+                targetSurface.rayDirection = packed_float3(rayDir);
+                targetSurface.throughput = packed_float3(throughput);
+                targetSurface.barycentrics = bary;
+                targetSurface.lodBase = lodBase;
+                targetSurface.geomEntryIndex = rec.geomEntryIndex;
+                targetSurface.instanceIndex = rec.instanceIndex;
+                targetSurface.primitiveId = rec.primitiveId;
+                targetSurface.sampleIdxAndMedium = sampleAndMedium;
+                ((device RestirTargetSurface*)currentSurfaceData)[tid] = targetSurface;
+            }
 
             // Temporal reuse consumes the same surface interaction and prepared
             // BSDF as initial sampling. Keeping it here avoids reconstructing and
@@ -3046,8 +3124,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         oddFrame ? uniforms.restirReservoir0 : uniforms.restirReservoir1;
                     device const RestirSurfaceHistory* previousHistory =
                         oddFrame ? uniforms.restirHistory0 : uniforms.restirHistory1;
-                    device const RestirShadingPoint* previousShadingPoints =
-                        oddFrame ? uniforms.restirShadingPoints0 : uniforms.restirShadingPoints1;
+                    device const char* previousSurfaceData =
+                        oddFrame ? uniforms.restirSurfaceData0 : uniforms.restirSurfaceData1;
                     RestirReservoir previousReservoir = previousReservoirs[previousIndex];
                     const RestirSurfaceHistory oldSurface = previousHistory[previousIndex];
                     const uint32_t age = previousReservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
@@ -3077,26 +3155,45 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         }
                         if (uniforms.restirBiasCorrection != 0u)
                         {
-                            const RestirShadingPoint previousStored = previousShadingPoints[previousIndex];
-                            SurfaceInteraction previousSi;
-                            bool previousIsFibre, previousIsOpenPBR;
-                            ShadedFrame previousNeeFrame;
-                            OpenPBR_PreparedBsdf previousOpenpbrPrepared;
-                            rebuildRestirShadingPoint(uniforms, materials, previousStored, oldSurface, previousSi,
-                                                      previousIsFibre, previousIsOpenPBR, previousNeeFrame,
-                                                      previousOpenpbrPrepared);
-                            const LightConnection selectedAtPrevious = reconnectRestirSample(
-                                uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
-                                motionTime, previousSi, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
-                            const RestirEvaluation selectedPreviousEvaluation = evaluateRestirConnection(
-                                selectedAtPrevious, previousSi, previousIsFibre, previousNeeFrame, previousIsOpenPBR,
-                                previousOpenpbrPrepared, uniforms.misHeuristic);
                             const float currentTarget = reservoir.state.target;
-                            const float previousTarget = selectedPreviousEvaluation.target;
+                            float previousTarget = previousReservoir.state.target;
+                            if (!selectedHistory)
+                            {
+                                const RestirTargetSurface previousStored =
+                                    ((device const RestirTargetSurface*)previousSurfaceData)[previousIndex];
+                                SurfaceInteraction previousSi;
+                                bool previousIsFibre, previousIsOpenPBR;
+                                ShadedFrame previousNeeFrame;
+                                OpenPBR_PreparedBsdf previousOpenpbrPrepared;
+                                float previousCurveRadius;
+                                float4x4 previousObjectToWorld = float4x4(1.0f);
+                                if (!restirTargetIsDirect(previousStored))
+                                {
+                                    const auto previousInstance = prevInstances[previousStored.instanceIndex];
+                                    previousObjectToWorld =
+                                        float4x4(float4(float3(previousInstance.transformationMatrix[0]), 0.0f),
+                                                 float4(float3(previousInstance.transformationMatrix[1]), 0.0f),
+                                                 float4(float3(previousInstance.transformationMatrix[2]), 0.0f),
+                                                 float4(float3(previousInstance.transformationMatrix[3]), 1.0f));
+                                }
+                                rebuildRestirTargetSurface(
+                                    uniforms, previousObjectToWorld, materials, geometryEntries, prevFrameVertexBuffer,
+                                    prevFrameVertexBuffer, indexBuffer, curvePoints, curveSegments, previousStored,
+                                    false, 0.0f, previousSi, previousIsFibre, previousIsOpenPBR, previousNeeFrame,
+                                    previousOpenpbrPrepared, previousCurveRadius);
+                                const LightConnection selectedAtPrevious =
+                                    reconnectRestirSample(uniforms, lights, instances, materials, prevFrameVertexBuffer,
+                                                          prevFrameVertexBuffer, indexBuffer, 0.0f, previousSi,
+                                                          envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
+                                previousTarget =
+                                    restirTargetOnly(selectedAtPrevious, previousSi, previousIsFibre, previousNeeFrame,
+                                                     previousIsOpenPBR, previousOpenpbrPrepared, uniforms.misHeuristic);
+                            }
                             const float sourceTargetSum =
                                 float(currentM) * currentTarget + float(previousReservoir.state.M) * previousTarget;
                             restirReservoirApplyBasicNormalization(
-                                reservoir.state, selectedHistory ? previousTarget : currentTarget, sourceTargetSum);
+                                reservoir.state, selectedHistory ? previousReservoir.state.target : currentTarget,
+                                sourceTargetSum);
                         }
                         reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) |
                                                       (selectedHistory ? min(age + 1u, RESTIR_RESERVOIR_AGE_MASK) : 0u);
@@ -3402,35 +3499,103 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     queuePush(outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
 }
 
-static void rebuildRestirShadingPoint(constant Uniforms& uniforms,
-                                      device const Material* materials,
-                                      thread const RestirShadingPoint& stored,
-                                      thread const RestirSurfaceHistory& surface,
-                                      thread SurfaceInteraction& si,
-                                      thread bool& isFibre,
-                                      thread bool& isOpenPBR,
-                                      thread ShadedFrame& neeFrame,
-                                      thread OpenPBR_PreparedBsdf& openpbrPrepared)
+static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
+                                       float4x4 objectToWorld,
+                                       device const Material* materials,
+                                       device const GeometryEntry* geometryEntries,
+                                       device const char* vertexBuffer,
+                                       device const char* prevVertexBuffer,
+                                       device const uint32_t* indexBuffer,
+                                       device const packed_float3* curvePoints,
+                                       device const uint32_t* curveSegments,
+                                       thread const RestirTargetSurface& stored,
+                                       bool interpolateMotion,
+                                       float motionTime,
+                                       thread SurfaceInteraction& si,
+                                       thread bool& isFibre,
+                                       thread bool& isOpenPBR,
+                                       thread ShadedFrame& neeFrame,
+                                       thread OpenPBR_PreparedBsdf& openpbrPrepared,
+                                       thread float& curveRadius)
 {
-    const uint32_t materialId = surface.materialIdAndFlags & RESTIR_SURFACE_MATERIAL_MASK;
-    const float3 normal = float3(stored.shadingNormal);
-    const float3 tangent = float3(stored.tangent);
-    const float3 bitangent = cross(normal, tangent) * stored.tangentSign;
-    initSurfaceInteraction(si, materials[materialId], float3(stored.position), normal, float3(surface.geometryNormal),
-                           tangent, bitangent, stored.uv, float3(stored.rayDirection), float3(stored.vertexColor),
+    if (restirTargetIsDirect(stored))
+    {
+        const RestirDirectTargetSurface direct = *(thread const RestirDirectTargetSurface*)&stored;
+        si = {};
+        si.position = float3(direct.position);
+        si.shading_normal = float3(direct.shadingNormal);
+        si.geometry_normal = si.shading_normal;
+        build_onb(si.shading_normal, si.tangent, si.bitangent);
+        si.wo = -float3(direct.rayDirection);
+        si.albedo = float3(direct.albedo);
+        si.roughness = direct.roughness;
+        si.material_type = (direct.flags >> RESTIR_TARGET_MATERIAL_SHIFT) & RESTIR_TARGET_MATERIAL_MASK;
+        si.front_face = (direct.flags & RESTIR_TARGET_FRONT_FACE) != 0u;
+        si.thin_walled = (direct.flags & RESTIR_TARGET_THIN_WALLED) != 0u;
+        si.transmission = (direct.flags & RESTIR_TARGET_HAS_TRANSMISSION) != 0u ? 1.0f : 0.0f;
+        si.diffuse_transmission = (direct.flags & RESTIR_TARGET_HAS_DIFFUSE_TRANSMISSION) != 0u ? 1.0f : 0.0f;
+        si.exterior_ior = 1.0f;
+        si.bump_normal = si.shading_normal;
+        si.clearcoat_ior = 1.5f;
+        si.iridescence_ior = 1.3f;
+        si.specular_color = float3(1.0f);
+        if (si.material_type == MATERIAL_TYPE_STANDARD_PBR)
+        {
+            si.metallic = direct.metallicOrIor;
+            si.ior = 1.5f;
+            si.specular = 0.5f;
+        }
+        else
+        {
+            si.ior = direct.metallicOrIor;
+        }
+        isFibre = false;
+        isOpenPBR = false;
+        curveRadius = 0.0f;
+        neeFrame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
+        return;
+    }
+    const GeometryEntry entry = geometryEntries[stored.geomEntryIndex];
+    const float3 position = float3(stored.position);
+    const float2 bary = stored.barycentrics;
+    const bool isCurve = SPEC_CURVES && (entry.flags & GEOM_FLAG_CURVE) != 0u;
+    float3 normal, tangent, geometryNormal, vertexColor;
+    float2 uv;
+    float tangentSign = 1.0f;
+    curveRadius = 0.0f;
+    if (isCurve)
+    {
+        fetchCurve(curvePoints, curveSegments, entry, stored.primitiveId, bary.x, position, objectToWorld, normal,
+                   tangent, uv, curveRadius);
+        geometryNormal = normal;
+        vertexColor = float3(1.0f);
+    }
+    else
+    {
+        float3 objectNormal, objectTangent, edge1, edge2;
+        float uvArea2;
+        fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, stored.primitiveId, interpolateMotion,
+                             motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
+                             geometryNormal, edge1, edge2, uvArea2);
+        normal = transformNormal(normalize(objectNormal), objectToWorld);
+        tangent = orthonormalizeTangent(normal, transformDirection(normalize(objectTangent), objectToWorld));
+        geometryNormal = transformNormal(geometryNormal, objectToWorld);
+    }
+    initSurfaceInteraction(si, materials[entry.materialId], position, normal, geometryNormal, tangent,
+                           cross(normal, tangent) * tangentSign, uv, float3(stored.rayDirection), vertexColor,
                            stored.lodBase);
-    si.exterior_ior = stored.exteriorIor;
+    si.exterior_ior = 1.0f;
     isOpenPBR = SPEC_OPENPBR && si.material_type == MATERIAL_TYPE_OPENPBR;
     if (isOpenPBR)
     {
-        OpenPBRParams openpbrMat = uniforms.openpbrParams[materialId];
+        OpenPBRParams openpbrMat = uniforms.openpbrParams[entry.materialId];
         if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
         {
-            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[materialId], si, stored.uv);
+            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv);
         }
         openpbrPrepared = openpbr_prepare_at(openpbrMat, si, float3(stored.throughput));
     }
-    isFibre = (stored.sampleIdxAndFlags & RESTIR_SHADING_CURVE) != 0u && scattersThroughFibre(si);
+    isFibre = isCurve && scattersThroughFibre(si);
     neeFrame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
 }
 
@@ -3456,6 +3621,9 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                                         device float4* radianceOut [[buffer(12)]],
                                         device const RestirReservoir* initialReservoirs [[buffer(13)]],
                                         device const uint32_t* control [[buffer(14)]],
+                                        device const GeometryEntry* geometryEntries [[buffer(15)]],
+                                        device const packed_float3* curvePoints [[buffer(16)]],
+                                        device const uint32_t* curveSegments [[buffer(17)]],
                                         texture2d<float> envMapTexture [[texture(0)]])
 {
     if (gid >= control[WF_CTRL_RESTIR_N])
@@ -3464,18 +3632,18 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     }
     const uint32_t tid = hitQueue[gid];
     const bool oddFrame = (uniforms.frameIndex & 1u) != 0u;
-    device const RestirShadingPoint* shadingPoints =
-        oddFrame ? uniforms.restirShadingPoints1 : uniforms.restirShadingPoints0;
-    const RestirShadingPoint stored = shadingPoints[tid];
-    if (uniforms.restirDIEnabled == 0u || (stored.sampleIdxAndFlags & RESTIR_SHADING_VALID) == 0u)
+    device const char* surfaceData = uniforms.restirBiasCorrection != 0u ?
+                                         (oddFrame ? uniforms.restirSurfaceData1 : uniforms.restirSurfaceData0) :
+                                         uniforms.restirSurfaceData0;
+    device RestirReservoir* currentReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
+    device const RestirSurfaceHistory* history = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
+    const RestirSurfaceHistory currentSurface = history[tid];
+    if (uniforms.restirDIEnabled == 0u || (currentSurface.materialIdAndFlags & RESTIR_SURFACE_VALID) == 0u)
     {
         return;
     }
     auditWork(uniforms, WORK_RESTIR_FINAL_ITEMS);
 
-    device RestirReservoir* currentReservoirs = oddFrame ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
-    device const RestirSurfaceHistory* history = oddFrame ? uniforms.restirHistory1 : uniforms.restirHistory0;
-    const RestirSurfaceHistory currentSurface = history[tid];
     RestirReservoir reservoir = initialReservoirs[tid];
     const uint32_t centerM = reservoir.state.M;
     uint32_t selectedAge = reservoir.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
@@ -3485,11 +3653,23 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     bool isFibre, isOpenPBR;
     ShadedFrame neeFrame;
     OpenPBR_PreparedBsdf openpbrPrepared;
-    rebuildRestirShadingPoint(
-        uniforms, materials, stored, currentSurface, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared);
+    float3 storedThroughput;
+    float curveRadius;
+    uint32_t medium;
+    uint32_t sampleIdx;
+    const RestirTargetSurface stored = ((device const RestirTargetSurface*)surfaceData)[tid];
+    sampleIdx = stored.sampleIdxAndMedium & RESTIR_TARGET_SAMPLE_MASK;
+    medium = stored.sampleIdxAndMedium >> RESTIR_TARGET_MEDIUM_SHIFT;
+    storedThroughput = restirTargetIsDirect(stored) ? float3(1.0f) : float3(stored.throughput);
+    const float storedMotionTime = motionTimeFor(uniforms, tid, sampleIdx);
+    const bool interpolateMotion =
+        SPEC_MOTION_BLUR && uniforms.enableMotionBlur && storedMotionTime < 1.0f && prevVertexBuffer && indexBuffer;
+    rebuildRestirTargetSurface(uniforms, restirTargetObjectToWorld(instances, stored), materials, geometryEntries,
+                               vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, stored,
+                               interpolateMotion, storedMotionTime, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared,
+                               curveRadius);
 
     const uint2 pixel = uint2(tid % uniforms.width, tid / uniforms.width);
-    const uint32_t sampleIdx = stored.sampleIdxAndFlags & RESTIR_SHADING_SAMPLE_MASK;
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
     SamplerState rng = samplerFor(uniforms, tid, sampleIdx, 0u);
     const uint32_t rotation = hash_combine(tid, uniforms.frameIndex * 0x9e3779b9u) & 15u;
@@ -3567,26 +3747,34 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            const RestirShadingPoint neighborStored = shadingPoints[neighborIndex];
+            if (selectedSourceIndex == neighborIndex)
+            {
+                selectedSourceTarget = neighbor.state.target;
+                sourceTargetSum += float(neighbor.state.M) * selectedSourceTarget;
+                continue;
+            }
+            const RestirTargetSurface neighborStored = ((device const RestirTargetSurface*)surfaceData)[neighborIndex];
             SurfaceInteraction neighborSi;
             bool neighborIsFibre, neighborIsOpenPBR;
             ShadedFrame neighborNeeFrame;
             OpenPBR_PreparedBsdf neighborOpenpbrPrepared;
-            rebuildRestirShadingPoint(uniforms, materials, neighborStored, neighborSurface, neighborSi, neighborIsFibre,
-                                      neighborIsOpenPBR, neighborNeeFrame, neighborOpenpbrPrepared);
-            const uint32_t neighborSampleIdx = neighborStored.sampleIdxAndFlags & RESTIR_SHADING_SAMPLE_MASK;
+            float neighborCurveRadius;
+            const uint32_t neighborSampleIdx = neighborStored.sampleIdxAndMedium & RESTIR_TARGET_SAMPLE_MASK;
             const float neighborMotionTime = motionTimeFor(uniforms, neighborIndex, neighborSampleIdx);
+            const bool neighborInterpolateMotion = SPEC_MOTION_BLUR && uniforms.enableMotionBlur &&
+                                                   neighborMotionTime < 1.0f && prevVertexBuffer && indexBuffer;
+            rebuildRestirTargetSurface(uniforms, restirTargetObjectToWorld(instances, neighborStored), materials,
+                                       geometryEntries, vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints,
+                                       curveSegments, neighborStored, neighborInterpolateMotion, neighborMotionTime,
+                                       neighborSi, neighborIsFibre, neighborIsOpenPBR, neighborNeeFrame,
+                                       neighborOpenpbrPrepared, neighborCurveRadius);
             const LightConnection selectedAtNeighbor = reconnectRestirSample(
                 uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, neighborMotionTime,
                 neighborSi, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
-            const RestirEvaluation neighborEvaluation =
-                evaluateRestirConnection(selectedAtNeighbor, neighborSi, neighborIsFibre, neighborNeeFrame,
-                                         neighborIsOpenPBR, neighborOpenpbrPrepared, uniforms.misHeuristic);
-            sourceTargetSum += float(neighbor.state.M) * neighborEvaluation.target;
-            if (selectedSourceIndex == neighborIndex)
-            {
-                selectedSourceTarget = neighborEvaluation.target;
-            }
+            const float neighborTarget =
+                restirTargetOnly(selectedAtNeighbor, neighborSi, neighborIsFibre, neighborNeeFrame, neighborIsOpenPBR,
+                                 neighborOpenpbrPrepared, uniforms.misHeuristic);
+            sourceTargetSum += float(neighbor.state.M) * neighborTarget;
         }
         restirReservoirApplyBasicNormalization(reservoir.state, selectedSourceTarget, sourceTargetSum);
     }
@@ -3594,8 +3782,6 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                           (min(uniforms.spatialNeighborCount, 16u) + 1u);
     restirReservoirLimitM(reservoir.state, maxM);
     currentReservoirs[tid] = reservoir;
-    auditWork(uniforms, WORK_RESTIR_EFFECTIVE_M_SUM, reservoir.state.M);
-    auditWork(uniforms, WORK_RESTIR_VALID_RESERVOIRS);
     if (uniforms.restirDebugMode != 0u)
     {
         const float3 debugColor =
@@ -3615,10 +3801,10 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     }
 
     const float3 shadowOrigin =
-        isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, stored.curveRadius, connection.toLight) :
+        isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, connection.toLight) :
                   connection.origin;
     const EmissiveVisibilitySegment visibility = lightVisibilitySegment(connection, shadowOrigin);
-    const float3 weight = float3(stored.throughput) * evaluated.integrand * W;
+    const float3 weight = storedThroughput * evaluated.integrand * W;
     if (!any(weight != 0.0f) || !visibility.valid)
     {
         return;
@@ -3629,7 +3815,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     sr.weight = packed_float3(clampIndirectContribution(weight, 0u, uniforms.clampIndirect));
     sr.maxDistance = visibility.maxDistance;
     sr.pixelIndex = tid;
-    sr.medium = stored.medium;
+    sr.medium = medium;
     sr.sharcRadiance = packed_float3(float3(0.0f));
     sr.sharcPathIndex = tid;
     sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
