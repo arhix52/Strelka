@@ -20,7 +20,7 @@ this file targets:
 | after the light-correctness batch | 39.3 | 216.6 | 40.5 | 12.1 |
 | after the four fixes below | 31.3 | 47.4 | 30.7 | 11.6 |
 | with the lights in the BVH (5) | 19.5 | 30.0 | 30.8 | 11.7 |
-| with the quick factorisation (6) | **18.9** | **28.2** | **27.3** | **12.5** |
+| with the quick factorisation (6) | 18.9 | 28.2 | 27.3 | 12.5 |
 
 kids_room was 24x its recorded number and is now 3.5x; the residue is real work
 (exact intersection, exact densities) and the shadow rays that carry it. At
@@ -141,6 +141,49 @@ Three things measured and not worth doing:
   kids_room, 96 nothing, 72 costs 22 %. Spill is not the problem either --
   `LDL`/`STL` are 2.6-3.5 % of PC samples despite 3.2 GB of local loads and
   2.2 GB of local stores per launch.
+
+### Taking connectToLight apart
+
+After (6), kids_room's frame was 10.8 ms/sample and `connectToLight` was 3.6 ms
+of it (33%; iso_bathroom 0.7 of 6.3). Split the same way, by removing one piece
+at a time and measuring:
+
+| | kids_room |
+|---|---|
+| the spherical-rectangle draw (against uniform area sampling) | 0.4 ms |
+| `emittedLightRadiance` -- falloff, IES, cone | 0.3 ms |
+| stating the sample's density twice | 0.4 ms |
+| the Sobol' sampler's five draws | ~2.5 ms |
+
+The third of those is fixed: `connectLight` asked `getLightPdf()` for the
+density of the sample it had just taken, and that function re-derives it from
+the point and the vertex -- a second `fillLightData()`, which for a sphere light
+is an entire ellipsoid intersection, and a second `rectSolidAngle()`. The
+sampler already had both. Now it carries the solid angle it drew over in
+`LightSampleData` and the caller states the density from what it has: 10.8 ->
+10.6 ms/sample on kids_room, and the frame moves by 1.5e-7 relative, which says
+the two were computing the same number.
+
+The first two are not worth anything -- the spherical rectangle is what keeps a
+rect light quiet, and 0.4 ms is a fair price for it.
+
+The fourth is the open one, and it resisted two attempts:
+
+* **Caching the dimension-independent half of the Owen scramble in
+  `SamplerState`.** `hash(seed + depth)` and the scrambled sample index are the
+  same for every draw a vertex makes, and a connection makes five. Hoisting them
+  is worth 23% of the frame when measured with a cheap LCG standing in for the
+  sampler -- and *costs* 4% when done for real, because `SamplerState` lives in
+  `PerRayData`, three more words took it from 136 to 152 bytes, and the
+  continuation stack is charged per thread. 11.2 against 10.8.
+* **The same cache in registers**, built at the top of `connectToLight` and
+  passed down instead of stored. Also slower, 11.3: at 255 registers per thread
+  there is nothing to spend.
+
+What is left to try is reducing the *number* of draws -- four of the five are
+categorical decisions (environment or local, mesh or analytic, which bucket,
+which alias) that between them need far fewer than 128 bits -- or a Gray-code
+Sobol' that advances by one XOR instead of walking the set bits of the index.
 
 ### The stall is not what this file used to say, and not what it looks like
 

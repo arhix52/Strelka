@@ -560,8 +560,18 @@ static __device__ LightConnection connectLight(SamplerState& sampler,
         // saturate(dot(N, L)) for everything but a fibre -- and nothing at all
         // for a medium, which has no normal to take it against.
         c.radiance = volumeEvent ? Li : Li * shadingCosine(si, lightSampleData.L);
-        c.pdf = getLightPdf(light, lightSampleData.pointOnLight, si.position, params.rectLightSamplingMethod,
-                            localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
+        // The density of the sample just taken, from the sample itself. This
+        // used to call getLightPdf(), which re-derives it from the point and
+        // the vertex: a second fillLightData() -- a whole ellipsoid
+        // intersection, for a sphere light -- and a second rectSolidAngle() per
+        // connection, both of which the sampler above had already done from the
+        // same inputs. Worth 11.2 -> 10.8 ms/sample on kids_room. The BSDF half
+        // of the estimate still goes through getLightPdf(), because there the
+        // point on the light is a hit rather than a draw and nothing has been
+        // computed for it yet.
+        LightPdfQuery query = buildLightPdfQuery(light, lightSampleData);
+        query.solidAngle = params.rectLightSamplingMethod != 0 ? lightSampleData.solidAngle : 0.0f;
+        c.pdf = marginalLightSolidAnglePdf(query, localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
         c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
         if (lightUsesAnalyticSurfaceIntersection(light.type, lightIsPunctual(light.type) ? light.points[0].x : 0.0f))

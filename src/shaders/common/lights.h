@@ -69,6 +69,12 @@ struct LightSampleData
 
     float3 L;
     float distToLight;
+
+    /// The solid angle a spherical-rectangle draw was taken over, or zero for
+    /// every other sampler and for the rect's own area fallback. Carried so the
+    /// caller can state the density of the sample it just took without asking
+    /// rectSolidAngle() a second question it has already answered.
+    float solidAngle = 0.0f;
 };
 
 struct AnalyticAreaLightHit
@@ -264,6 +270,7 @@ static __inline__ __device__ LightSampleData SampleRectLight(const UniformLight&
     lightSampleData.pointOnLight = SphQuadSample(quad, u);
     fillLightData(l, hitPoint, lightSampleData);
     lightSampleData.pdf = 1.0f / quad.S;
+    lightSampleData.solidAngle = quad.S;
 
     return lightSampleData;
 }
