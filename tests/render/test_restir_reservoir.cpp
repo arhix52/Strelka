@@ -167,21 +167,44 @@ TEST_CASE("ReSTIR temporal history M clamp is bias-mode independent")
     }
 }
 
-TEST_CASE("temporal ReSTIR advances candidate sequence across accumulation resets")
+TEST_CASE("ReSTIR advances candidate sequence across accumulation resets")
 {
     CHECK(restirSampleSequenceBase(false, true, false, 17u, 1u, 0u) == 0u);
     CHECK(restirSampleSequenceBase(false, true, true, 17u, 1u, 0u) == 17u);
     CHECK(restirSampleSequenceBase(false, true, true, 18u, 2u, 0u) == 36u);
+
+    const unsigned int seed = 0x12345678u;
+    CHECK(restirRngStreamSeed(seed, RESTIR_RNG_INITIAL_SALT) == restirRngStreamSeed(seed, RESTIR_RNG_INITIAL_SALT));
+    CHECK(restirRngStreamSeed(seed, RESTIR_RNG_INITIAL_SALT) != restirRngStreamSeed(seed, RESTIR_RNG_TEMPORAL_SALT));
+    CHECK(restirRngStreamSeed(seed, RESTIR_RNG_INITIAL_SALT) != restirRngStreamSeed(seed, RESTIR_RNG_SPATIAL_SALT));
+    CHECK(restirCurrentBufferIndex(17u) != restirHistoryBufferIndex(17u));
+
+    const RestirLightSample frame17{ restirSampleKey(RESTIR_SAMPLE_ANALYTIC, 9u), 11u, 22u, 33u };
+    const RestirLightSample frame18{ restirSampleKey(RESTIR_SAMPLE_ANALYTIC, 9u), 11u, 22u, 34u };
+    CHECK_FALSE(restirSamplesEqual(frame17, frame18));
 }
 
 TEST_CASE("initial visibility discard keeps reservoir population")
 {
-    // RTXDI InitialSampling.hlsli stores zero visibility by discarding the sample while preserving M.
-    RestirReservoirState reservoir{ 8.0f, 2.0f, 7u, RESTIR_RESERVOIR_VALID | 3u };
+    // RTXDI 3.1 FusedResampling.hlsl:68-73 stores zero visibility while preserving M.
+    // https://github.com/NVIDIA-RTX/RTXDI/blob/a6efab966b7c3b272da0461578eb56ac61c7cbff/Samples/FullSample/Shaders/LightingPasses/DI/FusedResampling.hlsl#L68-L73
+    RestirReservoirState reservoir{ 8.0f, 2.0f, 7u, RESTIR_RESERVOIR_VALID | RESTIR_RESERVOIR_INITIAL_VISIBLE | 3u };
     restirReservoirDiscardSample(reservoir);
     CHECK(reservoir.M == 7u);
     CHECK((reservoir.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u);
+    CHECK((reservoir.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) == 0u);
     CHECK(restirReservoirNormalization(reservoir) == 0.0f);
+}
+
+TEST_CASE("initial visibility cache follows exact selected sample")
+{
+    RestirReservoirState reservoir{ 2.0f, 1.0f, 1u, RESTIR_RESERVOIR_VALID | RESTIR_RESERVOIR_INITIAL_VISIBLE };
+    restirReservoirStoreInitialVisibility(reservoir, 0.375f);
+    CHECK(restirReservoirInitialVisibility(reservoir) == doctest::Approx(0.375f).epsilon(1e-6));
+    CHECK_FALSE(restirReservoirUpdate(reservoir, 1.0f, 1.0f, 1u, 1.0f));
+    CHECK((reservoir.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) != 0u);
+    CHECK(restirReservoirUpdate(reservoir, 100.0f, 1.0f, 1u, 0.0f));
+    CHECK((reservoir.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) == 0u);
 }
 
 TEST_CASE("ray-traced normalization removes an occluded source from BASIC support")

@@ -170,7 +170,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->reservoirMaxAge = settings.getAs<uint32_t>("render/pt/reservoirMaxAge");
     pUniformData->restirDebugMode = settings.getAs<uint32_t>("render/pt/restirDebugMode");
     pUniformData->restirBiasCorrection = std::min(settings.getAs<uint32_t>("render/pt/restirBiasCorrection"), 2u);
-    pUniformData->restirInitialVisibility = std::min(settings.getAs<uint32_t>("render/pt/restirInitialVisibility"), 2u);
+    pUniformData->restirInitialVisibility = std::min(settings.getAs<uint32_t>("render/pt/restirInitialVisibility"), 1u);
 #ifndef NDEBUG
     pUniformData->restirProposalCollision = in.lights ? in.lights->proposalCollision() : 0.0f;
     pUniformData->restirProposalEntropy = in.lights ? in.lights->proposalEntropy() : 0.0f;

@@ -21,13 +21,12 @@ def restir(candidates, temporal=True, spatial=True, bias="basic", initial_visibi
 
 VARIANTS = {
     "current": restir(1),
-    "initial_visibility": restir(1, initial_visibility="selected"),
+    "initial_visibility": restir(1, initial_visibility="on"),
     "reuse_visibility": restir(1, bias="raytraced-diagnostic"),
-    "both_visibility": restir(1, bias="raytraced-diagnostic", initial_visibility="selected"),
+    "both_visibility": restir(1, bias="raytraced-diagnostic", initial_visibility="on"),
     "initial_c1": restir(1, False, False, "off"),
     "initial_c2": restir(2, False, False, "off"),
     "initial_c8": restir(8, False, False, "off"),
-    "visible_c8": restir(8, False, False, "off", "candidates"),
 }
 
 

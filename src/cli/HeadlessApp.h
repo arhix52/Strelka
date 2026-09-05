@@ -94,7 +94,7 @@ struct RenderConfig
     uint32_t reservoirMaxAge = 20;
     uint32_t restirDebugMode = 0;
     uint32_t restirBiasCorrection = 0; // 0 = off, 1 = basic, 2 = ray-traced diagnostic
-    uint32_t restirInitialVisibility = 0; // 0 = off, 1 = selected sample, 2 = every candidate
+    uint32_t restirInitialVisibility = 0; // 0 = off, 1 = selected initial sample
     uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only
     /// Accumulate the diffuse/specular split of the first event into two extra
     /// images. Off because nothing reads them: the raygen wrote four scattered

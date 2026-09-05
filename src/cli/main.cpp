@@ -58,13 +58,13 @@ int main(int argc, const char* argv[])
         ("restir-debug", "ReSTIR debug mode",                cxxopts::value<uint32_t>())
         ("restir-bias-correction", "ReSTIR bias correction: off, basic, raytraced-diagnostic",
          cxxopts::value<std::string>())
-        ("restir-initial-visibility", "Diagnostic initial visibility: off, selected, candidates",
+        ("restir-initial-visibility", "ReSTIR selected-initial visibility: off, on",
          cxxopts::value<std::string>())
         ("profile-stages", "Report per-stage GPU timings",   cxxopts::value<bool>()->implicit_value("true"))
         ("audit-render-work", "Print debug render-work counters as JSON", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-frames", "Audited frames for moving-light harness", cxxopts::value<uint32_t>())
         ("audit-moving-lights", "Add moving analytic lights for render-work audit", cxxopts::value<uint32_t>())
-        ("audit-motion-sequence", "Moving-light sequence: 0 smooth, 1 camera/abrupt, 2 add/delete, 3 local-many",
+        ("audit-motion-sequence", "Moving-light sequence: 0 smooth, 1 camera/abrupt, 2 add/delete, 3 local-many, 4 balanced",
          cxxopts::value<uint32_t>())
         ("audit-freeze", "Refine final moving-light frame to --spp", cxxopts::value<bool>()->implicit_value("true"))
         ("audit-moving-node", "Move one emissive scene node", cxxopts::value<uint32_t>())
@@ -223,12 +223,12 @@ int main(int argc, const char* argv[])
     if (result.count("restir-initial-visibility"))
     {
         const std::string mode = result["restir-initial-visibility"].as<std::string>();
-        if (mode != "off" && mode != "selected" && mode != "candidates")
+        if (mode != "off" && mode != "on")
         {
-            STRELKA_FATAL("--restir-initial-visibility must be off, selected, or candidates");
+            STRELKA_FATAL("--restir-initial-visibility must be off or on");
             return 1;
         }
-        cfg.restirInitialVisibility = mode == "candidates" ? 2u : mode == "selected" ? 1u : 0u;
+        cfg.restirInitialVisibility = mode == "on" ? 1u : 0u;
     }
     if (result.count("profile-stages"))
     {
@@ -243,7 +243,7 @@ int main(int argc, const char* argv[])
     if (result.count("audit-moving-lights"))
         cfg.auditMovingLights = std::min(result["audit-moving-lights"].as<uint32_t>(), 4096u);
     if (result.count("audit-motion-sequence"))
-        cfg.auditMotionSequence = std::min(result["audit-motion-sequence"].as<uint32_t>(), 3u);
+        cfg.auditMotionSequence = std::min(result["audit-motion-sequence"].as<uint32_t>(), 4u);
     if (result.count("audit-freeze"))
         cfg.auditFreeze = result["audit-freeze"].as<bool>();
     if (result.count("audit-moving-node"))

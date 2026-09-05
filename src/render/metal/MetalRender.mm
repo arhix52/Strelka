@@ -3294,7 +3294,7 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"generatedPrimaryRays\":{},\"extendRays\":{},\"guideOnlyRays\":{},\"shadowRays\":{},"
         "\"intersectionQueries\":{},\"restirEligibleHits\":{},\"restirInitialCandidates\":{},"
         "\"restirCandidateQueries\":{},\"restirReuseQueries\":{},\"restirDiagnosticQueries\":{},"
-        "\"restirInitialVisibilityQueries\":{},"
+        "\"restirInitialVisibilityQueries\":{},\"restirInitialVisibilityReused\":{},"
         "\"restirEffectiveM\":{:.6f},"
         "\"temporalReservoirMerges\":{},\"spatialReservoirMerges\":{},"
         "\"temporalRejects\":{{\"surface\":{},\"unmapped\":{},\"type\":{},\"environment\":{},\"mesh\":{}}},"
@@ -3321,10 +3321,11 @@ std::string MetalRender::renderWorkAuditJson() const
         "\"manualAnalyticLightTests\":{},\"missLightEvaluations\":{},"
         "\"dispatchCount\":{},\"pipelineDispatches\":{},\"commandBuffers\":{},"
         "\"restirDiagnostics\":{}}}",
-        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs, c[WORK_PRIMARY_RAYS],
-        array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE), c[WORK_INTERSECTION_QUERIES],
-        c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES], c[WORK_RESTIR_CANDIDATE_QUERIES],
-        c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_DIAGNOSTIC_QUERIES], c[WORK_RESTIR_INITIAL_VISIBILITY_QUERIES],
+        mRenderWorkFrames, static_cast<uint64_t>(width) * height, mRenderWorkSpp, mRenderWorkGpuMs,
+        c[WORK_PRIMARY_RAYS], array(WORK_EXTEND_RAYS_BASE), c[WORK_GUIDE_ONLY_RAYS], array(WORK_SHADOW_RAYS_BASE),
+        c[WORK_INTERSECTION_QUERIES], c[WORK_RESTIR_ELIGIBLE_HITS], c[WORK_RESTIR_INITIAL_CANDIDATES],
+        c[WORK_RESTIR_CANDIDATE_QUERIES], c[WORK_RESTIR_REUSE_QUERIES], c[WORK_RESTIR_DIAGNOSTIC_QUERIES],
+        c[WORK_RESTIR_INITIAL_VISIBILITY_QUERIES], c[WORK_RESTIR_INITIAL_VISIBILITY_REUSED],
         c[WORK_RESTIR_FINAL_ITEMS] != 0u ?
             static_cast<double>(c[WORK_RESTIR_EFFECTIVE_M]) / static_cast<double>(c[WORK_RESTIR_FINAL_ITEMS]) :
             0.0,

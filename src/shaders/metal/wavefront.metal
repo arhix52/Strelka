@@ -466,10 +466,9 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
     // the monotonic display frame: camera motion resets subframeIndex, and using
     // it there would retrace the same path and hand MetalFX correlated noise.
     // SHARC has its own temporal sequence for the same reason.
-    const uint32_t sequenceBase =
-        restirSampleSequenceBase(uniforms.useFrameJitter != 0u, uniforms.enableAccumulation != 0u,
-                                 uniforms.restirDIEnabled != 0u && uniforms.temporalReuseEnabled != 0u,
-                                 uniforms.frameIndex, uniforms.samples_per_launch, uniforms.subframeIndex);
+    const uint32_t sequenceBase = restirSampleSequenceBase(
+        uniforms.useFrameJitter != 0u, uniforms.enableAccumulation != 0u, uniforms.restirDIEnabled != 0u,
+        uniforms.frameIndex, uniforms.samples_per_launch, uniforms.subframeIndex);
     const uint32_t sequenceIndex = SPEC_SHARC_UPDATE ? uniforms.sharcFrameIndex : sequenceBase + sampleIdx;
     SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp);
     s.depth = depth;
@@ -1849,11 +1848,13 @@ static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
 static bool restirDiagnosticVisible(StaticTraversal::structure accelerationStructure,
                                     StaticTraversal::table functionTable,
                                     thread const LightConnection& connection,
+                                    float3 shadowOrigin,
                                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                     device const Material* materials,
                                     device const GeometryEntry* geometryEntries,
                                     device const char* vertexBuffer,
-                                    device const uint32_t* indexBuffer);
+                                    device const uint32_t* indexBuffer,
+                                    thread float& transmittance);
 
 kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            constant Uniforms& uniforms [[buffer(0)]],
@@ -3110,17 +3111,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             {
                 continue;
             }
-            if (restirInitial && uniforms.restirInitialVisibility == 2u)
-            {
-                auditWork(uniforms, WORK_RESTIR_INITIAL_VISIBILITY_QUERIES);
-                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, conn, instances,
-                                             materials, geometryEntries, vertexBuffer, indexBuffer))
-                    continue;
-            }
             const float w = candidate.target / conn.pdf;
             // Reuse eLightId under a new scramble so adding RIS does not shift later Sobol dimensions.
             SamplerState arng = crng;
-            arng.seed = hash_combine(crng.seed, 0x51633e2du);
+            arng.seed = restirRngStreamSeed(crng.seed, RESTIR_RNG_INITIAL_SALT);
             if (restirReservoirUpdate(reservoir.state, w, candidate.target, 1u,
                                       random<SampleDimension::eLightId>(arng, uniforms.samplerType)))
             {
@@ -3131,13 +3125,24 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         reservoir.state.M = candidates;
-        if (restirInitial && uniforms.restirInitialVisibility == 1u &&
+        if (restirInitial && uniforms.restirInitialVisibility != 0u &&
             (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) != 0u)
         {
             auditWork(uniforms, WORK_RESTIR_INITIAL_VISIBILITY_QUERIES);
-            if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, bestConn, instances,
-                                         materials, geometryEntries, vertexBuffer, indexBuffer))
+            const float3 initialShadowOrigin =
+                isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, bestConn.toLight) :
+                          bestConn.origin;
+            float initialTransmittance;
+            if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, bestConn,
+                                         initialShadowOrigin, instances, materials, geometryEntries, vertexBuffer,
+                                         indexBuffer, initialTransmittance))
+            {
                 restirReservoirDiscardSample(reservoir.state);
+            }
+            else
+            {
+                restirReservoirStoreInitialVisibility(reservoir.state, initialTransmittance);
+            }
         }
         if (restirInitial)
         {
@@ -3152,12 +3157,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 candidateAudit->rngSampleIndex = rng.sampleIdx;
                 candidateAudit->rngDepth = rng.depth;
                 candidateAudit->lightDimension = uint32_t(SampleDimension::eLightId);
-                candidateAudit->initialStreamSeed = hash_combine(rng.seed, 0x51633e2du);
-                candidateAudit->temporalStreamSeed = hash_combine(rng.seed, 0x68bc21ebu);
-                candidateAudit->spatialStreamSeed = hash_combine(rng.seed, 0x3c6ef372u);
+                candidateAudit->initialStreamSeed = restirRngStreamSeed(rng.seed, RESTIR_RNG_INITIAL_SALT);
+                candidateAudit->temporalStreamSeed = restirRngStreamSeed(rng.seed, RESTIR_RNG_TEMPORAL_SALT);
+                candidateAudit->spatialStreamSeed = restirRngStreamSeed(rng.seed, RESTIR_RNG_SPATIAL_SALT);
                 candidateAudit->currentSample = reservoir.sample;
-                candidateAudit->currentBufferIndex = oddFrame ? 1u : 0u;
-                candidateAudit->historyBufferIndex = oddFrame ? 0u : 1u;
+                candidateAudit->currentBufferIndex = restirCurrentBufferIndex(uniforms.frameIndex);
+                candidateAudit->historyBufferIndex = restirHistoryBufferIndex(uniforms.frameIndex);
                 candidateAudit->proposalCollision = uniforms.restirProposalCollision;
                 candidateAudit->proposalEntropy = uniforms.restirProposalEntropy;
             }
@@ -3272,11 +3277,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         {
                             if (previousSampleAtCurrent.typeAndLightId == reservoir.sample.typeAndLightId)
                                 auditWork(uniforms, WORK_RESTIR_TEMPORAL_SAME_LIGHT);
-                            previousDuplicateCurrent =
-                                previousSampleAtCurrent.typeAndLightId == reservoir.sample.typeAndLightId &&
-                                previousSampleAtCurrent.data0 == reservoir.sample.data0 &&
-                                previousSampleAtCurrent.data1 == reservoir.sample.data1 &&
-                                previousSampleAtCurrent.data2 == reservoir.sample.data2;
+                            previousDuplicateCurrent = restirSamplesEqual(previousSampleAtCurrent, reservoir.sample);
                             if (previousDuplicateCurrent)
                             {
                                 auditWork(uniforms, WORK_RESTIR_TEMPORAL_DUPLICATE_CURRENT);
@@ -3304,7 +3305,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         {
                             const uint32_t currentM = reservoir.state.M;
                             SamplerState temporalRng = rng;
-                            temporalRng.seed = hash_combine(temporalRng.seed, 0x68bc21ebu);
+                            temporalRng.seed = restirRngStreamSeed(temporalRng.seed, RESTIR_RNG_TEMPORAL_SALT);
+                            const bool selectedSampleWasInitialVisible =
+                                (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) != 0u &&
+                                previousLightValid && restirSamplesEqual(reservoir.sample, previousSampleAtCurrent);
+                            const uint32_t initialVisibilityFlags =
+                                reservoir.state.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBILITY_MASK;
                             selectedHistory = restirReservoirUpdate(
                                 reservoir.state,
                                 restirReservoirMergeWeight(previousReservoir.state, previousEvaluation.target),
@@ -3315,6 +3321,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                             if (selectedHistory)
                             {
                                 reservoir.sample = previousSampleAtCurrent;
+                                if (selectedSampleWasInitialVisible)
+                                {
+                                    reservoir.state.ageAndFlags |= initialVisibilityFlags;
+                                }
                                 auditWork(uniforms, WORK_RESTIR_TEMPORAL_SELECTED);
                                 if (previousDuplicateCurrent)
                                     auditWork(uniforms, WORK_RESTIR_TEMPORAL_SELECTED_DUPLICATE_CURRENT);
@@ -3378,9 +3388,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                     previousTarget > 0.0f)
                                 {
                                     auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
-                                    if (!restirDiagnosticVisible(diagnosticAccelerationStructure,
-                                                                 diagnosticFunctionTable, selectedAtPrevious, instances,
-                                                                 materials, geometryEntries, vertexBuffer, indexBuffer))
+                                    float ignoredTransmittance;
+                                    if (!restirDiagnosticVisible(
+                                            diagnosticAccelerationStructure, diagnosticFunctionTable,
+                                            selectedAtPrevious, selectedAtPrevious.origin, instances, materials,
+                                            geometryEntries, vertexBuffer, indexBuffer, ignoredTransmittance))
                                     {
                                         previousTarget = 0.0f;
                                     }
@@ -3391,7 +3403,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                     reservoir.state, selectedHistory ? previousTarget : currentTarget, sourceTargetSum);
                             }
                         }
-                        reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) |
+                        reservoir.state.ageAndFlags = (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_FLAGS_MASK) |
                                                       (selectedHistory ? min(age + 1u, RESTIR_RESERVOIR_AGE_MASK) : 0u);
                     }
                     else
@@ -3920,18 +3932,26 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                 connection, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
         }
         SamplerState neighborRng = rng;
-        neighborRng.seed = hash_combine(rng.seed, 0x3c6ef372u + i * 0x9e3779b9u);
+        neighborRng.seed = restirRngStreamSeed(rng.seed, RESTIR_RNG_SPATIAL_SALT + i * 0x9e3779b9u);
+        const bool selectedSampleWasInitialVisible =
+            (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) != 0u &&
+            restirSamplesEqual(reservoir.sample, neighbor.sample);
+        const uint32_t initialVisibilityFlags = reservoir.state.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBILITY_MASK;
         if (restirReservoirUpdate(reservoir.state, restirReservoirMergeWeight(neighbor.state, evaluated.target),
                                   evaluated.target, neighbor.state.M,
                                   random<SampleDimension::eLightId>(neighborRng, uniforms.samplerType)))
         {
             reservoir.sample = neighbor.sample;
+            if (selectedSampleWasInitialVisible)
+            {
+                reservoir.state.ageAndFlags |= initialVisibilityFlags;
+            }
             selectedAge = neighbor.state.ageAndFlags & RESTIR_RESERVOIR_AGE_MASK;
             selectedSourceIndex = neighborIndex;
         }
     }
     reservoir.state.ageAndFlags =
-        (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) | min(selectedAge, RESTIR_RESERVOIR_AGE_MASK);
+        (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_FLAGS_MASK) | min(selectedAge, RESTIR_RESERVOIR_AGE_MASK);
     if ((reservoir.state.ageAndFlags & RESTIR_RESERVOIR_VALID) == 0u)
     {
         const uint32_t maxM = max(uniforms.initialCandidateCount, 1u) * max(uniforms.reservoirMaxAge, 1u) *
@@ -4030,8 +4050,10 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
             if (SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC && uniforms.restirBiasCorrection == 2u && neighborTarget > 0.0f)
             {
                 auditWork(uniforms, WORK_RESTIR_DIAGNOSTIC_QUERIES);
-                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable, selectedAtNeighbor,
-                                             instances, materials, geometryEntries, vertexBuffer, indexBuffer))
+                float ignoredTransmittance;
+                if (!restirDiagnosticVisible(diagnosticAccelerationStructure, diagnosticFunctionTable,
+                                             selectedAtNeighbor, selectedAtNeighbor.origin, instances, materials,
+                                             geometryEntries, vertexBuffer, indexBuffer, ignoredTransmittance))
                 {
                     neighborTarget = 0.0f;
                 }
@@ -4087,15 +4109,41 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
         isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, connection.toLight) :
                   connection.origin;
     const EmissiveVisibilitySegment visibility = lightVisibilitySegment(connection, shadowOrigin);
-    const float3 weight = storedThroughput * evaluated.integrand * W;
+    const float3 weight =
+        clampIndirectContribution(storedThroughput * evaluated.integrand * W, 0u, uniforms.clampIndirect);
     if (!any(weight != 0.0f) || !visibility.valid)
     {
+        return;
+    }
+    const bool reuseInitialVisibility = uniforms.restirInitialVisibility != 0u &&
+                                        (reservoir.state.ageAndFlags & RESTIR_RESERVOIR_INITIAL_VISIBLE) != 0u &&
+                                        (!SPEC_SSS || !uniforms.hasBoundedMedium);
+    if (reuseInitialVisibility)
+    {
+        float3 visibleWeight = weight * restirReservoirInitialVisibility(reservoir.state);
+        if (SPEC_FOG && uniforms.hasFog)
+        {
+            const float tau = fogOpticalDepth(
+                shadowOrigin, visibility.direction, visibility.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
+            visibleWeight *= exp(-tau);
+        }
+        if (all(visibleWeight <= 1e-6f))
+        {
+            return;
+        }
+        radianceOut[tid] += float4(visibleWeight, 0.0f);
+        restirDiagnosticVisibility(uniforms, tid, visibleWeight);
+        auditWork(uniforms, WORK_RESTIR_INITIAL_VISIBILITY_REUSED);
+        if (selectedHistory)
+        {
+            auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
+        }
         return;
     }
     ShadowRay sr;
     sr.origin = packed_float3(shadowOrigin);
     sr.direction = packed_float3(visibility.direction);
-    sr.weight = packed_float3(clampIndirectContribution(weight, 0u, uniforms.clampIndirect));
+    sr.weight = packed_float3(weight);
     sr.maxDistance = visibility.maxDistance;
     sr.pixelIndex = tid;
     sr.medium = medium;
@@ -4796,24 +4844,28 @@ struct CutoutShadowWalk<T, true>
 static bool restirDiagnosticVisible(StaticTraversal::structure accelerationStructure,
                                     StaticTraversal::table functionTable,
                                     thread const LightConnection& connection,
+                                    float3 shadowOrigin,
                                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                     device const Material* materials,
                                     device const GeometryEntry* geometryEntries,
                                     device const char* vertexBuffer,
-                                    device const uint32_t* indexBuffer)
+                                    device const uint32_t* indexBuffer,
+                                    thread float& transmittance)
 {
-    const EmissiveVisibilitySegment segment = lightVisibilitySegment(connection, connection.origin);
+    const EmissiveVisibilitySegment segment = lightVisibilitySegment(connection, shadowOrigin);
     if (!segment.valid)
     {
+        transmittance = 0.0f;
         return false;
     }
     ray shadowRay;
-    shadowRay.origin = connection.origin;
+    shadowRay.origin = shadowOrigin;
     shadowRay.direction = segment.direction;
     shadowRay.min_distance = 0.0f;
     shadowRay.max_distance = segment.maxDistance;
     if (!SPEC_ALPHA)
     {
+        transmittance = 1.0f;
         StaticTraversal::isect isect;
         isect.assume_geometry_type(StaticTraversal::geometryTypes());
         isect.force_opacity(forced_opacity::opaque);
@@ -4821,10 +4873,12 @@ static bool restirDiagnosticVisible(StaticTraversal::structure accelerationStruc
         return StaticTraversal::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, 0.0f, functionTable).type ==
                intersection_type::none;
     }
-    float3 transmittance;
-    return CutoutShadowWalk<StaticTraversal, false>::run(accelerationStructure, shadowRay, 0.0f, 0.0f, instances,
-                                                         materials, geometryEntries, vertexBuffer, indexBuffer,
-                                                         functionTable, transmittance);
+    float3 alphaTransmittance;
+    const bool visible = CutoutShadowWalk<StaticTraversal, false>::run(
+        accelerationStructure, shadowRay, 0.0f, 0.0f, instances, materials, geometryEntries, vertexBuffer, indexBuffer,
+        functionTable, alphaTransmittance);
+    transmittance = alphaTransmittance.x;
+    return visible;
 }
 
 // ---------------------------------------------------------------------------

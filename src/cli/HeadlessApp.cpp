@@ -241,9 +241,9 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     }
     if (auto v = tbl["render"]["restir_initial_visibility"].value<std::string>())
     {
-        if (*v != "off" && *v != "selected" && *v != "candidates")
-            throw std::runtime_error("restir_initial_visibility must be 'off', 'selected', or 'candidates'");
-        cfg.restirInitialVisibility = *v == "candidates" ? 2u : *v == "selected" ? 1u : 0u;
+        if (*v != "off" && *v != "on")
+            throw std::runtime_error("restir_initial_visibility must be 'off' or 'on'");
+        cfg.restirInitialVisibility = *v == "on" ? 1u : 0u;
     }
     if (auto v = tbl["render"]["estimator_mode"].value<int64_t>())
         cfg.estimatorMode = (uint32_t)*v;
@@ -792,6 +792,7 @@ int HeadlessApp::run()
     std::vector<uint32_t> auditMovingLightIds;
     auditMovingLightIds.reserve(m_config.auditMovingLights);
     const bool localManyLayout = m_config.auditMotionSequence == 3u;
+    const bool balancedLayout = m_config.auditMotionSequence == 4u;
     auto auditLightBase = [&](uint32_t i) {
         if (!localManyLayout)
             return glm::vec3((float(i % 32u) - 15.5f) * 0.08f, 0.25f + float(i - i % 32u) * (0.08f / 32.0f), 1.0f);
@@ -813,7 +814,9 @@ int HeadlessApp::run()
         light.radius = localManyLayout ? 0.04f : 0.15f;
         light.width = localManyLayout ? 0.08f : 0.3f;
         light.height = localManyLayout ? 0.08f : 0.3f;
-        light.intensity = localManyLayout ? 35.0f + 90.0f * float((i * 29u) & 63u) / 63.0f : 1.0f;
+        light.intensity = localManyLayout ? 35.0f + 90.0f * float((i * 29u) & 63u) / 63.0f :
+                          balancedLayout  ? 20.0f :
+                                            1.0f;
         light.enabled = m_config.auditMotionSequence != 2u || i < (3u * m_config.auditMovingLights) / 4u;
         light.visibleToCamera = false;
         auditMovingLightIds.push_back(m_scene->createLight(light));
@@ -859,7 +862,7 @@ int HeadlessApp::run()
                 light.position = auditLightBase(i);
                 light.position.x += std::sin(phase) * (localManyLayout ? 0.06f : 0.02f);
                 light.position.z += std::cos(phase) * (localManyLayout ? 0.06f : 0.02f);
-                if (m_config.auditMotionSequence == 1u && frame == 10u && i == 0u)
+                if ((m_config.auditMotionSequence == 1u || balancedLayout) && frame == 10u && i == 0u)
                 {
                     light.position.x += 0.5f;
                     light.intensity *= 8.0f;
@@ -868,7 +871,7 @@ int HeadlessApp::run()
                     light.enabled = frame >= 10u && frame < 12u;
                 m_scene->setLight(auditMovingLightIds[i], light);
             }
-            if (m_config.auditMotionSequence == 1u || localManyLayout)
+            if (m_config.auditMotionSequence == 1u || localManyLayout || balancedLayout)
             {
                 Camera& camera = m_scene->getCamera(0);
                 camera.position =
