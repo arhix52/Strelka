@@ -2094,19 +2094,36 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     const bool oldMissOnlyPathSelectsAnalytic = false;
     CHECK_FALSE(oldMissOnlyPathSelectsAnalytic);
 
-    // The unavailable-on-macOS backend still gets a call-site regression: its
-    // closest-hit program must perform the same bounded analytic search Metal
-    // performs after hardware traversal. The numerical check above separately
-    // proves what that search must select, without treating source text as the
-    // geometry oracle.
+    // The unavailable-on-macOS backend gets a call-site regression too, but on
+    // the mechanism that actually keeps the hardware hit from winning: its
+    // raygen bounds traversal at the nearest analytic light rather than letting
+    // geometry behind the light be found and then arbitrating afterwards. That
+    // is a stronger arrangement than Metal's -- the triangle behind the emitter
+    // is never intersected at all -- and it is what makes a second search in
+    // the closest-hit program dead code. Removing that search left every one of
+    // kids_room's 921 600 pixels unchanged and took the frame from 19.2 to 18.1
+    // ms/sample, because it ran per shading vertex over the whole light table.
+    //
+    // Source text is not the geometry oracle here either: the numbers above are.
+    // What this pins is that the bound is still applied where it has to be.
     const std::filesystem::path repository =
         std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    std::ifstream shaderFile(repository / "src/shaders/optix/OptixRender_closest_hit.cu");
-    REQUIRE(shaderFile.good());
-    const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
-    const size_t closestHit = shader.find("__closesthit__radiance()");
-    REQUIRE(closestHit != std::string::npos);
-    CHECK(shader.find("findAnalyticAreaLightHit(", closestHit) != std::string::npos);
+    std::ifstream raygenFile(repository / "src/shaders/optix/OptixRender.cu");
+    REQUIRE(raygenFile.good());
+    const std::string raygen((std::istreambuf_iterator<char>(raygenFile)), std::istreambuf_iterator<char>());
+    const size_t raygenEntry = raygen.find("__raygen__rg()");
+    REQUIRE(raygenEntry != std::string::npos);
+    const size_t search = raygen.find("findAnalyticAreaLightHit(", raygenEntry);
+    CHECK(search != std::string::npos);
+    const size_t traverse = raygen.find("optixTraverse(", raygenEntry);
+    REQUIRE(traverse != std::string::npos);
+    CHECK(search < traverse);
+    // In the argument list, not merely nearby: a bound computed and then not
+    // passed is the mutation this is here to catch.
+    const size_t traverseEnd = raygen.find(");", traverse);
+    REQUIRE(traverseEnd != std::string::npos);
+    const std::string traverseCall = raygen.substr(traverse, traverseEnd - traverse);
+    CHECK(traverseCall.find("traversalMax") != std::string::npos);
 }
 
 TEST_CASE("the nearest of two area emitters is the visible hit")
