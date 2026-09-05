@@ -66,6 +66,7 @@ struct PathTracerState
     OptixProgramGroup occlusion_hit_group = nullptr;
     OptixProgramGroup occlusion_linear_curve_hit_group = nullptr;
     OptixProgramGroup light_hit_group = nullptr;
+    OptixProgramGroup light_occlusion_group = nullptr;
     CUstream stream = nullptr;
     Params params = {};
     Params prevParams = {};
@@ -315,6 +316,26 @@ private:
     std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
     std::unique_ptr<OptixBuffer> mLightBuffer;
+    /// The analytic lights as custom primitives, so hardware traversal finds
+    /// them instead of every ray walking the light table. One structure per
+    /// camera visibility, because that is what an instance mask can express.
+    struct AnalyticLightAccel
+    {
+        std::unique_ptr<OptixBuffer> aabbs;
+        std::unique_ptr<OptixBuffer> indices;
+        CUdeviceptr output = 0;
+        OptixTraversableHandle handle = 0;
+        uint32_t count = 0;
+        ~AnalyticLightAccel()
+        {
+            CUDA_CHECK(cudaFree(optix::devicePtr<void>(output)));
+        }
+    };
+    /// Where the light structures' instances start in the TLAS, so their SBT
+    /// records can be appended to the scene's.
+    size_t mAnalyticLightInstanceBase = 0;
+    AnalyticLightAccel mVisibleLightAccel;
+    AnalyticLightAccel mHiddenLightAccel;
     std::unique_ptr<OptixBuffer> mEmissiveMeshBuffer;
     std::unique_ptr<OptixBuffer> mEmissiveTriangleBuffer;
     std::unique_ptr<OptixBuffer> mEmissiveInstanceTransformBuffer;
@@ -355,6 +376,9 @@ private:
 
     void createLightBuffer();
     void createEmissiveMeshLights();
+    /// Rebuild the analytic lights' custom-primitive structures. Cheap: one AABB
+    /// per light, and it runs only when the light table does.
+    void createAnalyticLightAccel();
     /// World bounds' diagonal: what the infinite lights' power proxy is scaled by.
     double sceneExtent() const;
     void updateEmitterSelectionProbabilities();

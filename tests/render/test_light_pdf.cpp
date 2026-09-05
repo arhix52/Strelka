@@ -2094,36 +2094,37 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     const bool oldMissOnlyPathSelectsAnalytic = false;
     CHECK_FALSE(oldMissOnlyPathSelectsAnalytic);
 
-    // The unavailable-on-macOS backend gets a call-site regression too, but on
-    // the mechanism that actually keeps the hardware hit from winning: its
-    // raygen bounds traversal at the nearest analytic light rather than letting
-    // geometry behind the light be found and then arbitrating afterwards. That
-    // is a stronger arrangement than Metal's -- the triangle behind the emitter
-    // is never intersected at all -- and it is what makes a second search in
-    // the closest-hit program dead code. Removing that search left every one of
-    // kids_room's 921 600 pixels unchanged and took the frame from 19.2 to 18.1
-    // ms/sample, because it ran per shading vertex over the whole light table.
+    // The unavailable-on-macOS backend arbitrates the same way Metal does now:
+    // the analytic emitters are custom primitives in the same structure as the
+    // geometry, so the nearest hit wins by traversal and nothing arbitrates
+    // afterwards. What replaced the light-table walks -- one in the raygen
+    // before every trace, one in the miss program, one per shadow ray -- took
+    // kids_room from 20.2 to 12.1 ms/sample and iso_bathroom from 11.3 to 6.8.
     //
-    // Source text is not the geometry oracle here either: the numbers above are.
-    // What this pins is that the bound is still applied where it has to be.
+    // Source text is not the geometry oracle here: the arithmetic above is.
+    // What this pins is that the walks are gone and did not creep back, and
+    // that shadow rays still meet the emitters -- a mask that drops the light
+    // bits puts the light back in front of its own shadow.
     const std::filesystem::path repository =
         std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    std::ifstream raygenFile(repository / "src/shaders/optix/OptixRender.cu");
-    REQUIRE(raygenFile.good());
-    const std::string raygen((std::istreambuf_iterator<char>(raygenFile)), std::istreambuf_iterator<char>());
-    const size_t raygenEntry = raygen.find("__raygen__rg()");
-    REQUIRE(raygenEntry != std::string::npos);
-    const size_t search = raygen.find("findAnalyticAreaLightHit(", raygenEntry);
-    CHECK(search != std::string::npos);
-    const size_t traverse = raygen.find("optixTraverse(", raygenEntry);
-    REQUIRE(traverse != std::string::npos);
-    CHECK(search < traverse);
-    // In the argument list, not merely nearby: a bound computed and then not
-    // passed is the mutation this is here to catch.
-    const size_t traverseEnd = raygen.find(");", traverse);
-    REQUIRE(traverseEnd != std::string::npos);
-    const std::string traverseCall = raygen.substr(traverse, traverseEnd - traverse);
-    CHECK(traverseCall.find("traversalMax") != std::string::npos);
+    const auto read = [&](const char* relative) {
+        std::ifstream file(repository / relative);
+        REQUIRE(file.good());
+        return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    };
+    const std::string raygen = read("src/shaders/optix/OptixRender.cu");
+    const std::string closestHit = read("src/shaders/optix/OptixRender_closest_hit.cu");
+    CHECK(raygen.find("findAnalyticAreaLightHit") == std::string::npos);
+    CHECK(closestHit.find("findAnalyticAreaLightHit") == std::string::npos);
+    CHECK(closestHit.find("analyticLightsOccludeSegment") == std::string::npos);
+    CHECK(closestHit.find("__intersection__light") != std::string::npos);
+
+    const std::string params = read("src/render/optix/OptixRenderParams.h");
+    const size_t shadowMask = params.find("RAY_MASK_SHADOW =");
+    REQUIRE(shadowMask != std::string::npos);
+    const std::string shadowMaskLine = params.substr(shadowMask, params.find(',', shadowMask) - shadowMask);
+    CHECK(shadowMaskLine.find("GEOMETRY_MASK_LIGHT") != std::string::npos);
+    CHECK(shadowMaskLine.find("GEOMETRY_MASK_LIGHT_HIDDEN") != std::string::npos);
 }
 
 TEST_CASE("the nearest of two area emitters is the visible hit")

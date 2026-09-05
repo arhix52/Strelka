@@ -37,7 +37,10 @@ enum : uint32_t
     GEOMETRY_MASK_GEOMETRY = GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE,
 
     RAY_MASK_PRIMARY = GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM,
-    RAY_MASK_SHADOW = GEOMETRY_MASK_GEOMETRY,
+    // Lights are custom primitives in the same structure now, so a shadow ray is
+    // stopped by an emitter the way it is by geometry -- both sets, because a
+    // light hidden from the camera still casts.
+    RAY_MASK_SHADOW = GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN,
     RAY_MASK_SECONDARY = RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN,
 };
 
@@ -644,6 +647,11 @@ struct HitGroupData
     int32_t indexCount;
     int32_t vertexOffset;
     int32_t lightId;     // only for lights. -1 for others
+    /// Analytic-light custom primitives only: primitive index -> light index.
+    /// The two structures a scene builds -- camera-visible and camera-hidden --
+    /// each hold a subset of the light table, and this is how a hit knows which
+    /// light it landed on. Null for every other kind of geometry.
+    const uint32_t* lightIndices;
     int32_t materialId;  // index into params.materials[] and params.materialTextures[]
     /// Segments per strand for a curve set, or 0 when the strands differ in
     /// length. It is the whole of what a root-to-tip UV needs: the segment index

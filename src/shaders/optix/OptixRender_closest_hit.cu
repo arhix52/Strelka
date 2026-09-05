@@ -188,11 +188,6 @@ static __forceinline__ __device__ float traceOcclusion(
 {
     const float time = optixGetRayTime();
 
-    if (analyticLightsOccludeSegment(params.scene.lights, params.scene.numLights, ray_origin, ray_direction, tmin, tmax))
-    {
-        return 0.0f;
-    }
-
     unsigned int transmittance = __float_as_uint(1.0f);
     optixTrace(handle, ray_origin, ray_direction, tmin, tmax,
                time, // rayTime
@@ -1800,29 +1795,74 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
     prd->throughput = make_float3(0.0f);
 }
 
+/// The analytic lights as geometry: hardware traversal culls them by AABB and
+/// this decides the rest, with the same function the light-table walk used to
+/// call. Nothing about the intersection is approximated -- the box is only a
+/// broad phase, and a ray that pierces it and misses the surface reports
+/// nothing.
+extern "C" __global__ void __intersection__light()
+{
+    const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+    const uint32_t lightId = hit_data->lightIndices[optixGetPrimitiveIndex()];
+    const UniformLight& light = params.scene.lights[lightId];
+
+    const AnalyticLightIntersection hit = intersectAnalyticLightSurfaceUnchecked(
+        light.type, make_float3(light.points[0]), make_float3(light.points[1]), make_float3(light.points[2]),
+        make_float3(light.points[3]), make_float3(light.normal), optixGetObjectRayOrigin(),
+        optixGetObjectRayDirection(), optixGetRayTmin(), optixGetRayTmax());
+    if (hit.hit)
+    {
+        optixReportIntersection(hit.distance, 0u, lightId);
+    }
+}
+
+/// A ray reached an analytic emitter, found by traversal rather than by walking
+/// the light table. The intersection program already decided that it is the
+/// nearest one and which one it is; this recovers the point and the normal from
+/// that decision -- one light, not all of them -- and shades it exactly as the
+/// miss program used to.
+extern "C" __global__ void __closesthit__analytic_light()
+{
+    PerRayData* prd = getPRD();
+    const float3 ray_origin = optixGetWorldRayOrigin();
+    const float3 ray_dir = optixGetWorldRayDirection();
+
+    AnalyticAreaLightHit hit;
+    hit.lightId = optixGetAttribute_0();
+    const UniformLight& light = params.scene.lights[hit.lightId];
+    const AnalyticLightIntersection surface = intersectAnalyticLightSurfaceUnchecked(
+        light.type, make_float3(light.points[0]), make_float3(light.points[1]), make_float3(light.points[2]),
+        make_float3(light.points[3]), make_float3(light.normal), ray_origin, ray_dir, params.materialRayTmin, 1e16f);
+    hit.distance = surface.distance;
+    hit.point = surface.point;
+    hit.normal = surface.normal;
+    hit.areaPdf = surface.areaPdf;
+    hit.hit = surface.hit;
+
+    // The haze in front of the emitter is still in front of it.
+    float fogT = 0.0f;
+    if (fogScatters(prd, ray_origin, ray_dir, hit.distance, fogT))
+    {
+        scatterInFog(prd, ray_origin, ray_dir, fogT);
+        return;
+    }
+
+    shadeAnalyticAreaLightHit(prd, hit, ray_origin, ray_dir);
+}
+
 extern "C" __global__ void __miss__ms()
 {
     PerRayData* prd = getPRD();
     const float3 ray_dir = optixGetWorldRayDirection();
     const float3 ray_origin = optixGetWorldRayOrigin();
-    const AnalyticAreaLightHit analyticHit =
-        findAnalyticAreaLightHit(params.scene.lights, params.scene.numLights, ray_origin, ray_dir,
-                                 params.materialRayTmin, 1e16f, prd->depth != 0u);
-    const float segmentMax = analyticHit.hit ? analyticHit.distance : 1e16f;
 
     // Before everything else, including the counters and the guide: if the haze
     // scatters, this path did not reach the environment and nothing below is
     // true of it.
     float fogT = 0.0f;
-    if (fogScatters(prd, ray_origin, ray_dir, segmentMax, fogT))
+    if (fogScatters(prd, ray_origin, ray_dir, 1e16f, fogT))
     {
         scatterInFog(prd, optixGetWorldRayOrigin(), ray_dir, fogT);
-        return;
-    }
-
-    if (analyticHit.hit)
-    {
-        shadeAnalyticAreaLightHit(prd, analyticHit, ray_origin, ray_dir);
         return;
     }
 

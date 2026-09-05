@@ -18,15 +18,16 @@ this file targets:
 |---|---|---|---|---|
 | recorded here (2026-08-21) | 8.10 | 8.60 | 18.30 | -- |
 | after the light-correctness batch | 39.3 | 216.6 | 40.5 | 12.1 |
-| after the four fixes below | **31.3** | **47.4** | **30.7** | **11.6** |
+| after the four fixes below | 31.3 | 47.4 | 30.7 | 11.6 |
+| with the lights in the BVH (5) | **19.5** | **30.0** | **30.8** | **11.7** |
 
-kids_room was 24x its recorded number and is now 5.5x; the residue is real work
+kids_room was 24x its recorded number and is now 3.5x; the residue is real work
 (exact intersection, exact densities) and the shadow rays that carry it. At
 1280x720 `max_depth` 4, where the entries below were found: kids_room 86.7 ->
-19.0, iso_bathroom 15.0 -> 12.1, pine_scene 17.8 -> 13.9, chess_set 5.7 -> 5.25.
-The ladder is unchanged to the digit across all four, all 33 rows.
+12.1, iso_bathroom 15.0 -> 6.8, pine_scene 17.8 -> 13.1, chess_set 5.7 -> 5.5.
+The ladder is unchanged across all four, all 33 rows.
 
-What the four were, in the order they were found:
+What the five were, in the order they were found:
 
 1. **The representability check ran per ray, per light.**
    `analyticEllipsoidIsRepresentable()` builds a scaled affine basis and probes
@@ -37,10 +38,14 @@ What the four were, in the order they were found:
    it: kids_room 86.7 -> 40.0. A single sphere light cost 24.6 ms of that.
 2. **Both scans over the light table were exact.** `findAnalyticAreaLightHit`
    per ray segment, `analyticLightsOccludeSegment` before traversal on every
-   next-event connection. A bounding ball in front of them: 40.0 -> 22.4. The
-   radius bounds the surface from above, so the test can only remove work, and
-   `tests/render/test_procedural_analytic_lights.cpp` pins that over twenty
-   thousand rays.
+   next-event connection. A bounding ball in front of them: 40.0 -> 22.4.
+   Superseded by (5), which deleted both scans and the ball with them -- and
+   that was the right end for it: the ball had a test of the usual shape over
+   twenty thousand random rays, it passed, and the ball still disagreed with the
+   exact intersector on 333 of kids_room's 921 600 pixels. Removing it restored
+   them. Nothing has explained which rays it dropped; what is known is that a
+   pre-test that is one epsilon wrong loses light silently, which is the reason
+   (5)'s AABB is graded against the exact intersector's own hits.
 3. **The Sobol' sampler read its direction numbers the wrong way round, and
    read too many of them.** Found by PC sampling, which is the first thing in
    this file located by asking the hardware *where* rather than *what*: one
@@ -51,6 +56,20 @@ What the four were, in the order they were found:
    `tests/render/test_sobol_matrix.cpp` now pins; the table had no test before.
 4. **A rect or disc light rebuilt its own area density per draw.** Packed into
    `pad0`, which those types write and never read.
+5. **The lights were not in the acceleration structure at all.** Every analytic
+   emitter was found by walking the light table: once in the raygen program to
+   bound the traversal, once in the miss program to shade what the bound let
+   through, and once per shadow ray before traversal. Three O(lights) walks per
+   segment, in the two places a path spends its whole life. They are now custom
+   primitives in the same structure as the geometry -- one AABB per light, split
+   into a camera-visible GAS and a camera-hidden one so that an instance mask
+   makes the visibility decision the walks used to make per ray, and
+   `__intersection__light` runs the same exact intersector on the one light the
+   box selected. kids_room 19.0 -> 12.1 and iso_bathroom 12.1 -> 6.8 at
+   1280x720 depth 4; pine_scene and chess_set are unmoved, which is the control
+   -- neither has an analytic emitter with a surface. Verified bit-exact against
+   the walks in three steps (structure, then the radiance path, then the shadow
+   path), which is also how the ball in (2) was caught.
 
 ### The stall is not what this file used to say, and not what it looks like
 

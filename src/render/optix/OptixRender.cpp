@@ -33,6 +33,7 @@
 
 #include "texture_support_cuda.h"
 #include "accel_build_policy.h"
+#include <host/analytic_light_bounds.h>
 #include <host/emissive_mesh_distribution.h>
 #include <host/ies_pack.h>
 #include <host/projector_transfer.h>
@@ -1825,6 +1826,31 @@ void OptiXRender::createTopLevelAccelerationStructure()
         optixInstances.push_back(oi);
     }
 
+    // The analytic lights, after the scene's own instances so their SBT records
+    // land in the slots createSbt() reserves past the end; see
+    // createAnalyticLightAccel() for why there are two of them.
+    mAnalyticLightInstanceBase = optixInstances.size();
+    for (const AnalyticLightAccel* accel : { &mVisibleLightAccel, &mHiddenLightAccel })
+    {
+        if (accel->handle == 0)
+        {
+            continue;
+        }
+        OptixInstance oi = {};
+        oi.traversableHandle = accel->handle;
+        oi.instanceId = static_cast<unsigned int>(optixInstances.size());
+        // The camera-visible set is what a primary ray may hit; the other one is
+        // reached by bounce rays only, so a light authored out of frame still
+        // balances the MIS estimate it is deducted for. That is the same split
+        // the light-table walk used to make per ray, made once at build time.
+        oi.visibilityMask = accel == &mVisibleLightAccel ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;
+        oi.sbtOffset = static_cast<unsigned int>(optixInstances.size() * RAY_TYPE_COUNT);
+        oi.flags = OPTIX_INSTANCE_FLAG_NONE;
+        const float identity[12] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+        memcpy(oi.transform, identity, sizeof(float) * 12);
+        optixInstances.push_back(oi);
+    }
+
     uploadInstancesToDevice(optixInstances);
     createEmissiveMeshLights();
     mTlasInstanceCount = optixInstances.size();
@@ -2041,7 +2067,10 @@ void OptiXRender::createModule()
     pipelineOptions.pipelineLaunchParamsVariableName = "params";
     pipelineOptions.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE |
                                              OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE |
-                                             OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR;
+                                             OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR |
+                                             // The analytic lights, as custom primitives whose intersection
+                                             // program is the same exact test the light table walk used to run.
+                                             OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;
     pipelineOptions.pipelineLaunchParamsSizeInBytes = sizeof(Params);
 
     // Load and create main module (raygen, miss, occlusion, light hit).
@@ -2167,14 +2196,31 @@ void OptiXRender::createProgramGroups()
 
     OptixProgramGroupDesc light_hit_prog_group_desc = {};
     light_hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    light_hit_prog_group_desc.hitgroup.moduleCH = mState.ptx_module;
-    light_hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__light";
+    // Beside shadeAnalyticAreaLightHit(), which is what it calls: OptiX modules
+    // do not share device functions.
+    light_hit_prog_group_desc.hitgroup.moduleCH = mState.closest_hit_module;
+    light_hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__analytic_light";
+    // The lights are custom primitives now: without an intersection program
+    // traversal has nothing to ask about the AABBs it just culled against.
+    light_hit_prog_group_desc.hitgroup.moduleIS = mState.closest_hit_module;
+    light_hit_prog_group_desc.hitgroup.entryFunctionNameIS = "__intersection__light";
     sizeof_log = sizeof(log);
     OptixProgramGroup light_hit_group = nullptr;
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &light_hit_prog_group_desc,
                                             1, // num program groups
                                             &program_group_options, log, &sizeof_log, &light_hit_group));
     mState.light_hit_group = light_hit_group;
+
+    // Shadow rays meet the same primitives and want only "blocked".
+    OptixProgramGroupDesc light_occlusion_desc = {};
+    light_occlusion_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    light_occlusion_desc.hitgroup.moduleCH = mState.ptx_module; // __closesthit__occlusion lives beside the raygen
+    light_occlusion_desc.hitgroup.entryFunctionNameCH = "__closesthit__occlusion";
+    light_occlusion_desc.hitgroup.moduleIS = mState.closest_hit_module;
+    light_occlusion_desc.hitgroup.entryFunctionNameIS = "__intersection__light";
+    sizeof_log = sizeof(log);
+    OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &light_occlusion_desc, 1, &program_group_options, log,
+                                            &sizeof_log, &mState.light_occlusion_group));
 
     memset(&hit_prog_group_desc, 0, sizeof(OptixProgramGroupDesc));
     hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
@@ -2219,6 +2265,7 @@ void OptiXRender::createPipeline()
     program_groups.push_back(mState.occlusion_hit_group);
     program_groups.push_back(mState.occlusion_linear_curve_hit_group);
     program_groups.push_back(mState.light_hit_group);
+    program_groups.push_back(mState.light_occlusion_group);
 
     OptixPipelineLinkOptions pipeline_link_options = {};
     pipeline_link_options.maxTraceDepth = max_trace_depth;
@@ -2291,7 +2338,8 @@ void OptiXRender::destroyPipeline()
     for (OptixProgramGroup* group : { &mState.raygen_prog_group, &mState.radiance_miss_group,
                                       &mState.radiance_default_hit_group, &mState.radiance_linear_curve_hit_group,
                                       &mState.occlusion_miss_group, &mState.occlusion_hit_group,
-                                      &mState.occlusion_linear_curve_hit_group, &mState.light_hit_group })
+                                      &mState.occlusion_linear_curve_hit_group, &mState.light_hit_group,
+                                      &mState.light_occlusion_group })
     {
         if (*group)
         {
@@ -2473,7 +2521,14 @@ void OptiXRender::createSbt()
 
     // Create hit group records
     const std::vector<oka::Instance>& instances = mScene->getInstances();
-    const uint32_t hit_group_count = std::max(1u, static_cast<uint32_t>(instances.size())) * RAY_TYPE_COUNT;
+    // The scene's instances, plus one appended pair per analytic-light structure.
+    uint32_t analyticLightStructures = 0;
+    for (const AnalyticLightAccel* accel : { &mVisibleLightAccel, &mHiddenLightAccel })
+    {
+        analyticLightStructures += accel->handle != 0 ? 1u : 0u;
+    }
+    const uint32_t hit_group_count = (std::max(1u, static_cast<uint32_t>(instances.size())) + analyticLightStructures) *
+                                     RAY_TYPE_COUNT;
     const size_t hit_group_size = sizeof(HitGroupSbtRecord) * hit_group_count;
 
     std::vector<HitGroupSbtRecord> hit_groups(hit_group_count);
@@ -2556,6 +2611,30 @@ void OptiXRender::createSbt()
             occlusion_hit.data = radiance_hit.data;
             occlusion_hit.data.lightId = -1;
         }
+    }
+
+    // The analytic lights' own records, in the order their instances were
+    // appended. Each carries the map from primitive index to light index; that
+    // is the whole of what the intersection program needs.
+    size_t cursor = mAnalyticLightInstanceBase;
+    for (const AnalyticLightAccel* accel : { &mVisibleLightAccel, &mHiddenLightAccel })
+    {
+        if (accel->handle == 0)
+        {
+            continue;
+        }
+        // Into the slots the count above reserved, not appended: the vector is
+        // already the size the device buffer was allocated for.
+        HitGroupSbtRecord& radiance = hit_groups[cursor * RAY_TYPE_COUNT + RAY_TYPE_RADIANCE];
+        OPTIX_CHECK(optixSbtRecordPackHeader(mState.light_hit_group, &radiance));
+        radiance.data = {};
+        radiance.data.lightId = -1;
+        radiance.data.lightIndices = optix::devicePtr<const uint32_t>(accel->indices->getPtr());
+
+        HitGroupSbtRecord& occlusion = hit_groups[cursor * RAY_TYPE_COUNT + RAY_TYPE_OCCLUSION];
+        OPTIX_CHECK(optixSbtRecordPackHeader(mState.light_occlusion_group, &occlusion));
+        occlusion.data = radiance.data;
+        ++cursor;
     }
 
     CUDA_CHECK(cudaMemcpy(
@@ -3323,6 +3402,11 @@ void OptiXRender::render(Buffer* output)
         if (!structuresChanged)
         {
             createTopLevelAccelerationStructure();
+            // The lights are instances now, and their hit records carry the
+            // pointer to the index buffer createLightBuffer() just rewrote.
+            // Rebuilding one level without the other leaves the intersection
+            // program reading whichever table was there last.
+            createSbt();
         }
     }
     if (!structuresChanged && any(changes & ChangeBits::Transforms))
@@ -4884,6 +4968,94 @@ void OptiXRender::createIndexBuffer()
     createOrUpdateBuffer(mIndexBuffer, mScene->getIndices());
 }
 
+/// One AABB per analytic light, in two structures: what a camera ray may hit and
+/// what only a bounce ray may. An instance mask can say exactly that much, which
+/// is why the split is here rather than inside the intersection program.
+///
+/// The boxes themselves are analyticLightAabb()'s, which is where the note on
+/// why they are loose lives.
+void OptiXRender::createAnalyticLightAccel()
+{
+    const std::vector<Scene::Light>& lights = mScene->getLights();
+
+    struct Group
+    {
+        AnalyticLightAccel* accel;
+        std::vector<OptixAabb> aabbs;
+        std::vector<uint32_t> indices;
+    };
+    Group visible{ &mVisibleLightAccel, {}, {} };
+    Group hidden{ &mHiddenLightAccel, {}, {} };
+
+    for (size_t i = 0; i < lights.size(); ++i)
+    {
+        const Scene::Light& light = lights[i];
+        const float radius = light.points[0].x;
+        if (!lightUsesAnalyticSurfaceIntersection(light.type, radius))
+        {
+            continue;
+        }
+        // normal.w is the visibility mask the scene packed: zero for a light it
+        // refused to enable, so this drops those with it.
+        if (!analyticLightVisibilityAllowsRay(light.normal.w, true))
+        {
+            continue;
+        }
+
+        const oka::optix_lights::Aabb box = oka::optix_lights::analyticLightAabb(light.type, light.points);
+        OptixAabb aabb{};
+        aabb.minX = box.lo.x;
+        aabb.minY = box.lo.y;
+        aabb.minZ = box.lo.z;
+        aabb.maxX = box.hi.x;
+        aabb.maxY = box.hi.y;
+        aabb.maxZ = box.hi.z;
+
+        const unsigned int visibility = (unsigned int)light.normal.w;
+        Group& group = (visibility & STRELKA_ANALYTIC_LIGHT_CAMERA_BIT) != 0u ? visible : hidden;
+        group.aabbs.push_back(aabb);
+        group.indices.push_back(static_cast<uint32_t>(i));
+    }
+
+    for (Group* group : { &visible, &hidden })
+    {
+        AnalyticLightAccel& accel = *group->accel;
+        accel.count = static_cast<uint32_t>(group->aabbs.size());
+        if (accel.count == 0u)
+        {
+            accel.handle = 0;
+            continue;
+        }
+        createOrUpdateBuffer(accel.aabbs, group->aabbs);
+        createOrUpdateBuffer(accel.indices, group->indices);
+
+        OptixBuildInput input = {};
+        input.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
+        CUdeviceptr aabbPtr = accel.aabbs->getPtr();
+        input.customPrimitiveArray.aabbBuffers = &aabbPtr;
+        input.customPrimitiveArray.numPrimitives = accel.count;
+        const uint32_t flags = OPTIX_GEOMETRY_FLAG_NONE;
+        input.customPrimitiveArray.flags = &flags;
+        input.customPrimitiveArray.numSbtRecords = 1;
+
+        OptixAccelBuildOptions options = {};
+        options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+        options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+        OptixAccelBufferSizes sizes = {};
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(mState.context, &options, &input, 1, &sizes));
+        CUdeviceptr temp = 0;
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(temp), sizes.tempSizeInBytes));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(accel.output)));
+        CUDA_CHECK(cudaMalloc(optix::deviceAllocTarget(accel.output), sizes.outputSizeInBytes));
+        OPTIX_CHECK(optixAccelBuild(mState.context, mState.stream, &options, &input, 1, temp,
+                                    sizes.tempSizeInBytes, accel.output, sizes.outputSizeInBytes, &accel.handle,
+                                    nullptr, 0));
+        CUDA_CHECK(cudaStreamSynchronize(mState.stream));
+        CUDA_CHECK(cudaFree(optix::devicePtr<void>(temp)));
+    }
+}
+
 double OptiXRender::sceneExtent() const
 {
     glm::float3 boundsMin(0.0f);
@@ -4918,6 +5090,7 @@ void OptiXRender::createLightBuffer()
     createOrUpdateBuffer(mLightBuffer, gpuLights);
     mState.params.scene.lights = optix::devicePtr<UniformLight>(mLightBuffer->getPtr());
     mState.params.scene.numLights = static_cast<uint32_t>(gpuLights.size());
+    createAnalyticLightAccel();
     updateEmitterSelectionProbabilities();
     createIesBuffer();
     createProjectorTextures();

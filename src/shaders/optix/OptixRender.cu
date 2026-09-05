@@ -379,13 +379,9 @@ extern "C" __global__ void __raygen__rg()
             // replaces -- same payloads, same programs, same results. The payload
             // pair is a packed pointer to PerRayData in local memory, so nothing
             // rides in the registers that the split could drop.
-            const AnalyticAreaLightHit analyticHit = findAnalyticAreaLightHit(
-                params.scene.lights, params.scene.numLights, ray_origin, ray_direction, params.materialRayTmin, 1e16f,
-                prd.depth != 0u);
-            const float traversalMax = analyticHit.hit ? analyticHit.distance : 1e16f;
             optixTraverse(params.handle, ray_origin, ray_direction,
                           params.materialRayTmin, // Min intersection distance
-                          traversalMax, // Stop before geometry behind an analytic emitter.
+                          1e16f, // Max intersection distance
                           time, // rayTime -- used for motion blur
                           // Camera rays see what the camera should see; every
                           // bounce after also sees the emitters marked hidden, so
@@ -650,97 +646,4 @@ extern "C" __global__ void __raygen__rg()
 extern "C" __global__ void __closesthit__occlusion()
 {
     optixSetPayload_0(__float_as_uint(0.0f));
-}
-
-extern "C" __global__ void __closesthit__light()
-{
-    PerRayData* prd = getPRD();
-    HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
-    const int32_t lightId = hit_data->lightId;
-    const UniformLight& currLight = params.scene.lights[lightId];
-    const float3 rayDir = optixGetWorldRayDirection();
-    const float3 hitPoint = optixGetWorldRayOrigin() + optixGetRayTmax() * rayDir;
-    const float3 lightNormal = calcLightNormal(currLight, hitPoint);
-
-    // An emitter the camera can see is a surface like any other as far as the
-    // guides are concerned; leaving it out puts a hole in the albedo and normal
-    // buffers exactly where the brightest thing in the frame is.
-    if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
-    {
-        AovSample a;
-        // An albedo guide is a reflectance, so an emitter's radiance cannot go
-        // in it directly -- a 20 W/sr light would hand the network an albedo of
-        // 20. Normalised by its own largest channel, which keeps the light's
-        // hue and lands in the [0, 1] an albedo lives in.
-        const float3 lightColor = make_float3(currLight.color);
-        const float peak = fmaxf(fmaxf(lightColor.x, lightColor.y), fmaxf(lightColor.z, 1e-6f));
-        a.diffuseAlbedo = lightColor / peak;
-        a.specularAlbedo = make_float3(0.0f);
-        a.normal = lightNormal;
-        a.roughness = 1.0f;
-        a.depth = prd->depth == 0 ? guideViewDepth(params, hitPoint) : params.aov[launchPixelIndex(params)].depth;
-        if (prd->depth == 0)
-        {
-            const float2 motion = guideScreenMotion(params, make_float4(hitPoint, 1.0f), prd->pixelSample);
-            a.motionX = motion.x;
-            a.motionY = motion.y;
-        }
-        else
-        {
-            a.motionX = params.aov[launchPixelIndex(params)].motionX;
-            a.motionY = params.aov[launchPixelIndex(params)].motionY;
-        }
-        a.specularHitDistance = 0.0f;
-        a.reactive = oka::guides::reactiveFor(prd->depth);
-        a.pad2 = 0.0f;
-        params.aov[launchPixelIndex(params)] = a;
-        prd->aovDone = true;
-    }
-
-    // The same predicate connectLight() offers directions by, so the two halves
-    // of the estimate agree on the set they are splitting.
-    if (lightSampleFacesVertex(-dot(rayDir, lightNormal)))
-    {
-        // `color` is radiance, and radiance along a ray does not fall off with the
-        // angle it leaves the emitter at: the cosine at the light belongs in the
-        // area-to-solid-angle Jacobian that next-event estimation already applies,
-        // not here. Multiplying by it a second time made the BSDF strategy darken
-        // every emitter it hit off-axis while the next-event strategy did not, so
-        // the two disagreed by exactly cos at every vertex. Metal's light hit has
-        // never had the factor.
-        // Same distance the shadow ray uses in connectLight() -- from the
-        // scattering vertex, not the offset origin -- so both halves of the MIS
-        // estimate scale the emission by the same controlled falloff.
-        const float3 falloffOrigin = optixGetWorldRayOrigin() - rayDir * prd->misDistance;
-        const float3 Le = make_float3(currLight.color) * areaFalloff(currLight, length(hitPoint - falloffOrigin));
-        float3 radiance;
-        if (prd->depth == 0 || prd->specularBounce || !prd->neeDone)
-        {
-            radiance = prd->throughput * Le;
-        }
-        else
-        {
-            // The hit competes with the same local class and analytic identity
-            // draw that NEE used. Mesh emitters are a separate local class.
-            const float localSelectionPdf = params.hasEnvMap ? 1.0f - params.envSelectionPdf : 1.0f;
-            const float analyticClassPdf =
-                params.scene.numEmissiveMeshes > 0u ? 1.0f - params.scene.meshLightSelectionPdf : 1.0f;
-            // From the vertex that scattered, which is not the ray's origin once
-            // it has passed through a cutout or crossed a medium's boundary on
-            // the way here. Using the origin makes the light look nearer than the
-            // scattering vertex saw it, which shrinks its solid-angle density,
-            // which inflates this weight -- and the next-event estimate at that
-            // vertex has already claimed the rest, so the two sum to more than
-            // one.
-            const float3 misOrigin = optixGetWorldRayOrigin() - rayDir * prd->misDistance;
-            const float lightPdf = getLightPdf(currLight, hitPoint, misOrigin, params.rectLightSamplingMethod,
-                                               localSelectionPdf, analyticClassPdf, currLight.color.w);
-            const float misWeight = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
-            radiance = prd->throughput * Le * misWeight;
-        }
-        prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
-    }
-    prd->throughput = make_float3(0.0f);
-    // stop tracing
-    return;
 }
