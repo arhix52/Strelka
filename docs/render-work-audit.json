@@ -1,6 +1,6 @@
 {
-  "schema": 2,
-  "date": "2026-09-04",
+  "schema": 3,
+  "date": "2026-09-06",
   "device": "Apple M4 Pro",
   "builds": { "counters": "Debug", "timing": "Release, validation off" },
   "expected_model": "O(activePixels*spp*pathDepth)+O(eligibleHits*candidates)+O(eligibleHits*spatialNeighbors)",
@@ -105,9 +105,10 @@
     { "debug_id": null, "label": "managedOutputSync", "creation_per_frame": 0, "encoder_creation": 0, "dispatch": 0, "end_encoding": 0, "commit": 0, "wait": 0, "readback": 0, "reason": "output is Shared on Apple silicon" }
   ],
   "validation": {
-    "focused_render_work": { "cases": 10, "assertions": 21, "pass": true },
+    "focused_render_work": { "cases": 11, "assertions": 28, "pass": true },
     "buffer_layout": { "cases": 1, "assertions": 33, "pass": true },
     "ctest_debug": { "tests": 3, "failed": 0, "pass": true },
+    "ctest_release": { "tests": 3, "failed": 0, "pass": true },
     "active_guide_output_sha256_before_after": ["7dc05148bef9e67ac2818c0c4b7b6c32934358969f019298bf7e9215585917a0", "7dc05148bef9e67ac2818c0c4b7b6c32934358969f019298bf7e9215585917a0"]
   },
   "static_audit": {
@@ -116,6 +117,59 @@
     "cpu_gpu_sync": ["HeadlessApp::run -> renderSync -> render -> Metal4 queue commit -> waitForFrame -> spatial readback blit", "no CPU readback/wait between wavefront stages", "renderSync waits once at frame boundary", "spatial readback creates one separate Metal3 blit command buffer and commits it once", "synchronizeResource creates a different command buffer only for Managed output"],
     "copies_clears": ["ReSTIR clears current parity records once in wavefrontGenerate", "no previous-to-current reservoir copy", "skinning/pose copies gated by animation", "static light upload gated by ChangeBits::Lights"],
     "acceleration_structures": ["initial BLAS/TLAS during scene load", "skeletal BLAS and TLAS update only on deformation/transform flags", "procedural-light BLAS built with scene structures, not per static frame"]
+  },
+  "nee_production_audit": {
+    "status": "PASS",
+    "baseline_commit": "3ebd547",
+    "instrumentation_commit": "8359298",
+    "baseline_command": "build/Release/StrelkaCLI scenes/validation/cornell_box/cornell_box.glb -o /tmp/nee.exr -w 1920 --height 1080 --spp 64 --depth 4 --tonemap none --clamp 0 --audit-moving-lights <lights-1> --audit-motion-sequence 6 --audit-frames 32 --audit-freeze=false",
+    "configuration": "Metal 4, ReSTIR/guides/denoiser/debug visualization off, one NEE sample, Apple M4 Pro",
+    "timing_protocol": "Release, validation and work instrumentation off; 8 warm-up + 32 measured frames; per-run median; median of 5 independent runs",
+    "work_graph": [
+      { "stage": "generate", "condition": "one per spp", "dispatch": "direct width*height", "input": "pixel grid", "queries": 0, "writes": "path/ray queue and counter" },
+      { "stage": "prepare", "condition": "each bounce", "dispatch": "direct 1", "input": "active path counter", "queries": 0, "writes": "extend indirect args" },
+      { "stage": "extend", "condition": "active paths", "dispatch": "indirect active count", "input": "path/ray queue", "queries": "one AS query per path segment; measured alpha/medium exceptions", "writes": "hit/miss compact queues and hit record" },
+      { "stage": "prepare-hit-miss", "condition": "each bounce", "dispatch": "direct 1", "input": "hit/miss counters", "queries": 0, "writes": "hit/miss indirect args" },
+      { "stage": "miss", "condition": "nonempty miss queue", "dispatch": "indirect miss count", "input": "miss queue", "queries": 0, "writes": "radiance; compact infinite-light evaluations only" },
+      { "stage": "shade+NEE", "condition": "nonempty hit queue", "dispatch": "indirect hit count", "input": "hit queue/record, materials, O(1) alias tables", "queries": 0, "writes": "next-path and at most one shadow item per eligible hit" },
+      { "stage": "prepare-shadow", "condition": "each bounce", "dispatch": "direct 1", "input": "shadow counter", "queries": 0, "writes": "shadow indirect args" },
+      { "stage": "shadow", "condition": "nonempty shadow queue", "dispatch": "indirect shadow count", "input": "shadow queue", "queries": "one AS query; bounded restart only for real alpha geometry", "writes": "visible direct radiance" },
+      { "stage": "resolve", "condition": "one per spp", "dispatch": "direct width*height", "input": "radiance", "queries": 0, "writes": "accumulated output" }
+    ],
+    "light_loop_classification": {
+      "finite_analytic_sample": "Walker alias: bounded two logical records; no light-count loop",
+      "emissive_mesh_sample": "mesh and triangle alias draws: bounded four logical records; no triangle-count loop",
+      "emissive_hit_pdf": "binary search by sorted instance ID, O(log emissive meshes), no triangle scan",
+      "miss": "only numInfiniteLights compact list; finite analytic lights are absent",
+      "shadow": "hardware AS traversal; no separate analytic-light loop",
+      "common_lights_h": "two linear CUDA/common helpers exist but are unreachable from the Metal pipeline"
+    },
+    "counters_320x240": {
+      "lights": [1, 32, 512, 2048],
+      "depth1": { "primary": [76800, 76800, 76800, 76800], "extension": [76800, 76800, 76800, 76800], "sampler": [53248, 53260, 53260, 53260], "finite_inspections": [64560, 63874, 56832, 57428], "valid_candidates": [32280, 31937, 28414, 25885], "shadow_queries": [32280, 31937, 28414, 25885], "dispatches": [9, 9, 9, 9] },
+      "depth4": { "primary": [76800, 76800, 76800, 76800], "extension": [192513, 191452, 188937, 186534], "sampler": [142331, 140669, 137104, 133713], "finite_inspections": [163942, 160346, 135050, 131748], "valid_candidates": [81971, 80173, 67521, 58745], "shadow_queries": [81971, 80173, 67521, 58745], "dispatches": [30, 30, 30, 30] },
+      "depth8": { "primary": [76800, 76800, 76800, 76800], "extension": [220081, 218133, 214573, 211124], "sampler": [165856, 163458, 158959, 154620], "finite_inspections": [191788, 186734, 156450, 151382], "valid_candidates": [95894, 93367, 78221, 67613], "shadow_queries": [95894, 93367, 78221, 67613], "dispatches": [58, 58, 58, 58] },
+      "queue_overflows_all": 0,
+      "restir_guide_dispatches_and_allocations": 0
+    },
+    "focused_scenes_320x240_depth4": {
+      "zero_finite_constant_environment": { "finite_reads": 0, "shadow_queries": 0 },
+      "mixed_environment_rect": { "sampler": 123434, "environment_samples": 39110, "finite_inspections": 124076, "shadow_queries": 101146 },
+      "emissive_mesh": { "sampler": 26129, "finite_inspections": 0, "emissive_inspections": 97700, "shadow_queries": 24115 },
+      "mirror_floor": { "delta_hits": 44508, "sampler": 59287, "shadow_queries": 47781 },
+      "alpha_clip": { "sampler": 117034, "shadow_queries": 110926, "alpha_restarts": 3636 },
+      "bounded_volume": { "sampler": 89720, "valid_candidates": 86675, "shadow_queries": 86675 }
+    },
+    "moving_512_8_frames": { "primary": 614400, "extension": 1510993, "sampler": 1097048, "finite_inspections": 1080100, "valid_candidates": 540020, "shadow_queries": 540020, "queue_overflows": 0, "blas_builds": 0, "tlas_builds": 0, "tlas_refits": 8, "max_refits_per_frame": 1, "light_uploads": 8, "max_uploads_per_frame": 1 },
+    "static_post_warmup": { "blas_builds": 0, "tlas_builds": 0, "tlas_refits": 0, "light_uploads": 0, "mapping_updates": 0, "full_buffer_clears": 0, "full_buffer_copies": 0, "queue_overflows": 0 },
+    "gpu_ms_median5": {
+      "lights": [1, 32, 512, 2048],
+      "320x240": { "depth1": [0.706, 0.801, 0.960, 1.036], "depth4": [2.144, 2.603, 3.345, 3.469], "depth8": [2.910, 3.557, 4.486, 4.672] },
+      "1920x1080": { "depth1": [17.920, 20.211, 24.540, 25.182], "depth4": [48.996, 60.277, 78.107, 80.569], "depth8": [58.551, 71.523, 92.215, 95.003] }
+    },
+    "result": "No new production defect proven. Light-count timing growth remains compatible with hardware traversal cost: shader record inspections are bounded and active work decreases at high counts. No speculative optimization committed.",
+    "output_sha256_before_after": ["52ad7b5ebf85c86ebd30a7d979db154cc228765dccc2b62e294fb3cd8d375beb", "52ad7b5ebf85c86ebd30a7d979db154cc228765dccc2b62e294fb3cd8d375beb"],
+    "validation": { "metal_debug_build": true, "metal_release_build": true, "focused_assertions": 7, "ctest_debug": "3/3", "ctest_release": "3/3", "iso_bathroom_linear_hdr_finite": true, "kids_room_linear_hdr_finite": true }
   },
   "closed_open": [
     { "id": "O1", "status": "FIXED", "result": "empty guide queue has no encoder/grid dispatch", "commit": "02ac340" },

@@ -24,5 +24,5 @@ Commits:
 - `afb4f9c` — allocate ReSTIR history only when enabled.
 - `16adca0` — add moving-light and command-buffer audit probes.
 
-Validation: 10 focused render-work cases / 21 assertions and 33 buffer-layout assertions pass;
+Validation: 11 focused render-work cases / 28 assertions and 33 buffer-layout assertions pass;
 full Debug `ctest` result is recorded in the JSON ledger.
