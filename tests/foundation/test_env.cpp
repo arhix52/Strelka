@@ -104,3 +104,10 @@ TEST_CASE("animation setting keys have one spelling")
     CHECK(settings.contains(oka::animationStateKey(3)) == false);
     CHECK(settings.contains(oka::animationTimeKey(3)) == false);
 }
+
+TEST_CASE("common render settings keep audit work disabled")
+{
+    oka::SettingsManager settings;
+    oka::seedCommonRenderSettings(settings);
+    CHECK(settings.getAs<uint32_t>("render/pt/auditRenderWork") == 0u);
+}

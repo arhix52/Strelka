@@ -143,6 +143,7 @@ inline void seedCommonRenderSettings(SettingsManager& settings)
     settings.setAs<uint32_t>("render/pt/restirInitialVisibility", 0);
     settings.setAs<uint32_t>("render/pt/restirFinalVisibilityReuse", 0);
     settings.setAs<uint32_t>("render/pt/restirFinalVisibilityMaxAge", 4);
+    settings.setAs<uint32_t>("render/pt/auditRenderWork", 0);
     settings.setAs<float>("render/pt/dev/shadowRayTmin", 0.0f);
     settings.setAs<float>("render/pt/dev/materialRayTmin", 0.0f);
     settings.setAs<bool>("render/enableValidation", false);
