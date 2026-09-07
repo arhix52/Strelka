@@ -2217,6 +2217,21 @@ static bool restirDiagnosticVisible(constant Uniforms& uniforms,
                                     device const uint32_t* indexBuffer,
                                     thread float& transmittance);
 
+// Reserve adjacent shadow-queue entries with one global atomic per active
+// SIMD-group instead of one per ray.
+static inline uint32_t allocateShadowSlot(device atomic_uint* shadowCounter)
+{
+    const uint32_t rank = simd_prefix_exclusive_sum(1u);
+    const uint32_t count = simd_sum(1u);
+    uint32_t base = 0u;
+    if (simd_is_first())
+    {
+        base = atomic_fetch_add_explicit(shadowCounter, count, memory_order_relaxed);
+    }
+    base = simd_broadcast_first(base);
+    return base + rank;
+}
+
 kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            constant Uniforms& uniforms [[buffer(0)]],
                            constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
@@ -2382,8 +2397,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 if (any(weight > 1e-6f) && visibility.valid)
                 {
                     auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
-                    const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
-                    auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                     ShadowRay sr;
                     sr.origin = packed_float3(scatterPoint);
                     sr.direction = packed_float3(visibility.direction);
@@ -2396,6 +2409,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.sharcPathIndex = tid;
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                    const uint32_t slot = allocateShadowSlot(shadowCounter);
+                    auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                     shadowRays[slot] = sr;
                 }
             }
@@ -2546,7 +2561,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.sharcPathIndex = tid;
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
-                        const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         shadowRays[slot] = sr;
                     }
@@ -2964,7 +2979,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                         sr.sharcPathIndex = tid;
                         sr.rrCutoff =
                             random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
-                        const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                        const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         shadowRays[slot] = sr;
                     }
@@ -3494,6 +3509,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         LightConnection bestConn = makeEmptyConnection();
         float3 bestF = float3(0.0f);
         RestirReservoir reservoir = {};
+        const bool singleCandidateNee = !restirInitial && candidates == 1u;
+        float singleCandidateW = 0.0f;
 
         for (uint32_t i = 0; i < candidates; ++i)
         {
@@ -3527,6 +3544,17 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
             auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
             const float w = candidate.target / conn.pdf;
+            if (singleCandidateNee)
+            {
+                // With one proposal reservoir selection is deterministic and
+                // normalization reduces to (target / pdf) / target. Keep that
+                // operation order for bit-identical output, but skip the extra
+                // RNG, reservoir update, and reservoir state traffic.
+                bestConn = conn;
+                bestF = candidate.integrand;
+                singleCandidateW = w / candidate.target;
+                continue;
+            }
             // Reuse eLightId under a new scramble so adding RIS does not shift later Sobol dimensions.
             SamplerState arng = crng;
             arng.seed = restirRngStreamSeed(crng.seed, RESTIR_RNG_INITIAL_SALT);
@@ -3866,7 +3894,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
         if (!restirInitial)
         {
-            const float W = restirReservoirNormalization(reservoir.state);
+            const float W = singleCandidateNee ? singleCandidateW : restirReservoirNormalization(reservoir.state);
             if (W > 0.0f)
             {
                 const float3 weight = throughput * bestF * W;
@@ -3887,7 +3915,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     sr.sharcPathIndex = tid;
                     sr.rrCutoff =
                         random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
-                    const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
+                    const uint32_t slot = allocateShadowSlot(shadowCounter);
                     auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                     shadowRays[slot] = sr;
                 }
