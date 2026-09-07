@@ -176,8 +176,9 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
                            light.points[3].z - light.points[0].z);
         if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
             affineSamplePointRangeIsFinite(
-                make_float3(light.points[0].x, light.points[0].y, light.points[0].z), e1, e2, make_float3(0.0f)) &&
-            inverseFiniteCrossLength(e1, e2) > 0.0f)
+                make_float3(light.points[0].x, light.points[0].y, light.points[0].z),
+                make_float3(e1.x, e1.y, e1.z), make_float3(e2.x, e2.y, e2.z), make_float3(0.0f)) &&
+            inverseFiniteCrossLength(make_float3(e1.x, e1.y, e1.z), make_float3(e2.x, e2.y, e2.z)) > 0.0f)
         {
             measure = pi * glm::length(glm::cross(glm::dvec3(e1.x, e1.y, e1.z), glm::dvec3(e2.x, e2.y, e2.z)));
         }
@@ -204,7 +205,10 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
         const glm::vec3 deviceAxisY(light.points[2].x, light.points[2].y, light.points[2].z);
         const glm::vec3 deviceAxisZ(light.points[3].x, light.points[3].y, light.points[3].z);
         if (!analyticEllipsoidIsRepresentable(
-                make_float3(light.points[1].x, light.points[1].y, light.points[1].z), deviceAxisX, deviceAxisY, deviceAxisZ))
+                make_float3(light.points[1].x, light.points[1].y, light.points[1].z),
+                make_float3(deviceAxisX.x, deviceAxisX.y, deviceAxisX.z),
+                make_float3(deviceAxisY.x, deviceAxisY.y, deviceAxisY.z),
+                make_float3(deviceAxisZ.x, deviceAxisZ.y, deviceAxisZ.z)))
         {
             break;
         }

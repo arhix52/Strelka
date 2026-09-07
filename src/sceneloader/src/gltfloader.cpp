@@ -28,6 +28,10 @@
 
 #include <strelka/scene/transform.h>
 
+#include <cctype>
+#include <filesystem>
+#include <utility>
+#include <fstream>
 #include <limits>
 #include <env.h>
 #include <log.h>
@@ -738,12 +742,68 @@ void processNode(const tinygltf::Model& model,
     }
 }
 
-std::string getTextureUri(const tinygltf::Model& model, int texIndex)
+// A GLB keeps its images in buffer views, not as files, and the renderer only
+// ever opens a path. Rather than teach every backend to take pixels, the bytes
+// are written out once beside the scene and the rest of the pipeline sees an
+// ordinary texture file.
+//
+// This is what a DCC export of a large scene looks like -- one self-contained
+// GLB instead of a .gltf plus a folder of a hundred loose jpegs -- so treating
+// it as unsupported cost every embedded texture in the file.
+std::string extractEmbeddedImage(const tinygltf::Model& model, int imageId, const std::string& modelPath)
+{
+    const tinygltf::Image& image = model.images[imageId];
+    if (image.bufferView < 0 || std::cmp_greater_equal(image.bufferView, model.bufferViews.size()))
+        return {};
+    const tinygltf::BufferView& view = model.bufferViews[image.bufferView];
+    if (view.buffer < 0 || std::cmp_greater_equal(view.buffer, model.buffers.size()))
+        return {};
+    const std::vector<unsigned char>& data = model.buffers[view.buffer].data;
+    if (view.byteOffset + view.byteLength > data.size())
+        return {};
+
+    const char* extension = ".bin";
+    if (image.mimeType == "image/jpeg")
+        extension = ".jpg";
+    else if (image.mimeType == "image/png")
+        extension = ".png";
+
+    const fs::path source(modelPath);
+    const fs::path directory = source.parent_path() / (source.stem().string() + "_embedded");
+    // The image name is whatever the exporter felt like writing, so the index
+    // carries uniqueness and the name is only there to make the folder readable.
+    std::string safeName;
+    for (const char c : image.name)
+        safeName += (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') ? c : '_';
+    const fs::path target = directory / (std::to_string(imageId) + (safeName.empty() ? "" : "_" + safeName) + extension);
+
+    std::error_code ec;
+    // Re-extracting on every load would rewrite hundreds of megabytes for
+    // nothing; a matching size means this is the same image as last time.
+    if (fs::exists(target, ec) && fs::file_size(target, ec) == view.byteLength)
+        return target.string();
+
+    fs::create_directories(directory, ec);
+    std::ofstream out(target, std::ios::binary);
+    if (!out)
+    {
+        STRELKA_WARNING("glTF image {} is embedded but '{}' could not be written", imageId, target.string());
+        return {};
+    }
+    out.write(reinterpret_cast<const char*>(data.data() + view.byteOffset), static_cast<std::streamsize>(view.byteLength));
+    return target.string();
+}
+
+std::string getTextureUri(const tinygltf::Model& model, int texIndex, const std::string& modelPath)
 {
     if (texIndex < 0)
         return {};
     const auto imageId = model.textures[texIndex].source;
+    if (imageId < 0 || std::cmp_greater_equal(imageId, model.images.size()))
+        return {};
     const std::string& uri = model.images[imageId].uri;
+    if (uri.empty())
+        return extractEmbeddedImage(model, imageId, modelPath);
 
     // A glTF URI is percent-encoded, and a filename is not: an exporter that
     // writes "Material #449.png" stores "Material%20%23449.png", which opens
@@ -813,7 +873,9 @@ float khrFloat(const tinygltf::Material& material, const char* extension, const 
     return (float)it->second.Get(key).GetNumberAsDouble();
 }
 
-oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& model, const tinygltf::Material& material)
+oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& model,
+                                                    const tinygltf::Material& material,
+                                                    const std::string& modelPath)
 {
     oka::Scene::MaterialDescription desc{};
     desc.name = material.name.empty() ? "material" : material.name;
@@ -1120,11 +1182,11 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     readTextureTransform(material, p);
 
     // Store texture file paths for the renderer to load
-    desc.baseColorTexPath = getTextureUri(model, material.pbrMetallicRoughness.baseColorTexture.index);
-    desc.metallicRoughnessTexPath = getTextureUri(model, material.pbrMetallicRoughness.metallicRoughnessTexture.index);
-    desc.normalTexPath = getTextureUri(model, material.normalTexture.index);
-    desc.emissionTexPath = getTextureUri(model, material.emissiveTexture.index);
-    desc.occlusionTexPath = getTextureUri(model, material.occlusionTexture.index);
+    desc.baseColorTexPath = getTextureUri(model, material.pbrMetallicRoughness.baseColorTexture.index, modelPath);
+    desc.metallicRoughnessTexPath = getTextureUri(model, material.pbrMetallicRoughness.metallicRoughnessTexture.index, modelPath);
+    desc.normalTexPath = getTextureUri(model, material.normalTexture.index, modelPath);
+    desc.emissionTexPath = getTextureUri(model, material.emissiveTexture.index, modelPath);
+    desc.occlusionTexPath = getTextureUri(model, material.occlusionTexture.index, modelPath);
 
     return desc;
 }
@@ -1139,7 +1201,7 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
         // texture paths, because convertToDielectric never assigns them. Glass
         // arrives through KHR_materials_transmission instead, which
         // convertToStandardPBR now parses into a transmission lobe.
-        scene.addMaterial(convertToStandardPBR(model, material));
+        scene.addMaterial(convertToStandardPBR(model, material, scene.getSourcePath()));
     }
 }
 

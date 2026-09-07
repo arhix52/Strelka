@@ -75,7 +75,7 @@ inline Aabb analyticLightAabb(int lightType, const glm::vec4* points)
     // slip through edge-on. The epsilon is relative to where the light is, so
     // it survives a scene authored in kilometres.
     const float slack =
-        1e-4f * std::max(1.0f, std::max(std::fabs(center.x), std::max(std::fabs(center.y), std::fabs(center.z))));
+        1e-4f * std::max({1.0f, std::fabs(center.x), std::fabs(center.y), std::fabs(center.z)});
     extent += glm::vec3(slack);
 
     Aabb box;
