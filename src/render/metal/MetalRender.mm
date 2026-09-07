@@ -3247,7 +3247,7 @@ std::string MetalRender::renderWorkAuditJson() const
             for (uint32_t source = 0; source < std::min(record.sourceCount, RESTIR_DIAGNOSTIC_SOURCE_COUNT); ++source)
             {
                 sources +=
-                    fmt::format("{}{{\"id\":{},\"M\":{},\"target\":{:.9g}}}", source == 0u ? "" : ",",
+                    fmt::format(R"({}{{"id":{},"M":{},"target":{:.9g}}})", source == 0u ? "" : ",",
                                 record.sourceIndices[source], record.sourceM[source], record.sourceTargets[source]);
             }
             sources += ']';
@@ -3401,12 +3401,16 @@ Buffer* MetalRender::createBuffer(const BufferDesc& desc)
 
 void MetalRender::uploadLightBuffer()
 {
+    if (mScene == nullptr)
+    {
+        return;
+    }
     // Same bounds and same fallback the frame uniforms hand to
     // environmentLightPower(), so the two sides of the environment-versus-local
     // split are scaled by one scene, not by two.
     glm::float3 boundsMin(0.0f);
     glm::float3 boundsMax(0.0f);
-    const double sceneExtent = mScene != nullptr && mScene->worldBounds(boundsMin, boundsMax) ?
+    const double sceneExtent = mScene->worldBounds(boundsMin, boundsMax) ?
                                    std::max(static_cast<double>(glm::length(boundsMax - boundsMin)), 1e-4) :
                                    1e16;
     mLights.upload(mScene->getLights(), mScene->getIesProfiles(), mScene->getProjectorImages(), mTextures, sceneExtent);

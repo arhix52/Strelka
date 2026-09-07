@@ -170,10 +170,10 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
     switch (light.type)
     {
     case LIGHT_TYPE_RECT: {
-        const float3 e1 = make_float3(light.points[1].x - light.points[0].x, light.points[1].y - light.points[0].y,
-                                      light.points[1].z - light.points[0].z);
-        const float3 e2 = make_float3(light.points[3].x - light.points[0].x, light.points[3].y - light.points[0].y,
-                                      light.points[3].z - light.points[0].z);
+        const glm::vec3 e1(light.points[1].x - light.points[0].x, light.points[1].y - light.points[0].y,
+                           light.points[1].z - light.points[0].z);
+        const glm::vec3 e2(light.points[3].x - light.points[0].x, light.points[3].y - light.points[0].y,
+                           light.points[3].z - light.points[0].z);
         if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
             affineSamplePointRangeIsFinite(
                 make_float3(light.points[0].x, light.points[0].y, light.points[0].z), e1, e2, make_float3(0.0f)) &&
@@ -200,9 +200,9 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
         // analyticEllipsoidSurfaceArea(), evaluated in host double precision.
         constexpr size_t sampleCount = 256u;
         constexpr double goldenAngle = 2.39996322972865332;
-        const float3 deviceAxisX = make_float3(light.points[0].x, light.points[0].y, light.points[0].z);
-        const float3 deviceAxisY = make_float3(light.points[2].x, light.points[2].y, light.points[2].z);
-        const float3 deviceAxisZ = make_float3(light.points[3].x, light.points[3].y, light.points[3].z);
+        const glm::vec3 deviceAxisX(light.points[0].x, light.points[0].y, light.points[0].z);
+        const glm::vec3 deviceAxisY(light.points[2].x, light.points[2].y, light.points[2].z);
+        const glm::vec3 deviceAxisZ(light.points[3].x, light.points[3].y, light.points[3].z);
         if (!analyticEllipsoidIsRepresentable(
                 make_float3(light.points[1].x, light.points[1].y, light.points[1].z), deviceAxisX, deviceAxisY, deviceAxisZ))
         {
