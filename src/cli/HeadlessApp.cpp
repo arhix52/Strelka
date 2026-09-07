@@ -368,6 +368,18 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.cameraFov = static_cast<float>(*v);
     }
+    if (auto v = tbl["camera"]["focal_distance"].value<double>())
+    {
+        cfg.cameraFocalDistance = static_cast<float>(*v);
+    }
+    if (auto v = tbl["camera"]["fstop"].value<double>())
+    {
+        cfg.cameraFStopDof = static_cast<float>(*v);
+    }
+    if (auto v = tbl["camera"]["focal_length_mm"].value<double>())
+    {
+        cfg.cameraFocalLengthMm = static_cast<float>(*v);
+    }
 
     if (auto v = tbl["tonemap"]["type"].value<std::string>())
     {
@@ -786,6 +798,15 @@ int HeadlessApp::run()
             // firstperson view = R * T(-p); upper-left of lookAt is that R.
             const glm::mat4 view = glm::lookAt(cam.position, *m_config.cameraTarget, glm::vec3(0.0f, 1.0f, 0.0f));
             cam.mOrientation = glm::normalize(glm::quat_cast(glm::mat3(view)));
+        }
+        if (m_config.cameraFocalDistance)
+        {
+            // The lens radius the backend derives is focalLengthMm / (2 * fstop),
+            // so both numbers matter, not the f-number alone.
+            cam.useDof = true;
+            cam.focalDistance = *m_config.cameraFocalDistance;
+            cam.fStopDof = m_config.cameraFStopDof;
+            cam.focalLengthMm = m_config.cameraFocalLengthMm;
         }
         cam.updateViewMatrix();
 

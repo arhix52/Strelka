@@ -188,6 +188,11 @@ struct RenderConfig
     std::optional<glm::vec3> cameraPosition;
     std::optional<glm::vec3> cameraTarget;
     std::optional<float> cameraFov;
+    // Depth of field, off unless the config states a focal distance: an offline
+    // still is graded against a pinhole everywhere else in this tree.
+    std::optional<float> cameraFocalDistance;
+    float cameraFStopDof = 2.8f;
+    float cameraFocalLengthMm = 50.0f;
     // Normalised time in every clip: 0 = start, 1 = end. Unset leaves each
     // animation at its start. A value other than the loader's initial current
     // is what makes the first frame dirty the skeleton and run skinning — a
