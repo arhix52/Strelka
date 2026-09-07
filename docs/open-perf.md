@@ -6,6 +6,189 @@ already been ruled out, so a reader starting cold can act without repeating the
 elimination. What is closed is here too, because the *why* is what the next
 person needs and it is the same why either way.
 
+## The 2026-09-07 profile, four scenes
+
+A full pass over `iso_bathroom` (its perspective camera, index 1), `kids_room`,
+`pine_scene` and `bar` at 1280x720, `max_depth` 4, one sample per launch,
+following `~/optix_profiling_methodology.md`. Configs, scripts and the
+`.ncu-rep` reports are in `~/strelka_profile`; `sweep.py` drives the ablations
+off the renderer's own GPU timer, `gaps.py` reads Nsight Systems, `pcsamp.py`
+and `pcsamp_lines.py` read the reports.
+
+Two things about the tooling that this file previously recorded the other way
+round, both re-checked on Nsight Compute 2026.2.1:
+
+- **`--set full` and PC sampling do work on an OptiX launch.** The note further
+  down that a section cannot be opened on one is out of date. Source
+  correlation works too, with `--print-source cuda,sass` and
+  `STRELKA_OPTIX_LINEINFO=1`.
+- **Counters need root here.** There is no `NVreg_RestrictProfilingToAdminUsers`
+  entry on this box, so even `ncu --query-metrics` fails with ERR_NVGPUCTRPERM
+  as the user. `--query-metrics` also lists hardware counters only: the
+  `launch__*` family is always collectable and must not be filtered against it.
+
+### Step 1 -- one scene was not GPU-bound at all
+
+| | iso_bathroom | kids_room | pine | bar |
+|---|---|---|---|---|
+| launch, median ms | 6.06 | 9.79 | 13.12 | 9.53 |
+| gap between launches, median ms | 0.028 | 0.026 | **2.324** | 0.027 |
+| GPU busy, % of render span | 98.9 | 99.4 | **85.2** | 99.2 |
+
+pine's gap is the same 2.3 ms at 320x180 as at 1280x720, and under 1 ms of
+CUDA API calls accounts for all 31 of them together, so it was host compute.
+It is `Scene::worldBounds()`, called once per frame by
+`updateEmitterSelectionProbabilities()` for the scene extent that splits
+emitter selection. `ensureInstanceWorldBounds()` was already generation-cached;
+the reduction of that array to one box was not, and pine has **1 124 123
+instances** -- 31 MB of `MeshBounds` streamed per frame at 13.6 GB/s, which is
+what a scalar min/max walk with a branch per element costs. Caching the
+reduction on the same generation counter: gap 2.324 -> 0.026 ms, GPU busy
+85.2% -> 99.8%. `tests/scene/test_world_bounds.cpp` covers the transform-change
+invalidation already and now covers the instance-count one, which is the case
+the generation counter alone does not see.
+
+No other scene has this: the next largest is bar at 1342 instances.
+
+### Step 2 -- the limiter, and it is not the same on all four
+
+| | iso_bathroom | kids_room | pine | bar |
+|---|---|---|---|---|
+| SM throughput % | 10.4 | 9.2 | 9.1 | 8.9 |
+| memory throughput % | 32.7 | 29.1 | **54.1** | 32.8 |
+| DRAM throughput % | 24.8 | 18.9 | **54.1** | 28.3 |
+| L1 hit % | 55.7 | 56.3 | 49.7 | 53.9 |
+| L2 hit % | 96.7 | 96.1 | **83.6** | 92.4 |
+| DRAM GB per launch | 1.51 | 1.94 | **6.97** | 2.88 |
+| effective GB/s | 244 | 186 | **532** | 279 |
+| registers / thread | 255 | 255 | 255 | 255 |
+| achieved occupancy % | 31.6 | 32.4 | 32.8 | 32.0 |
+| active warps / scheduler | 3.91 | 3.95 | 3.96 | 3.91 |
+| **eligible warps / scheduler** | **0.16** | **0.12** | **0.11** | **0.12** |
+| cycles with no eligible warp % | 86.2 | 89.1 | 89.9 | 88.9 |
+| active lanes of 32 | 18.7 | 13.7 | 12.3 | 14.2 |
+| IPC (of 4) | 0.53 | 0.43 | 0.40 | 0.44 |
+
+Read the eligible-warp row first, because it is the whole diagnosis for three
+of the four scenes. At 255 registers a scheduler gets four warps, and for
+86-90% of cycles not one of them can issue. That is what the `no_instruction`
+stall below is: not an instruction cache problem -- `imc_miss` is 0.00 on all
+four -- but a scheduler with nothing to run whenever its handful of warps are
+all waiting. Half the lanes in those warps are idle on top of it.
+
+pine is the exception and is genuinely bandwidth-bound: 532 GB/s is over half
+of the card's peak, L2 misses three times as often as the rooms do, and its
+7 GB per launch is the geometry working set (1.54 GB of vertices and 1.44 GB of
+BLAS against 72 MB of L2).
+
+Warp stall, cycles per issued instruction:
+
+| | iso_bathroom | kids_room | pine | bar |
+|---|---|---|---|---|
+| `no_instruction` | 17.0 | **26.8** | 16.2 | **22.4** |
+| `long_scoreboard` | 4.9 | 4.3 | **16.8** | 7.1 |
+| `wait` | 2.5 | 2.2 | 2.6 | 2.5 |
+| everything else, summed | 3.0 | 2.5 | 3.1 | 2.9 |
+| `imc_miss` | 0.00 | 0.00 | 0.00 | 0.00 |
+| `tex_throttle` | 0.00 | 0.00 | 0.00 | 0.00 |
+
+### Step 4 -- ablations
+
+**Primary rays are not the cost.** `debug = 1` shades the first hit and stops,
+which is ablation A; it issues exactly one launch, so it has to be profiled
+with `--launch-skip 0`.
+
+| | iso_bathroom | kids_room | pine | bar |
+|---|---|---|---|---|
+| primary-only launch, ms | 0.27 | 1.58 | 1.09 | 0.39 |
+| share of the full frame | 4.4% | 15% | 8.3% | 3.7% |
+| active lanes of 32, primary only | 29.9 | 27.5 | 26.2 | 29.5 |
+| `no_instruction`, primary only | 0.8 | 0.7 | 0.5 | 0.6 |
+| `long_scoreboard`, primary only | 8.5 | 9.3 | **40.3** | 11.0 |
+
+Coherent traversal runs with nearly every lane live and no issue starvation at
+all; it waits on memory and nothing else. Everything in the first table --
+the idle lanes, the 90% of cycles with no eligible warp -- appears only when
+shading, next-event estimation and incoherent bounces are added. The frame is
+the megakernel's shading code, not the BVH.
+
+**Textures are not the cost either.** Halving and quartering every texture
+(`texture_downscale` 1 / 2 / 4) moves iso_bathroom 5.90 / 6.30 / 6.20 ms and
+pine 12.35 / 12.50 / 12.85 -- within the timer's 0.05 ms quantum of nothing,
+and if anything the smaller textures are slower. `tex_throttle` is 0.00.
+
+**Depth**, ms/sample, depth 1 / 2 / 4 / 8 / 16: iso_bathroom 1.20 / 3.50 /
+5.90 / 8.00 / 8.90; pine 4.90 / 8.95 / 12.45 / 13.10 / 13.00. pine is flat past
+the fourth bounce -- Russian roulette is already killing those paths -- while
+iso_bathroom is still paying for them at 8.
+
+**Resolution** scales linearly from 640x360 up (iso_bathroom 11.7 / 6.4 / 5.5
+ns per pixel at 640x360 / 1280x720 / 1920x1080; pine 18.7 / 13.7 / 12.6), so
+there is no working-set cliff between those sizes.
+
+**Capping registers still costs more than it buys**, and now on all four:
+default 255 against 128 / 96 / 64 gives iso_bathroom 5.90 / 5.90 / 6.50 / 8.15
+and pine 12.60 / 13.10 / 12.90 / 16.00. `STRELKA_OPTIX_MAX_REGISTERS` stays a
+diagnostic.
+
+### Where the samples are
+
+`__closesthit__radiance` is 84-88% of PC samples on every scene, and it is
+`no_instruction` for 57-77% of them. `__intersection__light` is the only other
+program worth a line, and only where there are analytic emitters with a
+surface: 19.3% of kids_room's samples, 5.4% of iso_bathroom's, 91% and 87%
+`no_instruction`.
+
+By source line, merged across programs, share of attributed samples:
+
+| line | iso_bathroom | kids_room | pine | bar | dominant stall |
+|---|---|---|---|---|---|
+| `random.h:278` `X ^= sb_matrix[lowestSetBit(bits)][dim]` | **22.7%** | **15.6%** | **26.7%** | **12.8%** | `long_scoreboard` ~60% |
+| `random.h:261` / `:276` / `:309` (the rest of the Sobol' walk) | 9.8% | 7.3% | 10.9% | 6.5% | `short_scoreboard`, `wait` |
+| `vec_math.h:559` `dot` | 5.1% | 5.3% | 4.6% | 4.7% | `no_instruction` |
+| `microfacet.h:222/226/234` (the saturating product/sum guards) | 6.0% | 4.9% | 5.5% | **9.0%** | `no_instruction` ~90% |
+| `material_math.h:321/331/569/578` (two-float add, `frexpf`/`ldexpf`) | 1.0% | **7.2%** | -- | 4.7% | `no_instruction` ~92% |
+| `standard_pbr.h:392/396` (the lobe-weight loop) | 1.4% | 1.4% | 1.9% | 3.3% | `no_instruction` ~90% |
+
+Sample rank is where warps wait, not what the frame costs -- this file has made
+that mistake twice and the ranking is a pointer, not a bill. With that said,
+**the Sobol' sampler is a third of iso_bathroom's and pine's samples and the
+top line on all four scenes**, and unlike the `no_instruction` lines its stall
+is a real dependent load: `sb_matrix` is a 32 KB `__device__` table, the row
+index is warp-uniform but `dim` is not, so a warp scatters 32 reads across one
+1 KB row and then waits for them with three other warps to hide behind.
+
+This is the item the "Taking connectToLight apart" section below left open,
+and the profile says it is now the largest single line in the launch rather
+than one contributor among several. The two things named there are still the
+two things to try: draw fewer numbers (four of a connection's five draws are
+categorical decisions that need far fewer than 128 bits between them), or a
+Gray-code Sobol' that advances by one XOR instead of walking the set bits of
+the index. Both remove table reads rather than making them faster, which is
+the right shape when there are four warps to hide the latency behind.
+
+The second cluster is different in kind: `microfacet.h`'s overflow guards,
+`material_math.h`'s two-float arithmetic and `standard_pbr.h`'s lobe loop are
+all cheap code whose samples are 90% `no_instruction`. They are not slow; they
+are what the scheduler happens to be stalled on because there is nothing to
+issue. Deleting arithmetic there will not pay -- the same reasoning that made
+replacing the sheen albedo lookup with a constant a 13% *regression*.
+
+### Scene notes found while setting this up
+
+- **`bar_max.gltf` renders almost black; `bar_max.glb` is correct.** Same
+  camera, same config: the `.gltf` gives a frame with 1.6% of pixels above
+  1e-6, the `.glb` 96%. `docs/bar-scene-port.md` uses the `.glb` throughout.
+  Untriaged.
+- **iso_bathroom's environment map cannot be loaded.** Its light sidecar names
+  `/Users/ikryukov/Isometric_Bathroom_Scene/Assets/abandoned_hall_01_4k.exr`,
+  which is not in `~/strelka_assets`, so the scene profiles with its three
+  analytic lights and no dome. Its numbers are comparable across this file's
+  runs but not to a run that has the map.
+- **pine's host memory is 30.8 GB** for a 5.6 GB device scene, all of it the
+  1.12 M instances and their bounds. Not a bottleneck at 62 GB of RAM, but it
+  is what makes any O(instances) host pass expensive.
+
 ## Where this stands
 
 **The table below this one is history.** Between it and now, the analytic

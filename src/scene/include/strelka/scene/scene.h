@@ -462,6 +462,17 @@ public:
     uint64_t mTransformGeneration = 1;
     uint64_t mInstanceBoundsGeneration = 0;
 
+    // The reduction of the array above to one box. Cached on the same generation
+    // counter, because worldBounds() is called once per frame from the OptiX
+    // backend -- updateEmitterSelectionProbabilities() asks for the scene extent
+    // to split the emitter selection -- and the walk is O(instances) with a
+    // branch per element. On pine_scene's 1 124 123 instances that is 31 MB of
+    // MeshBounds streamed per frame, measured at 2.32 ms and 15% of the render
+    // span, in a gap Nsight Systems shows between every pair of launches.
+    MeshBounds mWorldBounds;
+    uint64_t mWorldBoundsGeneration = 0;
+    size_t mWorldBoundsCount = 0;
+
     /// Rebuild mInstanceWorldBounds when the transform generation has moved on.
     void ensureInstanceWorldBounds();
     std::vector<Curve> mCurves;

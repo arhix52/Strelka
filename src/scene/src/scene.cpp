@@ -1428,25 +1428,35 @@ void Scene::ensureInstanceWorldBounds()
 bool Scene::worldBounds(glm::float3& outMin, glm::float3& outMax)
 {
     ensureInstanceWorldBounds();
-    bool any = false;
-    glm::float3 lo(std::numeric_limits<float>::max());
-    glm::float3 hi(std::numeric_limits<float>::lowest());
-    for (const MeshBounds& wb : mInstanceWorldBounds)
+    // Keyed on the count as well as the generation: ensureInstanceWorldBounds()
+    // also rebuilds when the instance count moved, and that path leaves the
+    // generation where it was.
+    if (mWorldBoundsGeneration != mInstanceBoundsGeneration || mWorldBoundsGeneration == 0 ||
+        mWorldBoundsCount != mInstanceWorldBounds.size())
     {
-        if (!wb.valid)
+        bool any = false;
+        glm::float3 lo(std::numeric_limits<float>::max());
+        glm::float3 hi(std::numeric_limits<float>::lowest());
+        for (const MeshBounds& wb : mInstanceWorldBounds)
         {
-            continue;
+            if (!wb.valid)
+            {
+                continue;
+            }
+            lo = glm::min(lo, wb.min);
+            hi = glm::max(hi, wb.max);
+            any = true;
         }
-        lo = glm::min(lo, wb.min);
-        hi = glm::max(hi, wb.max);
-        any = true;
+        mWorldBounds = MeshBounds{ lo, hi, any };
+        mWorldBoundsGeneration = mInstanceBoundsGeneration;
+        mWorldBoundsCount = mInstanceWorldBounds.size();
     }
-    if (!any)
+    if (!mWorldBounds.valid)
     {
         return false;
     }
-    outMin = lo;
-    outMax = hi;
+    outMin = mWorldBounds.min;
+    outMax = mWorldBounds.max;
     return true;
 }
 
