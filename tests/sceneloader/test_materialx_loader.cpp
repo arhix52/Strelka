@@ -113,3 +113,34 @@ TEST_CASE("standard_surface's subsurface scale and radius collapse into OpenPBR'
     // thin -- and the map then modulates the tint, which is the slot above.
     CHECK(king->params.subsurface_radius == doctest::Approx(0.003f));
 }
+
+TEST_CASE("a look-assigned material carries its subsurface block into the scene")
+{
+    // applyMaterialXDocument() is the step between the document and the
+    // renderer, and the look path is a *second* one: it does not edit a glTF
+    // material, it adds one per assignment and repoints the instances. Anything
+    // it forgets to copy is a parameter the shader then reads at its OpenPBR
+    // default -- which for subsurface_color is bright, and turns dark marble
+    // white.
+    oka::Scene scene;
+    const int applied = oka::mtlx::applyMaterialXDocument(scene, chessDocument());
+    // Nothing matched by name: the chess glTF calls both its materials
+    // "Default OBJ". Every piece arrives through the look instead.
+    CHECK(applied == 0);
+    REQUIRE(scene.getMaterials().size() == 15);
+
+    const auto& mats = scene.getMaterials();
+    const auto it = std::ranges::find_if(mats, [](const oka::Scene::MaterialDescription& d) {
+        return d.name == "M_King_B@King_B";
+    });
+    REQUIRE(it != mats.end());
+
+    CHECK(it->params.material_type == MATERIAL_TYPE_OPENPBR);
+    CHECK(it->openpbr.subsurface_radius == doctest::Approx(0.003f));
+    // The document drives all three from maps, so the constants stay at their
+    // defaults and the slots are what carry the piece.
+    CHECK_FALSE(it->openpbrTexPaths[OPENPBR_TEX_SUBSURFACE_WEIGHT].empty());
+    CHECK_FALSE(it->openpbrTexPaths[OPENPBR_TEX_SUBSURFACE_COLOR].empty());
+    CHECK_FALSE(it->openpbrTexPaths[OPENPBR_TEX_SUBSURFACE_RADIUS].empty());
+    CHECK(std::filesystem::exists(it->openpbrTexPaths[OPENPBR_TEX_SUBSURFACE_COLOR]));
+}

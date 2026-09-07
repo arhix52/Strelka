@@ -10,6 +10,7 @@
 #include <MaterialXFormat/XmlIo.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <ranges>
 #include <cctype>
 #include <cmath>
@@ -1128,7 +1129,11 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
         return result;
     }
 
-    const mx::FilePath docDir = docPath.getParentPath();
+    // Absolute, because a texture path is later joined with the *scene's*
+    // directory: a relative docDir would prefix it a second time and every map
+    // would fail to open. The scene path arrives from the CLI, so it is
+    // routinely relative.
+    const mx::FilePath docDir(std::filesystem::absolute(path).parent_path().string());
 
     for (const mx::NodePtr& materialNode : doc->getMaterialNodes())
     {
