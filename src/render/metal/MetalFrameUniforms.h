@@ -183,8 +183,10 @@ private:
         float shiftX = 0.0f;
         float shiftY = 0.0f;
         uint32_t maxDepth = 0;
+        uint32_t subsurfaceIterations = 0;
         uint32_t debug = 0;
         float clampIndirect = 0.0f;
+        uint32_t risCandidates = 0;
         uint32_t restirDIEnabled = 0;
         uint32_t initialCandidateCount = 0;
         uint32_t temporalReuseEnabled = 0;

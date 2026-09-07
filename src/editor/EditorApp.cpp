@@ -654,9 +654,10 @@ void EditorApp::loadSettings()
     // interactive frames responsive; the Quality panel can raise this when a
     // close-up needs the longer tail. Headless/final rendering retains 64.
     m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", 16);
-    // Four power-sampled candidates cut one-spp log error by 20% on kids room
-    // and 5% on bathroom; eight has little left to win for twice the work.
-    m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 4u);
+    // One candidate has the best equal-time convergence and keeps interactive
+    // navigation responsive. Higher fixed-SPP quality remains available under
+    // Advanced > Direct lighting.
+    m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);
     // The MetalFX denoiser compiles a large graph synchronously. The interactive

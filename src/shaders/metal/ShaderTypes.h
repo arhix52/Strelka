@@ -315,7 +315,9 @@ struct Uniforms
     uint32_t restirFinalVisibilityReuse;
     uint32_t restirFinalVisibilityMaxAge;
     uint32_t restirVisibilityRevision;
-    uint32_t restirVisibilityPadding;
+    /// Maximum scattering events in one dense subsurface random walk. This
+    /// occupies the former ReSTIR alignment word, preserving the uniform ABI.
+    uint32_t subsurfaceIterations;
     float restirProposalCollision;
     float restirProposalEntropy;
 
@@ -767,6 +769,9 @@ struct SharcUpdateState
 /// alone terminates slowly, and a path that never ends is a hang rather than a
 /// dim pixel.
 #define MEDIUM_MAX_STEPS 256u
+/// Dense SSS steps kept in registers by one traversal invocation. Four cuts
+/// queue traffic without serializing enough ray queries to hurt occupancy.
+#define SSS_FUSED_STEPS 4u
 
 #define SHARC_NO_ENTRY 0xFFFFFFFFu
 

@@ -1197,7 +1197,7 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     return b;
 }
 
-uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const
+uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurfaceIterations, bool fusedSss) const
 {
     uint32_t iterations = maxDepth;
     // Cutouts and medium boundaries share PATH_PASSTHROUGH_MAX, so one budget
@@ -1210,7 +1210,8 @@ uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurface
     // Subsurface walk steps have a separate ceiling; cap host iterations so rare long tails do not pad every launch.
     if (mMaterials.hasSubsurfaceMaterials())
     {
-        iterations += std::min(subsurfaceIterations, 256u);
+        const uint32_t steps = std::min(subsurfaceIterations, (uint32_t)MEDIUM_MAX_STEPS);
+        iterations += fusedSss ? (steps + SSS_FUSED_STEPS - 1u) / SSS_FUSED_STEPS : steps;
     }
     return iterations;
 }
@@ -1226,7 +1227,7 @@ uint32_t MetalRender::sharcUpdateIterations(uint32_t maxDepth, uint32_t subsurfa
                                                      1u, static_cast<uint32_t>(SHARC_MAX_PROPAGATION_DEPTH));
         depth = std::min(maxDepth, propagationDepth + 1u + kSharcUpdateVolumeAllowance);
     }
-    return wavefrontIterations(depth, std::min(subsurfaceIterations, kSharcUpdateSubsurfaceIterations));
+    return wavefrontIterations(depth, std::min(subsurfaceIterations, kSharcUpdateSubsurfaceIterations), false);
 }
 
 void MetalRender::render(Buffer* output)

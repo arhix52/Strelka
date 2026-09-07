@@ -30,6 +30,8 @@ struct WavefrontVariant
     MTL::ComputePipelineState* generate = nullptr;
     MTL::ComputePipelineState* extendMotion = nullptr;
     MTL::ComputePipelineState* extendStatic = nullptr;
+    MTL::ComputePipelineState* sssWalkMotion = nullptr;
+    MTL::ComputePipelineState* sssWalkStatic = nullptr;
     MTL::ComputePipelineState* shade = nullptr;
     MTL::ComputePipelineState* restirSpatialFinal = nullptr;
     MTL::ComputePipelineState* miss = nullptr;
@@ -268,6 +270,8 @@ private:
     MTL::ComputePipelineState* mPreparePSO = nullptr;
     MTL::ComputePipelineState* mPrepareShadowPSO = nullptr;
     MTL::ComputePipelineState* mPrepareHitMissPSO = nullptr;
+    MTL::ComputePipelineState* mClassifySssPSO = nullptr;
+    MTL::ComputePipelineState* mPrepareSssPSO = nullptr;
     MTL::ComputePipelineState* mAovResolvePSO = nullptr;
     MTL::ComputePipelineState* mSharcClearPSO = nullptr;
     MTL::ComputePipelineState* mSharcResolvePSO = nullptr;
@@ -276,6 +280,8 @@ private:
     MTL::ComputePipelineState* mPreparePSO4 = nullptr;
     MTL::ComputePipelineState* mPrepareShadowPSO4 = nullptr;
     MTL::ComputePipelineState* mPrepareHitMissPSO4 = nullptr;
+    MTL::ComputePipelineState* mClassifySssPSO4 = nullptr;
+    MTL::ComputePipelineState* mPrepareSssPSO4 = nullptr;
     MTL::ComputePipelineState* mStageBreadcrumbPSO4 = nullptr;
     MTL::ComputePipelineState* mAovResolvePSO4 = nullptr;
     MTL::ComputePipelineState* mSharcClearPSO4 = nullptr;
@@ -291,6 +297,8 @@ private:
     MTL::Buffer* mGuideRayBuffer = nullptr;
     MTL::Buffer* mGuideQueueBuffer = nullptr;
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
+    MTL::Buffer* mSssQueueBuffer = nullptr;
+    MTL::Buffer* mSssControlBuffer = nullptr;
     MTL::Buffer* mControlBuffer = nullptr;
     MTL::Buffer* mTraversalDispatchBuffer = nullptr;
     MTL::Buffer* mShadowRayBuffer = nullptr;

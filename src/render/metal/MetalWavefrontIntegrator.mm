@@ -47,6 +47,8 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mResolvePSO);
     safeRelease(mPreparePSO);
     safeRelease(mPrepareShadowPSO);
+    safeRelease(mClassifySssPSO);
+    safeRelease(mPrepareSssPSO);
     safeRelease(mPathStateBuffer);
     safeRelease(mMediumPathStateBuffer);
     safeRelease(mSharcUpdateStateBuffer);
@@ -58,6 +60,8 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mGuideQueueBuffer);
     safeRelease(mPathQueueBuffer[0]);
     safeRelease(mPathQueueBuffer[1]);
+    safeRelease(mSssQueueBuffer);
+    safeRelease(mSssControlBuffer);
     safeRelease(mControlBuffer);
     safeRelease(mTraversalDispatchBuffer);
     safeRelease(mShadowRayBuffer);
@@ -75,6 +79,8 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.generate);
         safeRelease(kv.second.extendMotion);
         safeRelease(kv.second.extendStatic);
+        safeRelease(kv.second.sssWalkMotion);
+        safeRelease(kv.second.sssWalkStatic);
         safeRelease(kv.second.shade);
         safeRelease(kv.second.restirSpatialFinal);
         safeRelease(kv.second.miss);
@@ -98,6 +104,8 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mPreparePSO4);
     safeRelease(mPrepareShadowPSO4);
     safeRelease(mPrepareHitMissPSO4);
+    safeRelease(mClassifySssPSO4);
+    safeRelease(mPrepareSssPSO4);
     safeRelease(mStageBreadcrumbPSO4);
     safeRelease(mAovResolvePSO);
     safeRelease(mAovResolvePSO4);
@@ -133,6 +141,8 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mGuideQueueBuffer);
     add(mPathQueueBuffer[0]);
     add(mPathQueueBuffer[1]);
+    add(mSssQueueBuffer);
+    add(mSssControlBuffer);
     add(mHitQueueBuffer);
     add(mMissQueueBuffer);
     add(mShadowRayBuffer);
@@ -165,9 +175,10 @@ size_t MetalWavefrontIntegrator::queueBytes() const
     return bufBytes(mPathStateBuffer) + bufBytes(mMediumPathStateBuffer) + bufBytes(mSharcUpdateStateBuffer) +
            bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) + bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) +
            bufBytes(mGuideRayBuffer) + bufBytes(mGuideQueueBuffer) + bufBytes(mPathQueueBuffer[0]) +
-           bufBytes(mPathQueueBuffer[1]) + bufBytes(mControlBuffer) + bufBytes(mTraversalDispatchBuffer) +
-           bufBytes(mShadowRayBuffer) + bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) +
-           bufBytes(mStageStatsBuffer) + bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
+           bufBytes(mPathQueueBuffer[1]) + bufBytes(mSssQueueBuffer) + bufBytes(mSssControlBuffer) +
+           bufBytes(mControlBuffer) + bufBytes(mTraversalDispatchBuffer) + bufBytes(mShadowRayBuffer) +
+           bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer) +
+           bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
            bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
            bufBytes(mRestirSurfaceDataBuffer[0]) + bufBytes(mRestirSurfaceDataBuffer[1]) +
            bufBytes(mRenderWorkCounterBuffer);
@@ -587,6 +598,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
     const bool useMotion = frame.motionBlasBuilt || variant->extendStatic == nullptr ||
                            frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
+    const bool fusedSss = (features & WavefrontFeatures::kSubsurface) != 0u &&
+                          (features & WavefrontFeatures::kSharcUpdate) == 0u && variant->sssWalkMotion &&
+                          variant->sssWalkStatic;
 
     // Every dispatch here reads what the one before it wrote. Metal 4 does not
     // work that out, so say it: dispatch-to-dispatch, visible device-wide.
@@ -702,6 +716,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 table->setAddress(traversalBatchCountAddress, 11);
                 bind(mMediumPathStateBuffer, 0, 12);
                 table->setAddress(diagnosticsMediumEnabled, 13);
+                bind(mSssControlBuffer, 0, 14);
                 enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
                 barrier();
                 mark(kStageExtend);
@@ -737,6 +752,45 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                                           std::min(chunk.traversalBatchEnd, traversalBatchCount);
             for (uint32_t batch = batchBegin; batch < batchEnd; ++batch)
             {
+                if (fusedSss)
+                {
+                    auditDispatch("wavefrontClassifySss");
+                    enc->setComputePipelineState(mClassifySssPSO4);
+                    bind(uniformBuffer, 0, 0);
+                    bind(mPathQueueBuffer[src], 0, 1);
+                    bind(mControlBuffer, 0, 2);
+                    bind(mMediumPathStateBuffer, 0, 3);
+                    bind(scene.materialBuffer, 0, 4);
+                    bind(mSssQueueBuffer, 0, 5);
+                    bind(mSssControlBuffer, 0, 6);
+                    table->setAddress(ring.push(batch * traversalBatchThreads), 7);
+                    enc->dispatchThreadgroups(
+                        traversalDispatches + static_cast<MTL::GPUAddress>(batch) * 3u * sizeof(uint32_t), tg);
+                    traversalBatchBarrier();
+                    // All Metal 4 kernels share one argument table. Classification
+                    // overwrote its first slots, so restore extend's bindings.
+                    enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
+                    bind(uniformBuffer, 0, 0);
+                    bind(scene.instanceBuffer, 0, 1);
+                    table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 2);
+                    bind(mPathRayBuffer, 0, 3);
+                    bind(mHitBuffer, 0, 4);
+                    table->setAddress(sampleIdx, 5);
+                    bind(mPathQueueBuffer[src], 0, 6);
+                    bind(mControlBuffer, 0, 7);
+                    bind(mHitQueueBuffer, 0, 8);
+                    bind(mControlBuffer, kHitCounterOffset, 9);
+                    bind(mMissQueueBuffer, 0, 10);
+                    bind(mControlBuffer, kMissCounterOffset, 11);
+                    bind(mPathStateBuffer, 0, 12);
+                    bind(scene.materialBuffer, 0, 13);
+                    table->setAddress(ring.push(extendMask), 14);
+                    table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
+                    bind(mMediumPathStateBuffer, 0, 17);
+                    bind(scene.lightBuffer, 0, 18);
+                    table->setResource(
+                        (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+                }
                 auditDispatch(useMotion ? "wavefrontExtend" : "wavefrontExtendStatic");
                 table->setAddress(ring.push(batch * traversalBatchThreads), 16);
                 enc->dispatchThreadgroups(
@@ -746,6 +800,42 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     traversalBatchBarrier();
                 }
             }
+            barrier();
+        }
+
+        if (fusedSss && finishBounce)
+        {
+            auditDispatch("wavefrontPrepareSss");
+            enc->setComputePipelineState(mPrepareSssPSO4);
+            bind(mSssControlBuffer, 0, 0);
+            table->setAddress(groupSize, 1);
+            enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+            barrier();
+
+            auditDispatch(useMotion ? "wavefrontSssWalk" : "wavefrontSssWalkStatic");
+            enc->setComputePipelineState(useMotion ? variant->sssWalkMotion : variant->sssWalkStatic);
+            bind(uniformBuffer, 0, 0);
+            bind(scene.instanceBuffer, 0, 1);
+            table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 2);
+            bind(mPathRayBuffer, 0, 3);
+            bind(mPathStateBuffer, 0, 4);
+            bind(mMediumPathStateBuffer, 0, 5);
+            bind(scene.materialBuffer, 0, 6);
+            table->setAddress(sampleIdx, 7);
+            bind(mSssQueueBuffer, 0, 8);
+            bind(mSssControlBuffer, 0, 9);
+            bind(mHitBuffer, 0, 10);
+            bind(mHitQueueBuffer, 0, 11);
+            bind(mControlBuffer, kHitCounterOffset, 12);
+            bind(mMissQueueBuffer, 0, 13);
+            bind(mControlBuffer, kMissCounterOffset, 14);
+            bind(mPathQueueBuffer[dst], 0, 15);
+            bind(mControlBuffer, dst * sizeof(uint32_t), 16);
+            bind(mControlBuffer, 0, 17);
+            const uint32_t extendMask =
+                (bounce == 0) ? uniforms->primaryRayMask : (uniforms->primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN);
+            table->setAddress(ring.push(extendMask), 18);
+            enc->dispatchThreadgroups(mSssControlBuffer->gpuAddress() + 2u * sizeof(uint32_t), tg);
             barrier();
         }
 
@@ -1194,7 +1284,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     {
         return enc;
     }
-
+    const bool fusedSss = (features & WavefrontFeatures::kSubsurface) != 0u && !sharcUpdatePass &&
+                          variant->sssWalkMotion && variant->sssWalkStatic;
 
     // Profiling gives each stage its own encoder, because this hardware samples
     // counters only at encoder boundaries. That costs encoder overhead, so it is
@@ -1264,14 +1355,28 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&traversalBatchCount, sizeof(traversalBatchCount), 11);
             enc->setBuffer(mMediumPathStateBuffer, 0, 12);
             enc->setBytes(&diagnosticsMediumEnabled, sizeof(diagnosticsMediumEnabled), 13);
+            enc->setBuffer(mSssControlBuffer, 0, 14);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             // Sort the queue this bounce is about to traverse. Bounce 0 is the
             // camera and already perfectly coherent, so it is skipped -- sorting
             // it is pure cost.
 
-
             stamp(kStageExtend);
+            if (fusedSss)
+            {
+                enc->setComputePipelineState(mClassifySssPSO);
+                enc->setBuffer(uniformBuffer, 0, 0);
+                enc->setBuffer(mPathQueueBuffer[src], 0, 1);
+                enc->setBuffer(mControlBuffer, 0, 2);
+                enc->setBuffer(mMediumPathStateBuffer, 0, 3);
+                enc->setBuffer(scene.materialBuffer, 0, 4);
+                enc->setBuffer(mSssQueueBuffer, 0, 5);
+                enc->setBuffer(mSssControlBuffer, 0, 6);
+                enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 7);
+                enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+            }
             enc->pushDebugGroup(NS::String::string("extend", NS::UTF8StringEncoding));
             enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
             enc->setBuffer(uniformBuffer, 0, 0);
@@ -1302,6 +1407,39 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->useResource(extendTable, MTL::ResourceUsageRead);
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
+
+            if (fusedSss)
+            {
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+                enc->setComputePipelineState(mPrepareSssPSO);
+                enc->setBuffer(mSssControlBuffer, 0, 0);
+                enc->setBytes(&kThreadsPerGroup, sizeof(kThreadsPerGroup), 1);
+                enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+
+                enc->setComputePipelineState(useMotion ? variant->sssWalkMotion : variant->sssWalkStatic);
+                enc->setBuffer(uniformBuffer, 0, 0);
+                enc->setBuffer(scene.instanceBuffer, 0, 1);
+                enc->setAccelerationStructure(scene.volumeAccelerationStructure, 2);
+                enc->setBuffer(mPathRayBuffer, 0, 3);
+                enc->setBuffer(mPathStateBuffer, 0, 4);
+                enc->setBuffer(mMediumPathStateBuffer, 0, 5);
+                enc->setBuffer(scene.materialBuffer, 0, 6);
+                enc->setBytes(&s, sizeof(uint32_t), 7);
+                enc->setBuffer(mSssQueueBuffer, 0, 8);
+                enc->setBuffer(mSssControlBuffer, 0, 9);
+                enc->setBuffer(mHitBuffer, 0, 10);
+                enc->setBuffer(mHitQueueBuffer, 0, 11);
+                enc->setBuffer(mControlBuffer, kHitCounterOffset, 12);
+                enc->setBuffer(mMissQueueBuffer, 0, 13);
+                enc->setBuffer(mControlBuffer, kMissCounterOffset, 14);
+                enc->setBuffer(mPathQueueBuffer[dst], 0, 15);
+                enc->setBuffer(mControlBuffer, dst * sizeof(uint32_t), 16);
+                enc->setBuffer(mControlBuffer, 0, 17);
+                enc->setBytes(&extendMask, sizeof(uint32_t), 18);
+                enc->dispatchThreadgroups(mSssControlBuffer, 2u * sizeof(uint32_t), tg);
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+            }
 
             enc->setComputePipelineState(mPrepareHitMissPSO);
             enc->setBuffer(mControlBuffer, 0, 0);
@@ -1679,6 +1817,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.generate = make("wavefrontGenerate");
     v.extendMotion = makeTraversal(entry("wavefrontExtend"), true, v.extendTableMotion);
     v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), false, v.extendTableStatic);
+    if (subsurface && !sharcUpdate)
+    {
+        v.sssWalkMotion = make("wavefrontSssWalk");
+        v.sssWalkStatic = make("wavefrontSssWalkStatic");
+    }
     v.shade = restirRayTracedDiagnostic ? makeTraversal("wavefrontShade", false, v.restirShadeDiagnosticTable) :
                                           make("wavefrontShade");
     v.restirSpatialFinal = restirRayTracedDiagnostic ?
@@ -1706,10 +1849,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;
     };
     STRELKA_INFO(
-        "  maxThreadsPerTG: generate {} extend {} (motion {}) shade {} shadow {} (motion {}) "
+        "  maxThreadsPerTG: generate {} extend {} (motion {}) sssWalk {} (motion {}) shade {} shadow {} (motion {}) "
         "guide {} (motion {}) miss {}",
-        tgLimit(v.generate), tgLimit(v.extendStatic), tgLimit(v.extendMotion), tgLimit(v.shade), tgLimit(v.shadowStatic),
-        tgLimit(v.shadowMotion), tgLimit(v.guideStatic), tgLimit(v.guideMotion), tgLimit(v.miss));
+        tgLimit(v.generate), tgLimit(v.extendStatic), tgLimit(v.extendMotion), tgLimit(v.sssWalkStatic),
+        tgLimit(v.sssWalkMotion), tgLimit(v.shade), tgLimit(v.shadowStatic), tgLimit(v.shadowMotion),
+        tgLimit(v.guideStatic), tgLimit(v.guideMotion), tgLimit(v.miss));
     return &mVariants.emplace(features, v).first->second;
 }
 
@@ -1748,6 +1892,8 @@ void MetalWavefrontIntegrator::buildPipelines()
     mPreparePSO = make("wavefrontPrepare");
     mPrepareShadowPSO = make("wavefrontPrepareShadow");
     mPrepareHitMissPSO = make("wavefrontPrepareHitMiss");
+    mClassifySssPSO = make("wavefrontClassifySss");
+    mPrepareSssPSO = make("wavefrontPrepareSss");
     mAovResolvePSO = make("wavefrontAovResolve");
     mSharcClearPSO = make("sharcClear");
     mSharcResolvePSO = make("sharcResolve");
@@ -1759,6 +1905,8 @@ void MetalWavefrontIntegrator::buildPipelines()
         mPreparePSO4 = mMetal4->newComputePipelineState(lib, "wavefrontPrepare", nullptr);
         mPrepareShadowPSO4 = mMetal4->newComputePipelineState(lib, "wavefrontPrepareShadow", nullptr);
         mPrepareHitMissPSO4 = mMetal4->newComputePipelineState(lib, "wavefrontPrepareHitMiss", nullptr);
+        mClassifySssPSO4 = mMetal4->newComputePipelineState(lib, "wavefrontClassifySss", nullptr);
+        mPrepareSssPSO4 = mMetal4->newComputePipelineState(lib, "wavefrontPrepareSss", nullptr);
         mStageBreadcrumbPSO4 = mMetal4->newComputePipelineState(lib, "wavefrontStageBreadcrumb", nullptr);
         // The guide resolve too: without it the Metal 4 path cannot feed either
         // MetalFX mode, both of which read depth and motion from these textures.
@@ -1809,6 +1957,8 @@ void MetalWavefrontIntegrator::ensureBuffers(
     release(mGuideQueueBuffer);
     release(mPathQueueBuffer[0]);
     release(mPathQueueBuffer[1]);
+    release(mSssQueueBuffer);
+    release(mSssControlBuffer);
     release(mControlBuffer);
     release(mTraversalDispatchBuffer);
     release(mShadowRayBuffer);
@@ -1853,6 +2003,8 @@ void MetalWavefrontIntegrator::ensureBuffers(
     mGuideQueueBuffer = mDevice->newBuffer(layout.guideQueueBytes, MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[0] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[1] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
+    mSssQueueBuffer = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
+    mSssControlBuffer = mDevice->newBuffer(5u * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     // Queue counters, active counts, and two sets of indirect dispatch arguments.
     mControlBuffer = mDevice->newBuffer(layout.controlBytes, MTL::ResourceStorageModePrivate);
     // Reused within a bounce: prepare fills it for extend, then prepareShadow

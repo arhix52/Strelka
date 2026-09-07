@@ -177,7 +177,7 @@ private:
     /// wavefrontIterations().
     static constexpr uint32_t kPassthroughIterations = 8;
     /// Iterations of the wavefront loop for one sample at this path depth.
-    uint32_t wavefrontIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const;
+    uint32_t wavefrontIterations(uint32_t maxDepth, uint32_t subsurfaceIterations, bool fusedSss = true) const;
     /// The same, for SHaRC's sparse update pass. See the definition: the update
     /// pass cannot reach either of the two budgets the render pass needs.
     uint32_t sharcUpdateIterations(uint32_t maxDepth, uint32_t subsurfaceIterations) const;

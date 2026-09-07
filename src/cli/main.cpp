@@ -41,7 +41,7 @@ int main(int argc, const char* argv[])
         ("height",       "Render height",                   cxxopts::value<uint32_t>())
         ("spp",          "Samples per pixel",               cxxopts::value<uint32_t>())
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
-        ("sss-iterations", "Extra subsurface walk iterations (0..256)",
+        ("sss-iterations", "Subsurface random-walk iteration limit (0..256)",
                                                             cxxopts::value<uint32_t>())
         ("exposure-iso", "Film ISO; overrides the scene's own exposure",
                                                             cxxopts::value<float>())

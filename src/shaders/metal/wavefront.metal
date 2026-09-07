@@ -771,6 +771,242 @@ static inline device HitRecord* wavefrontHitRecord(device char* records, uint32_
     return (device HitRecord*)(records + size_t(index) * stride);
 }
 
+static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
+                                       constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                       thread const ExtendIntersection& hit,
+                                       device char* hits,
+                                       uint32_t tid,
+                                       device uint32_t* hitQueue,
+                                       device atomic_uint* hitCounter,
+                                       device uint32_t* missQueue,
+                                       device atomic_uint* missCounter,
+                                       device const uint32_t* control)
+{
+    if (hit.type == intersection_type::none)
+    {
+        queuePush(uniforms, missCounter, missQueue, tid, control[WF_CTRL_CAPACITY]);
+        return;
+    }
+
+    const auto inst = instances[hit.instanceId];
+    const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN);
+    HitRecord rec;
+    rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID) : (inst.userID + hit.geometryId);
+    rec.instanceIndex = hit.instanceId;
+    rec.primitiveId = hit.primitiveId;
+    rec.barycentrics =
+        (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
+    rec.distance = hit.distance;
+    *wavefrontHitRecord(hits, tid) = rec;
+    queuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
+}
+
+// Compact only dense subsurface paths. Normal paths stay in the original queue:
+// extend can reject the same dense predicate cheaply, avoiding a second full-
+// size queue while the expensive SSS traversal still runs over coherent lanes.
+kernel void wavefrontClassifySss(uint gid [[thread_position_in_grid]],
+                                 constant Uniforms& uniforms [[buffer(0)]],
+                                 device const uint32_t* queue [[buffer(1)]],
+                                 device const uint32_t* control [[buffer(2)]],
+                                 device const MediumPathState* mediumPaths [[buffer(3)]],
+                                 device const Material* materials [[buffer(4)]],
+                                 device uint32_t* sssQueue [[buffer(5)]],
+                                 device atomic_uint* sssCounter [[buffer(6)]],
+                                 constant uint32_t& queueOffset [[buffer(7)]])
+{
+    gid += queueOffset;
+    if (gid >= control[WF_CTRL_ACTIVE])
+    {
+        return;
+    }
+    const uint32_t tid = queue[gid];
+    if (tid >= uniforms.width * uniforms.height)
+    {
+        return;
+    }
+    const uint32_t medium = mediumPaths[tid].medium & MEDIUM_INDEX_MASK;
+    if (medium != 0u && (materials[medium - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
+    {
+        const uint32_t rank = simd_prefix_exclusive_sum(1u);
+        const uint32_t total = simd_sum(1u);
+        uint32_t base = 0u;
+        if (simd_is_first())
+        {
+            base = atomic_fetch_add_explicit(sssCounter, total, memory_order_relaxed);
+        }
+        base = simd_broadcast_first(base);
+        if (base < control[WF_CTRL_CAPACITY] && rank < control[WF_CTRL_CAPACITY] - base)
+        {
+            sssQueue[base + rank] = tid;
+        }
+    }
+}
+
+kernel void wavefrontPrepareSss(device uint32_t* sssControl [[buffer(0)]],
+                                constant uint32_t& threadsPerGroup [[buffer(1)]])
+{
+    const uint32_t n = sssControl[0];
+    sssControl[1] = n;
+    sssControl[2] = (n + threadsPerGroup - 1u) / threadsPerGroup;
+    sssControl[3] = 1u;
+    sssControl[4] = 1u;
+}
+
+template <typename T>
+static void sssWalkImpl(uint gid,
+                        constant Uniforms& uniforms,
+                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                        typename T::structure volumeAccelerationStructure,
+                        device PathRay* rays,
+                        device PathState* paths,
+                        device MediumPathState* mediumPaths,
+                        device const Material* materials,
+                        constant uint32_t& sampleIdx,
+                        device const uint32_t* sssQueue,
+                        device const uint32_t* sssControl,
+                        device char* hits,
+                        device uint32_t* hitQueue,
+                        device atomic_uint* hitCounter,
+                        device uint32_t* missQueue,
+                        device atomic_uint* missCounter,
+                        device uint32_t* queueOut,
+                        device atomic_uint* outCounter,
+                        device const uint32_t* control,
+                        uint32_t rayMask)
+{
+    if (gid >= sssControl[1])
+    {
+        return;
+    }
+    const uint32_t tid = sssQueue[gid];
+    if (tid >= uniforms.width * uniforms.height)
+    {
+        return;
+    }
+
+    MediumPathState mediumState = mediumPaths[tid];
+    const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
+    if (medium == 0u || (materials[medium - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+    {
+        return;
+    }
+
+    PathState p = paths[tid];
+    const PathRay pr = rays[tid];
+    float3 throughput = float3(p.throughput);
+    float3 rayOrigin = float3(pr.origin);
+    float3 rayDirection = float3(pr.direction);
+    uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
+    const uint32_t maxSteps = min(uniforms.subsurfaceIterations, (uint32_t)MEDIUM_MAX_STEPS);
+    const MediumProps mp = mediumPropsFor(uniforms, materials, medium - 1u, mediumState.mediumAlbedo);
+    const float anisotropy = materials[medium - 1u].subsurface_anisotropy;
+    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
+
+    for (uint32_t fusedStep = 0u; fusedStep < SSS_FUSED_STEPS; ++fusedStep)
+    {
+        if (step >= maxSteps)
+        {
+            return;
+        }
+        const uint32_t depth = pathDepth(p.depthAndFlags);
+        auditWork(uniforms, WORK_EXTEND_RAYS_BASE + min(depth, WORK_BOUNCE_SLOTS - 1u));
+        auditWork(uniforms, WORK_INTERSECTION_QUERIES);
+        auditWork(uniforms, WORK_EXTENSION_QUERIES);
+
+        const float3 channelPdf = sssChannelPdf(throughput, mp.albedo);
+        SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
+        float scatterDistance = 0.0f;
+        const bool sampledScatter =
+            sssSampleDistance(mp.sigmaT, channelPdf, uniforms.sceneExtent,
+                              random<SampleDimension::eSssChannel>(wrng, uniforms.samplerType),
+                              random<SampleDimension::eSssDistance>(wrng, uniforms.samplerType), scatterDistance);
+
+        ray sssRay;
+        sssRay.min_distance = 1e-6f;
+        sssRay.max_distance = sampledScatter ? max(scatterDistance, sssRay.min_distance + 1e-6f) : INFINITY;
+        sssRay.origin = rayOrigin;
+        sssRay.direction = rayDirection;
+
+        typename T::volume_isect volumeIsect;
+        volumeIsect.assume_geometry_type(geometry_type::triangle);
+        volumeIsect.force_opacity(forced_opacity::opaque);
+        volumeIsect.accept_any_intersection(false);
+        const typename T::volume_isect::result_type volumeHit =
+            T::traceVolume(volumeIsect, sssRay, volumeAccelerationStructure, rayMask & ~GEOMETRY_MASK_CURVE, motionTime);
+        const ExtendIntersection hit = captureExtendIntersection(volumeHit, 0.0f);
+        const float surfaceDistance = hit.type == intersection_type::none ? sssRay.max_distance : hit.distance;
+
+        if (!sampledScatter || (hit.type != intersection_type::none && scatterDistance >= surfaceDistance))
+        {
+            PathRay nextRay;
+            nextRay.origin = packed_float3(rayOrigin);
+            nextRay.direction = packed_float3(rayDirection);
+            rays[tid] = nextRay;
+            p.throughput = packed_float3(throughput);
+            paths[tid] = p;
+            mediumState.medium = medium | (step << MEDIUM_STEP_SHIFT);
+            mediumPaths[tid] = mediumState;
+            enqueueExtendSurfaceResult(
+                uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control);
+            return;
+        }
+
+        auditWork(uniforms, WORK_SHADE_ITEMS_BASE + min(depth, WORK_BOUNCE_SLOTS - 1u));
+        throughput *= sssScatterWeight(mp.sigmaT, mp.albedo, channelPdf, scatterDistance);
+        const float3 scatterPoint = rayOrigin + rayDirection * scatterDistance;
+        float phasePdf = 0.0f;
+        const float3 nextDirection =
+            hgSample(-rayDirection, anisotropy, random<SampleDimension::eSssPhaseU>(wrng, uniforms.samplerType),
+                     random<SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType), phasePdf);
+        const float survive = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05f, 1.0f);
+        if (random<SampleDimension::eRussianRoulette>(wrng, uniforms.samplerType) >= survive)
+        {
+            return;
+        }
+        throughput /= survive;
+        rayOrigin = scatterPoint;
+        rayDirection = nextDirection;
+        ++step;
+        p.lastBsdfPdf = phasePdf;
+        p.misDistance = 0.0f;
+        p.depthAndFlags =
+            depth | PATH_FLAG_ALIVE |
+            (p.depthAndFlags & ~(PATH_DEPTH_MASK | PATH_FLAG_ALIVE | PATH_FLAG_SPECULAR | PATH_FLAG_NEE_DONE));
+        auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+    }
+
+    PathRay nextRay;
+    nextRay.origin = packed_float3(rayOrigin);
+    nextRay.direction = packed_float3(rayDirection);
+    rays[tid] = nextRay;
+    p.throughput = packed_float3(throughput);
+    paths[tid] = p;
+    mediumState.medium = medium | (step << MEDIUM_STEP_SHIFT);
+    mediumPaths[tid] = mediumState;
+    queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+}
+
+#define WF_SSS_WALK_ENTRY(NAME, TRAITS)                                                                                \
+    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                  \
+                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],             \
+                     TRAITS::structure volumeAccelerationStructure [[buffer(2)]], device PathRay* rays [[buffer(3)]],  \
+                     device PathState* paths [[buffer(4)]], device MediumPathState* mediumPaths [[buffer(5)]],         \
+                     device const Material* materials [[buffer(6)]], constant uint32_t& sampleIdx [[buffer(7)]],       \
+                     device const uint32_t* sssQueue [[buffer(8)]], device const uint32_t* sssControl [[buffer(9)]],   \
+                     device char* hits [[buffer(10)]], device uint32_t* hitQueue [[buffer(11)]],                       \
+                     device atomic_uint* hitCounter [[buffer(12)]], device uint32_t* missQueue [[buffer(13)]],         \
+                     device atomic_uint* missCounter [[buffer(14)]], device uint32_t* queueOut [[buffer(15)]],         \
+                     device atomic_uint* outCounter [[buffer(16)]], device const uint32_t* control [[buffer(17)]],     \
+                     constant uint32_t& rayMask [[buffer(18)]])                                                        \
+    {                                                                                                                  \
+        sssWalkImpl<TRAITS>(gid, uniforms, instances, volumeAccelerationStructure, rays, paths, mediumPaths,           \
+                            materials, sampleIdx, sssQueue, sssControl, hits, hitQueue, hitCounter, missQueue,         \
+                            missCounter, queueOut, outCounter, control, rayMask);                                      \
+    }
+
+WF_SSS_WALK_ENTRY(wavefrontSssWalk, MotionTraversal)
+WF_SSS_WALK_ENTRY(wavefrontSssWalkStatic, StaticTraversal)
+
 template <typename T>
 static void extendImpl(uint gid,
                        constant Uniforms& uniforms,
@@ -814,6 +1050,14 @@ static void extendImpl(uint gid,
     if (tid >= uniforms.width * uniforms.height)
     {
         return;
+    }
+    if (SPEC_SSS && !SPEC_SHARC_UPDATE)
+    {
+        const uint32_t medium = mediumPaths[tid].medium & MEDIUM_INDEX_MASK;
+        if (medium != 0u && (materials[medium - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
+        {
+            return;
+        }
     }
     const PathRay pr = rays[tid];
 
@@ -949,29 +1193,8 @@ static void extendImpl(uint gid,
         return;
     }
 
-    if (hit.type == intersection_type::none)
-    {
-        queuePush(uniforms, missCounter, missQueue, tid, control[WF_CTRL_CAPACITY]);
-        return;
-    }
-
-    const auto inst = instances[hit.instanceId];
-    const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN);
-    // For emissive geometry userID indexes the light table, not the geometry
-    // table; the flag bit tells `shade` which one it is.
-    HitRecord rec;
-    rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID) : (inst.userID + hit.geometryId);
-    rec.instanceIndex = hit.instanceId;
-    rec.primitiveId = hit.primitiveId;
-    // A curve hit has no barycentrics; what it has is one parameter along the
-    // segment. It rides in the same two floats rather than in a field of its own,
-    // because `shade` already has to read the geometry entry to find the
-    // material and the entry says which kind of primitive this is.
-    rec.barycentrics =
-        (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
-    rec.distance = hit.distance;
-    *wavefrontHitRecord(hits, tid) = rec;
-    queuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
+    enqueueExtendSurfaceResult(
+        uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control);
 }
 
 
@@ -4765,7 +4988,8 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
                              constant uint32_t& traversalBatchThreads [[buffer(10)]],
                              constant uint32_t& traversalBatchCount [[buffer(11)]],
                              device const MediumPathState* mediumPaths [[buffer(12)]],
-                             constant uint32_t& diagnosticsMediumEnabled [[buffer(13)]])
+                             constant uint32_t& diagnosticsMediumEnabled [[buffer(13)]],
+                             device uint32_t* sssControl [[buffer(14)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = min(control[srcIdx], control[WF_CTRL_CAPACITY]);
@@ -4816,6 +5040,7 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_SHADOW] = 0u;
     control[WF_CTRL_HIT] = 0u;
     control[WF_CTRL_MISS] = 0u;
+    sssControl[0] = 0u;
 }
 
 // Between `extend` and the two stages that consume its classification.

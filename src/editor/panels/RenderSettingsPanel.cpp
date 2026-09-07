@@ -722,15 +722,15 @@ void EditorApp::drawRenderSettingsPanel()
                 }
 
                 auto subsurfaceIterations = m_settingsManager->getAs<uint32_t>("render/pt/subsurfaceIterations");
-                if (ImGui::SliderInt("Extra SSS iterations", (int*)&subsurfaceIterations, 0, 256))
+                if (ImGui::SliderInt("SSS walk iterations", (int*)&subsurfaceIterations, 0, 256))
                 {
                     m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", subsurfaceIterations);
                 }
                 if (ImGui::IsItemHovered())
                 {
                     ImGui::SetTooltip(
-                        "Additional wavefront steps reserved for subsurface random walks.\n"
-                        "Dense, nearly white SSS can use most of them. Preview defaults to 16;\n"
+                        "Maximum scattering events in one dense subsurface random walk.\n"
+                        "Nearly white SSS can use most of them. Preview defaults to 16;\n"
                         "raise this for final-quality close-ups of thick translucent materials.");
                 }
 
@@ -769,6 +769,90 @@ void EditorApp::drawRenderSettingsPanel()
                         m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", sppTotal);
                     }
                 }
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Advanced"))
+        {
+            ImGui::SeparatorText("Direct lighting");
+
+            struct RisPreset
+            {
+                const char* label;
+                uint32_t candidates;
+            };
+            static constexpr RisPreset risPresets[] = {
+                { "Fast — 1 candidate", 1u },
+                { "Balanced — 2 candidates", 2u },
+                { "Quality — 4 candidates", 4u },
+                { "Experimental — 8 candidates", 8u },
+            };
+
+            const uint32_t candidates = std::max(m_settingsManager->getAs<uint32_t>("render/pt/risCandidates"), 1u);
+            int selectedPreset = -1;
+            for (int n = 0; n < IM_ARRAYSIZE(risPresets); ++n)
+            {
+                if (risPresets[n].candidates == candidates)
+                {
+                    selectedPreset = n;
+                    break;
+                }
+            }
+
+            std::string customLabel;
+            const char* previewLabel = nullptr;
+            if (selectedPreset >= 0)
+            {
+                previewLabel = risPresets[selectedPreset].label;
+            }
+            else
+            {
+                customLabel = fmt::format("Custom — {} candidates", candidates);
+                previewLabel = customLabel.c_str();
+            }
+
+            const bool restirEnabled = m_settingsManager->getAs<bool>("render/pt/restirDIEnabled");
+            ImGui::BeginDisabled(restirEnabled);
+            if (ImGui::BeginCombo("RIS candidates", previewLabel))
+            {
+                for (int n = 0; n < IM_ARRAYSIZE(risPresets); ++n)
+                {
+                    const bool isSelected = selectedPreset == n;
+                    if (ImGui::Selectable(risPresets[n].label, isSelected))
+                    {
+                        m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", risPresets[n].candidates);
+                    }
+                    if (isSelected)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndDisabled();
+
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                if (restirEnabled)
+                {
+                    ImGui::SetTooltip(
+                        "Disabled while ReSTIR DI is enabled.\n"
+                        "The primary bounce uses ReSTIR's Initial candidates;\n"
+                        "secondary bounces always use one candidate.");
+                }
+                else
+                {
+                    ImGui::SetTooltip(
+                        "Light proposals evaluated at each ordinary surface hit.\n"
+                        "Only the selected candidate traces a visibility ray.\n"
+                        "Higher values improve fixed-SPP quality but cost more per sample.");
+                }
+            }
+            if (restirEnabled)
+            {
+                ImGui::TextDisabled("Controlled by ReSTIR DI while it is enabled");
             }
 
             ImGui::EndTabItem();

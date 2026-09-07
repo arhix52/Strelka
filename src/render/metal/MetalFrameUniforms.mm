@@ -150,6 +150,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod");
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
+    pUniformData->subsurfaceIterations =
+        std::min(settings.getAs<uint32_t>("render/pt/subsurfaceIterations"), (uint32_t)MEDIUM_MAX_STEPS);
     pUniformData->debug = debug;
     // Denoiser guides. Off unless something downstream consumes them: writing
     // them costs a 64-byte store per pixel at the primary hit.
@@ -499,8 +501,10 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     settingsChanged |= (mPrevSettings.anamorphicRatio != pUniformData->anamorphicRatio);
     settingsChanged |= (mPrevSettings.shiftX != pUniformData->shiftX) || (mPrevSettings.shiftY != pUniformData->shiftY);
     settingsChanged |= (mPrevSettings.maxDepth != maxDepth);
+    settingsChanged |= (mPrevSettings.subsurfaceIterations != pUniformData->subsurfaceIterations);
     settingsChanged |= (mPrevSettings.debug != debug);
     settingsChanged |= (mPrevSettings.clampIndirect != pUniformData->clampIndirect);
+    settingsChanged |= (mPrevSettings.risCandidates != pUniformData->risCandidates);
     settingsChanged |= (mPrevSettings.restirDIEnabled != pUniformData->restirDIEnabled);
     settingsChanged |= (mPrevSettings.initialCandidateCount != pUniformData->initialCandidateCount);
     settingsChanged |= (mPrevSettings.temporalReuseEnabled != pUniformData->temporalReuseEnabled);
@@ -534,8 +538,10 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     mPrevSettings.shiftX = pUniformData->shiftX;
     mPrevSettings.shiftY = pUniformData->shiftY;
     mPrevSettings.maxDepth = maxDepth;
+    mPrevSettings.subsurfaceIterations = pUniformData->subsurfaceIterations;
     mPrevSettings.debug = debug;
     mPrevSettings.clampIndirect = pUniformData->clampIndirect;
+    mPrevSettings.risCandidates = pUniformData->risCandidates;
     mPrevSettings.restirDIEnabled = pUniformData->restirDIEnabled;
     mPrevSettings.initialCandidateCount = pUniformData->initialCandidateCount;
     mPrevSettings.temporalReuseEnabled = pUniformData->temporalReuseEnabled;
