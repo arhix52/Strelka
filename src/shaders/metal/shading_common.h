@@ -962,8 +962,12 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
         // geometry normal to orient against, so it departs from where it is.
         c.origin = volumeEvent ? si.position :
                                  offset_ray(si.position, orientedFaceNormal(si.geometry_normal, lightSampleData.L));
-        c.pdf = getLightPdf(light, lightSampleData.pointOnLight, si.position, uniforms.rectLightSamplingMethod,
-                            localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
+        // State the density from the sample just taken. getLightPdf() belongs
+        // to the complementary BSDF-hit path; calling it here repeated
+        // fillLightData() (a full ellipsoid intersection for a sphere) and
+        // rectSolidAngle().
+        const LightPdfQuery query = buildLightPdfQuery(light, lightSampleData);
+        c.pdf = marginalLightSolidAnglePdf(query, localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
         c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
         if (lightUsesAnalyticSurfaceIntersection(light.type, lightIsPunctual(light.type) ? light.points[0].x : 0.0f))

@@ -1792,8 +1792,7 @@ static RestirEvaluation evaluateRestirConnection(thread const LightConnection& c
     // A fibre has no back side to reject, and neither does a leaf: see
     // neeCrossesSurface().
     if (!connection.needsRay || !(connection.pdf > 0.0f) ||
-        !neeProposesDirection(neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission),
-                              neeFrame.frontFace,
+        !neeProposesDirection(neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission), neeFrame.frontFace,
                               neeFrame.normalSign * dot(connection.toLight, si.shading_normal)))
     {
         return result;
@@ -2393,10 +2392,23 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     {
         const uint32_t lightId = rec.geomEntryIndex & ~HIT_LIGHT_BIT;
         device const UniformLight& currLight = lights[lightId];
-        const AnalyticLightIntersection analyticSurfaceHit = intersectAnalyticLightSurface(
-            currLight.type, float3(currLight.points[0]), float3(currLight.points[1]), float3(currLight.points[2]),
-            float3(currLight.points[3]), float3(currLight.normal), rayOrigin, rayDir, 0.0f, 3.402823466e38f);
-        const float3 hitPoint = analyticSurfaceHit.hit ? analyticSurfaceHit.point : rayOrigin + rayDir * rec.distance;
+        // Traversal already decided the nearest surface and returned its
+        // distance. Reconstruct the point and only evaluate normal/PDF; running
+        // the full ray/surface intersection here made the same decision twice.
+        const float3 hitPoint = rayOrigin + rayDir * rec.distance;
+        float3 lightNormal;
+        float lightAreaPdf;
+        if (currLight.type == LIGHT_TYPE_SPHERE)
+        {
+            lightAreaPdf = analyticEllipsoidAreaPdfUnchecked(float3(currLight.points[1]), float3(currLight.points[0]),
+                                                             float3(currLight.points[2]), float3(currLight.points[3]),
+                                                             hitPoint, lightNormal);
+        }
+        else
+        {
+            lightNormal = calcLightNormal(currLight, hitPoint);
+            lightAreaPdf = calcLightAreaPdf(currLight, hitPoint);
+        }
         // A light's geometry is still a surface the denoiser has to reconstruct.
         // Its emission is unaffected by denoising, so it gets a black albedo and
         // its own geometry, which keeps the guides continuous across the edge.
@@ -2446,8 +2458,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         {
             aov[tid].specularHitDistance += rec.distance;
         }
-        const float3 lightNormal =
-            analyticSurfaceHit.hit ? analyticSurfaceHit.normal : calcLightNormal(currLight, hitPoint);
         // An emitter is a surface with a grid address like any other, so the
         // single-hit diagnostics answer here as well. Left to the branch below,
         // its emission -- orders of magnitude above any debug colour -- would
@@ -2494,10 +2504,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const float analyticClassPdf =
                     uniforms.numEmissiveMeshes > 0u ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
                 const float lightIdentityPdf = analyticLightSelectionPdf(currLight);
-                const float areaPdf =
-                    analyticSurfaceHit.hit ? analyticSurfaceHit.areaPdf : calcLightAreaPdf(currLight, hitPoint);
                 const float lightPdf = areaPdfToSolidAngleMarginalPdf(
-                    hitDistance, lightCosine, areaPdf, localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f);
+                    hitDistance, lightCosine, lightAreaPdf, localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f);
                 const float mis = computeMisWeight(p.lastBsdfPdf, lightPdf, uniforms.misHeuristic);
                 weightedLe = Le * mis;
             }
