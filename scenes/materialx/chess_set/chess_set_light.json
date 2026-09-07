@@ -3,6 +3,6 @@
         "texture": "env.hdr",
         "intensity": 1.0,
         "color": [1.0, 1.0, 1.0],
-        "rotation": 0.0
+        "rotation": 180.0
     }
 }

@@ -1,0 +1,43 @@
+# The reference frame the Open Chess Set is published with
+# (documents/Images/OpenChessSet_Karma_01.png): a macro shot from the black
+# side, the black king centred and everything past it thrown out of focus.
+#
+# Not chess_set.toml's three-quarter view, which is the one that shows the whole
+# board; this one exists to be compared against that published image.
+
+[scene]
+path = "chess_set.glb"
+
+[output]
+path = "output/chess_set_hero.exr"
+width = 1920
+height = 1080
+
+# High, because the frame is nearly all out-of-focus lens blur over an
+# environment with a sun in it: every pixel averages the whole aperture, and the
+# specular fireflies off the roughness maps take samples to settle.
+[render]
+spp = 1024
+spp_per_launch = 1
+max_depth = 12
+sampler = "sobol"
+
+# Behind the black back row at piece height, looking along the board's centre
+# file at the black king (its top sits at y = 0.152, z = 0.22). A 22 deg lens,
+# because the reference is a long one: a wide angle at this distance bends the
+# pieces outward and shows the whole board, which is what the other toml does.
+[camera]
+position = [-0.03, 0.115, 0.45]
+target = [-0.031, 0.145, 0.22]
+fov = 22.0
+# Focus on the king, not on the board's centre: at 100 mm and f/2.8 the depth of
+# field here is a few millimetres, so what is focused is the whole composition.
+focal_distance = 0.235
+fstop = 2.8
+focal_length_mm = 100.0
+
+[tonemap]
+type = "aces"
+exposure_iso = 100.0
+exposure_fstop = 2.8
+exposure_shutter = 0.02
