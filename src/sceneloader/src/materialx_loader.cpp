@@ -1256,6 +1256,20 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
             out.params.uv_offset_y = placement.offsetY;
         }
 
+        // A mapped subsurface weight leaves the constant at zero, and the
+        // constant is not only a default: the wavefront tracer's `extend` stage
+        // has a medium id and no UV, so it derives the interior volume from this
+        // block alone. At weight zero that volume is *no medium* -- zero
+        // extinction -- and the random walk then crosses the object in one
+        // straight line and leaves at full throughput, which is what rendered
+        // the Open Chess Set's kings white instead of dark marble. Where the map
+        // reads zero no walk starts in the first place, so saying "there is a
+        // medium here" costs nothing and is what the document means.
+        if (!out.texPaths[OPENPBR_TEX_SUBSURFACE_WEIGHT].empty() && out.params.subsurface_weight <= 0.0f)
+        {
+            out.params.subsurface_weight = 1.0f;
+        }
+
         if (category == "standard_surface")
         {
             if (sawRadius || sawScale)

@@ -130,3 +130,68 @@ TEST_CASE("scatter anisotropy reaches the phase function")
     p.subsurface_scatter_anisotropy = 0.6f;
     CHECK(openpbr_interior_volume(p).anisotropy == doctest::Approx(0.6f));
 }
+
+TEST_CASE("a dark subsurface colour makes a dark medium")
+{
+    // The Open Chess Set's pieces are dark green marble driven from a map, and
+    // they rendered white. This pins the half of that path that is testable on
+    // the CPU: the mapping from an authored colour to a single-scattering albedo
+    // is monotonic and goes to zero, so a medium that comes out bright from a
+    // dark colour is not this function's doing.
+    auto albedoFor = [](float c) {
+        OpenPBRParams p = openpbr_make_default_params();
+        p.subsurface_weight = 1.0f;
+        // The chess set's own scale, and a radius tint as dark as its marble.
+        p.subsurface_radius = 0.003f;
+        p.subsurface_radius_scale = OpenPBRColor{ c, c, c };
+        p.subsurface_color = OpenPBRColor{ c, c, c };
+        return openpbr_interior_volume(p).albedo.x;
+    };
+
+    CHECK(albedoFor(0.0f) < 1e-3f);
+    CHECK(albedoFor(0.05f) < 0.3f);
+    CHECK(albedoFor(0.05f) < albedoFor(0.2f));
+    CHECK(albedoFor(0.2f) < albedoFor(0.8f));
+    // Marble at 0.8 is the case the walk is for: nearly every extinction event
+    // scatters rather than absorbs.
+    CHECK(albedoFor(0.8f) > 0.9f);
+}
+
+TEST_CASE("the subsurface entry lobe carries no colour of its own")
+{
+    // The contract between the BSDF and the integrator, and the reason the
+    // medium's albedo is not optional: at subsurface_weight 1 the surface hands
+    // the path on colourless and almost always into the interior. Whatever the
+    // walk does not apply is simply lost -- a dark marble comes back white.
+    SurfaceInteraction si = {};
+    si.shading_normal = make_float3(0.0f, 0.0f, 1.0f);
+    si.geometry_normal = si.shading_normal;
+    si.tangent = make_float3(1.0f, 0.0f, 0.0f);
+    si.bitangent = make_float3(0.0f, 1.0f, 0.0f);
+    si.wo = normalize(make_float3(0.3f, 0.0f, 1.0f));
+    si.front_face = true;
+    si.ior = 1.5f;
+    si.exterior_ior = 1.0f;
+
+    auto prepareFor = [&](float c) {
+        OpenPBRParams p = openpbr_make_default_params();
+        p.subsurface_weight = 1.0f;
+        p.subsurface_radius = 0.003f;
+        p.subsurface_color = OpenPBRColor{ c, c, c };
+        p.subsurface_radius_scale = OpenPBRColor{ c, c, c };
+        p.base_color = OpenPBRColor{ c, c, c };
+        return openpbr_prepare_at(p, si, make_float3(1.0f, 1.0f, 1.0f));
+    };
+
+    const OpenPBR_PreparedBsdf dark = prepareFor(0.05f);
+    const OpenPBR_PreparedBsdf light = prepareFor(1.0f);
+
+    const float4 xi = make_float4(0.3f, 0.4f, 0.5f, 0.6f);
+    const BsdfSampleResult sDark = openpbr_bsdf_sample(dark, xi);
+    const BsdfSampleResult sLight = openpbr_bsdf_sample(light, xi);
+
+    CHECK((sDark.event_type & BSDF_EVENT_TRANSMISSION) != 0u);
+    CHECK(sDark.event_type == sLight.event_type);
+    CHECK(sDark.bsdf_over_pdf.x == doctest::Approx(sLight.bsdf_over_pdf.x));
+    CHECK(sDark.bsdf_over_pdf.x == doctest::Approx(1.0f).epsilon(0.01f));
+}

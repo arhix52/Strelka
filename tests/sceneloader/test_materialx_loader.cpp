@@ -144,3 +144,27 @@ TEST_CASE("a look-assigned material carries its subsurface block into the scene"
     CHECK_FALSE(it->openpbrTexPaths[OPENPBR_TEX_SUBSURFACE_RADIUS].empty());
     CHECK(std::filesystem::exists(it->openpbrTexPaths[OPENPBR_TEX_SUBSURFACE_COLOR]));
 }
+
+TEST_CASE("a mapped subsurface weight still says there is a medium")
+{
+    const oka::mtlx::MaterialXDocumentData doc = oka::mtlx::loadMaterialXDocument(chessDocument());
+    const oka::mtlx::MaterialXMaterial* king = find(doc.materials, "M_King_B");
+    REQUIRE(king != nullptr);
+
+    // The document drives `subsurface` from king_shared_scattering.jpg, so the
+    // constant would otherwise stay at zero -- and the wavefront tracer's
+    // `extend` stage, which has no UV to sample that map with, derives the
+    // interior volume from the constant alone. Zero there is not a default but a
+    // statement that the object encloses nothing: the walk crossed the piece in
+    // one unscattered line and left at full throughput, which is what rendered
+    // the kings white.
+    REQUIRE_FALSE(king->texPaths[OPENPBR_TEX_SUBSURFACE_WEIGHT].empty());
+    CHECK(king->params.subsurface_weight == doctest::Approx(1.0f));
+
+    // Not applied where no map drives the input: a bishop states subsurface = 0
+    // and means it.
+    const oka::mtlx::MaterialXMaterial* bishop = find(doc.materials, "M_Bishop_B");
+    REQUIRE(bishop != nullptr);
+    CHECK(bishop->texPaths[OPENPBR_TEX_SUBSURFACE_WEIGHT].empty());
+    CHECK(bishop->params.subsurface_weight == doctest::Approx(0.0f));
+}
