@@ -936,7 +936,7 @@ static void extendImpl(uint gid,
 
     // Escaped rays skip shade and go to miss. Fog/SSS are decided here
     // because only extend knows whether a surface precedes the medium event.
-    if (mediumHitBit != 0u && mediumScatterT < surfaceDistance)
+    if (mediumHitBit != 0u && (hit.type == intersection_type::none || mediumScatterT < surfaceDistance))
     {
         HitRecord mediumRec;
         mediumRec.geomEntryIndex = mediumHitBit;

@@ -721,6 +721,18 @@ void EditorApp::drawRenderSettingsPanel()
                     m_settingsManager->setAs<uint32_t>("render/pt/depth", maxDepth);
                 }
 
+                auto subsurfaceIterations = m_settingsManager->getAs<uint32_t>("render/pt/subsurfaceIterations");
+                if (ImGui::SliderInt("Extra SSS iterations", (int*)&subsurfaceIterations, 0, 256))
+                {
+                    m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", subsurfaceIterations);
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Additional wavefront steps reserved for subsurface random walks.\n"
+                        "Dense, nearly white SSS can use most of them. Preview defaults to 16;\n"
+                        "raise this for final-quality close-ups of thick translucent materials.");
+                }
 
                 auto sppSubframe = m_settingsManager->getAs<uint32_t>("render/pt/spp");
                 if (ImGui::SliderInt("SPP per frame", (int*)&sppSubframe, 1, 32))

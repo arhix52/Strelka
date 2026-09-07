@@ -650,7 +650,10 @@ void EditorApp::loadSettings()
     {
         m_settingsManager->setAs<uint32_t>("render/pt/profileStages", 1);
     }
-    m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", 64);
+    // Dense, nearly white SSS paths often consume the whole walk budget. Keep
+    // interactive frames responsive; the Quality panel can raise this when a
+    // close-up needs the longer tail. Headless/final rendering retains 64.
+    m_settingsManager->setAs<uint32_t>("render/pt/subsurfaceIterations", 16);
     // Four power-sampled candidates cut one-spp log error by 20% on kids room
     // and 5% on bathroom; eight has little left to win for twice the work.
     m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 4u);
