@@ -902,6 +902,7 @@ void MetalRender::init()
     static_assert(
         sizeof(SharcUpdateState) == 168, "SHARC update state is sparse and must stay ABI-compatible with Metal");
     static_assert(sizeof(ShadowRay) == 68, "ShadowRay host/Metal ABI changed");
+    static_assert(sizeof(CompactShadowRay) == 52, "CompactShadowRay host/Metal ABI changed");
     // 32 rather than 24: the hit now carries the TLAS instance, because a shared
     // BLAS belongs to no single one. One extra word per live path.
     static_assert(sizeof(HitRecord) == 32, "HitRecord size changed");
@@ -1943,11 +1944,15 @@ void MetalRender::render(Buffer* output)
             featureIn.hasSubsurface = mMaterials.hasSubsurfaceMaterials();
             featureIn.hasCurves = mGeometry.hasCurves();
             featureIn.hasOpenPBR = mMaterials.hasOpenPBRMaterials();
+            featureIn.allOpenPBR = mMaterials.allMaterialsOpenPBR() && !featureIn.hasCurves;
             featureIn.auditRenderWork = auditRenderWork;
             featureIn.restirRayTracedDiagnostic = pUniformData->restirBiasCorrection == 2u ||
                                                   pUniformData->restirInitialVisibility != 0u ||
                                                   (auditRenderWork && pUniformData->restirFinalVisibilityReuse != 0u);
             featureIn.restir = pUniformData->restirDIEnabled != 0u;
+            featureIn.risOne = pUniformData->risCandidates == 1u;
+            featureIn.writeAov = pUniformData->writeAov != 0u;
+            featureIn.samplerType = pUniformData->samplerType;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
 
             if (featureIn.restirRayTracedDiagnostic && (featureIn.enableMotionBlur || featureIn.motionBlasBuilt))

@@ -56,6 +56,36 @@ TEST_CASE("packWavefrontFeatures sets each independent flag")
     in = {};
     in.restir = true;
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kRestir));
+
+    in = {};
+    in.risOne = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kRisOne));
+
+    in = {};
+    in.writeAov = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAov));
+
+    in = {};
+    in.allOpenPBR = true;
+    const WavefrontFeatures allOpenPBR = packWavefrontFeatures(in);
+    CHECK(allOpenPBR.has(WavefrontFeatures::kAllOpenPBR));
+    CHECK(allOpenPBR.has(WavefrontFeatures::kOpenPBR));
+
+    in = {};
+    in.samplerType = 4u;
+    const uint32_t sampler =
+        (packWavefrontFeatures(in).bits() & WavefrontFeatures::kSamplerMask) >> WavefrontFeatures::kSamplerShift;
+    CHECK(sampler == 4u);
+}
+
+TEST_CASE("ReSTIR disables the plain one-candidate RIS specialization")
+{
+    IntegratorFeatureInputs in;
+    in.risOne = true;
+    in.restir = true;
+    const WavefrontFeatures features = packWavefrontFeatures(in);
+    CHECK_FALSE(features.has(WavefrontFeatures::kRisOne));
+    CHECK(features.has(WavefrontFeatures::kRestir));
 }
 
 TEST_CASE("packWavefrontFeatures motion blur needs enable and a mover")

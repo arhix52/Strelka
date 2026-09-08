@@ -37,6 +37,17 @@ public:
     static constexpr uint32_t kRenderWorkAudit = 1u << 13;
     static constexpr uint32_t kRestirRayTracedDiagnostic = 1u << 14;
     static constexpr uint32_t kRestir = 1u << 15;
+    // Plain NEE with one candidate has no reservoir to maintain. This bit lets
+    // the shader compile the generic RIS loop and its state out entirely.
+    static constexpr uint32_t kRisOne = 1u << 16;
+    // Primary denoiser/MetalFX guides are optional. A no-AOV render should not
+    // carry their large material and motion path through wavefrontShade.
+    static constexpr uint32_t kAov = 1u << 17;
+    // Stronger than kOpenPBR: every shadeable material uses OpenPBR, so the
+    // standard surface model can be deleted from the shader.
+    static constexpr uint32_t kAllOpenPBR = 1u << 18;
+    static constexpr uint32_t kSamplerShift = 19u;
+    static constexpr uint32_t kSamplerMask = 7u << kSamplerShift;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -90,6 +101,10 @@ struct IntegratorFeatureInputs
     bool auditRenderWork = false;
     bool restirRayTracedDiagnostic = false;
     bool restir = false;
+    bool risOne = false;
+    bool writeAov = false;
+    bool allOpenPBR = false;
+    uint32_t samplerType = 0u;
 };
 
 inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in)
@@ -125,6 +140,13 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kRestirRayTracedDiagnostic;
     if (in.restir)
         features |= WavefrontFeatures::kRestir;
+    if (in.risOne && !in.restir)
+        features |= WavefrontFeatures::kRisOne;
+    if (in.writeAov)
+        features |= WavefrontFeatures::kAov;
+    if (in.allOpenPBR)
+        features |= WavefrontFeatures::kAllOpenPBR | WavefrontFeatures::kOpenPBR;
+    features |= (in.samplerType & 7u) << WavefrontFeatures::kSamplerShift;
     return WavefrontFeatures(features);
 }
 

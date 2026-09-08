@@ -50,6 +50,9 @@ constant bool kFcOpenPBR [[function_constant(11)]];
 constant bool kFcRenderWorkAudit [[function_constant(12)]];
 constant bool kFcRestirRayTracedDiagnostic [[function_constant(13)]];
 constant bool kFcRestir [[function_constant(14)]];
+constant bool kFcRisOne [[function_constant(15)]];
+constant bool kFcAov [[function_constant(16)]];
+constant bool kFcAllOpenPBR [[function_constant(17)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -81,6 +84,9 @@ constant bool SPEC_RENDER_WORK_AUDIT = is_function_constant_defined(kFcRenderWor
 constant bool SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC =
     is_function_constant_defined(kFcRestirRayTracedDiagnostic) ? kFcRestirRayTracedDiagnostic : false;
 constant bool SPEC_RESTIR = is_function_constant_defined(kFcRestir) ? kFcRestir : false;
+constant bool SPEC_RIS_ONE = is_function_constant_defined(kFcRisOne) ? kFcRisOne : false;
+constant bool SPEC_AOV = is_function_constant_defined(kFcAov) ? kFcAov : true;
+constant bool SPEC_ALL_OPENPBR = is_function_constant_defined(kFcAllOpenPBR) ? kFcAllOpenPBR : false;
 
 __attribute__((always_inline)) float3 transformDirection(float3 p, float4x4 transform)
 {
@@ -1107,7 +1113,8 @@ static float3 emissiveMeshRadiance(constant Uniforms& uniforms,
                                    uint32_t materialId,
                                    float2 uv)
 {
-    if (SPEC_OPENPBR && material.material_type == MATERIAL_TYPE_OPENPBR && uniforms.openpbrParams != nullptr)
+    if ((SPEC_ALL_OPENPBR || (SPEC_OPENPBR && material.material_type == MATERIAL_TYPE_OPENPBR)) &&
+        uniforms.openpbrParams != nullptr)
     {
         device const OpenPBRParams& p = uniforms.openpbrParams[materialId];
         float3 emission = float3(p.emission_color.r, p.emission_color.g, p.emission_color.b);

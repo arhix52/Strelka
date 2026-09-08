@@ -660,11 +660,11 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(MTL::Lib
     if (!mCompiler || !library)
         return nullptr;
     NS::Error* error = nullptr;
-    auto describe = [&](const char* name) -> MTL4::FunctionDescriptor* {
+    auto describe = [&](const char* name, bool specialize) -> MTL4::FunctionDescriptor* {
         auto* function = MTL4::LibraryFunctionDescriptor::alloc()->init();
         function->setLibrary(library);
         function->setName(NS::String::string(name, NS::UTF8StringEncoding));
-        if (!constants)
+        if (!specialize || !constants)
             return function;
         auto* specialized = MTL4::SpecializedFunctionDescriptor::alloc()->init();
         specialized->setFunctionDescriptor(function);
@@ -673,9 +673,12 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(MTL::Lib
         return specialized;
     };
 
-    MTL4::FunctionDescriptor* compute = describe(functionName);
-    MTL4::FunctionDescriptor* linked0 = describe(linkedFunctionName0);
-    MTL4::FunctionDescriptor* linked1 = describe(linkedFunctionName1);
+    MTL4::FunctionDescriptor* compute = describe(functionName, true);
+    // The intersection wrappers do not read function constants. Specialising
+    // each one makes Xcode's replayer emit the same AIR module twice and reject
+    // the pipeline with a duplicate-symbol error.
+    MTL4::FunctionDescriptor* linked0 = describe(linkedFunctionName0, false);
+    MTL4::FunctionDescriptor* linked1 = describe(linkedFunctionName1, false);
     auto* pipelineDescriptor = MTL4::ComputePipelineDescriptor::alloc()->init();
     pipelineDescriptor->setComputeFunctionDescriptor(compute);
     const NS::Object* functions[] = { linked0, linked1 };

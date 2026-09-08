@@ -87,6 +87,10 @@ public:
     {
         return mSceneHasOpenPBRMaterials;
     }
+    bool allMaterialsOpenPBR() const
+    {
+        return mSceneAllOpenPBRMaterials;
+    }
     bool hasAlphaMaterials() const
     {
         return mSceneHasAlphaMaterials;
@@ -117,6 +121,7 @@ private:
     MTL::Buffer* mOpenPBRBuffer = nullptr;
     MTL::Buffer* mOpenPBRTexBuffer = nullptr;
     bool mSceneHasOpenPBRMaterials = false;
+    bool mSceneAllOpenPBRMaterials = false;
     bool mSceneHasAlphaMaterials = false;
     bool mSceneHasBoundedMedium = false;
     bool mSceneHasSubsurfaceMaterials = false;
@@ -127,4 +132,3 @@ private:
 };
 
 } // namespace oka::metal
-

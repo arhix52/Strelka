@@ -1716,6 +1716,14 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&restirRayTracedDiagnostic, MTL::DataTypeBool, (NS::UInteger)13);
     const bool restir = (features & WavefrontFeatures::kRestir) != 0;
     values->setConstantValue(&restir, MTL::DataTypeBool, (NS::UInteger)14);
+    const bool risOne = (features & WavefrontFeatures::kRisOne) != 0;
+    values->setConstantValue(&risOne, MTL::DataTypeBool, (NS::UInteger)15);
+    const bool aov = (features & WavefrontFeatures::kAov) != 0;
+    values->setConstantValue(&aov, MTL::DataTypeBool, (NS::UInteger)16);
+    const bool allOpenPBR = (features & WavefrontFeatures::kAllOpenPBR) != 0;
+    values->setConstantValue(&allOpenPBR, MTL::DataTypeBool, (NS::UInteger)17);
+    const uint32_t samplerType = (features & WavefrontFeatures::kSamplerMask) >> WavefrontFeatures::kSamplerShift;
+    values->setConstantValue(&samplerType, MTL::DataTypeUInt, (NS::UInteger)18);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
@@ -1741,11 +1749,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         return pso;
     };
 
-    auto makeTraversal = [&](const std::string& name, bool motion,
+    auto makeTraversal = [&](const std::string& name, const char* intersectionFamily, bool motion,
                              MTL::IntersectionFunctionTable*& table) -> MTL::ComputePipelineState* {
         const std::string suffix = std::string(motion ? "Motion" : "") + (curves ? "Curve" : "");
-        const std::string sphereName = "analyticSphereIntersection" + suffix;
-        const std::string discName = "analyticDiscIntersection" + suffix;
+        const std::string sphereName = std::string("analyticSphereIntersection") + intersectionFamily + suffix;
+        const std::string discName = std::string("analyticDiscIntersection") + intersectionFamily + suffix;
         MTL::Function* sphere = nullptr;
         MTL::Function* disc = nullptr;
         MTL::ComputePipelineState* pso = nullptr;
@@ -1815,23 +1823,25 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
 
     WavefrontVariant v;
     v.generate = make("wavefrontGenerate");
-    v.extendMotion = makeTraversal(entry("wavefrontExtend"), true, v.extendTableMotion);
-    v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), false, v.extendTableStatic);
+    v.extendMotion = makeTraversal(entry("wavefrontExtend"), "Extend", true, v.extendTableMotion);
+    v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), "Extend", false, v.extendTableStatic);
     if (subsurface && !sharcUpdate)
     {
         v.sssWalkMotion = make("wavefrontSssWalk");
         v.sssWalkStatic = make("wavefrontSssWalkStatic");
     }
-    v.shade = restirRayTracedDiagnostic ? makeTraversal("wavefrontShade", false, v.restirShadeDiagnosticTable) :
-                                          make("wavefrontShade");
+    v.shade = restirRayTracedDiagnostic ?
+                  makeTraversal("wavefrontShade", "RestirShadeDiagnostic", false, v.restirShadeDiagnosticTable) :
+                  make("wavefrontShade");
     v.restirSpatialFinal = restirRayTracedDiagnostic ?
-                               makeTraversal("wavefrontRestirSpatialFinal", false, v.restirSpatialDiagnosticTable) :
+                               makeTraversal("wavefrontRestirSpatialFinal", "RestirSpatialDiagnostic", false,
+                                             v.restirSpatialDiagnosticTable) :
                                make("wavefrontRestirSpatialFinal");
     v.miss = make("wavefrontMiss");
-    v.shadowMotion = makeTraversal(entry("wavefrontShadow"), true, v.shadowTableMotion);
-    v.shadowStatic = makeTraversal(entry("wavefrontShadowStatic"), false, v.shadowTableStatic);
-    v.guideMotion = makeTraversal(entry("wavefrontGuide"), true, v.guideTableMotion);
-    v.guideStatic = makeTraversal(entry("wavefrontGuideStatic"), false, v.guideTableStatic);
+    v.shadowMotion = makeTraversal(entry("wavefrontShadow"), "Shadow", true, v.shadowTableMotion);
+    v.shadowStatic = makeTraversal(entry("wavefrontShadowStatic"), "Shadow", false, v.shadowTableStatic);
+    v.guideMotion = makeTraversal(entry("wavefrontGuide"), "Guide", true, v.guideTableMotion);
+    v.guideStatic = makeTraversal(entry("wavefrontGuideStatic"), "Guide", false, v.guideTableStatic);
 
     values->release();
     mResidencyDirty = true;
@@ -1842,8 +1852,9 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     }
     STRELKA_INFO(
         "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
-        "curves={} sharcUpdate={} openpbr={} metal4={}",
-        envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, useMetal4);
+        "curves={} sharcUpdate={} openpbr={} allOpenpbr={} risOne={} aov={} sampler={} metal4={}",
+        envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, allOpenPBR,
+        risOne, aov, samplerType, useMetal4);
     // maxTotalThreadsPerThreadgroup is Metal's available proxy for per-pipeline register pressure.
     auto tgLimit = [](MTL::ComputePipelineState* p) -> uint32_t {
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;

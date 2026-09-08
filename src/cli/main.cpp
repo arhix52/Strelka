@@ -47,7 +47,7 @@ int main(int argc, const char* argv[])
                                                             cxxopts::value<float>())
         ("clamp",        "Clamp each indirect path's contribution (0 = off)",
                                                             cxxopts::value<float>())
-        ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid", cxxopts::value<std::string>())
+        ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid, sobol_notable", cxxopts::value<std::string>())
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
         ("restir-di",    "Enable ReSTIR DI",                 cxxopts::value<bool>()->implicit_value("true"))
         ("restir-candidates", "ReSTIR initial candidates",   cxxopts::value<uint32_t>())

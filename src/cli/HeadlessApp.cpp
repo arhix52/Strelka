@@ -72,7 +72,12 @@ uint32_t parseSamplerName(const std::string& name)
     {
         return 4;
     }
-    throw std::invalid_argument("Unknown sampler: " + name + " (halton|pcg|sobol|sobol_bn|hybrid)");
+    // Owen-scrambled van der Corput without the direction-number table (ablation)
+    if (name == "sobol_notable" || name == "sobol-notable")
+    {
+        return 5;
+    }
+    throw std::invalid_argument("Unknown sampler: " + name + " (halton|pcg|sobol|sobol_bn|hybrid|sobol_notable)");
 }
 
 uint32_t parseTonemapName(const std::string& name)

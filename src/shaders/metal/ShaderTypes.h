@@ -154,7 +154,8 @@ struct Uniforms
     // VOLUME_MODEL_GLTF or VOLUME_MODEL_CYCLES; see volume.h for why this is a
     // setting rather than a constant.
     uint32_t volumeModel;
-    // 0 - Halton, 1 - PCG, 2 - Sobol (Owen), 3 - Sobol + blue noise, 4 - hybrid
+    // 0 - Halton, 1 - PCG, 2 - Sobol (Owen), 3 - Sobol + blue noise, 4 - hybrid,
+    // 5 - Owen + VDC without sb_matrix (ablation)
     uint32_t samplerType;
     /// Sample count at which sampler 4 hands the frame from the blue-noise
     /// sequence to the per-pixel scrambled one.
@@ -769,9 +770,9 @@ struct SharcUpdateState
 /// alone terminates slowly, and a path that never ends is a hang rather than a
 /// dim pixel.
 #define MEDIUM_MAX_STEPS 256u
-/// Dense SSS steps kept in registers by one traversal invocation. Four cuts
+/// Dense SSS steps kept in registers by one traversal invocation. Eight cuts
 /// queue traffic without serializing enough ray queries to hurt occupancy.
-#define SSS_FUSED_STEPS 4u
+#define SSS_FUSED_STEPS 8u
 
 #define SHARC_NO_ENTRY 0xFFFFFFFFu
 
@@ -975,6 +976,21 @@ struct ShadowRay
     packed_float3 sharcRadiance;
     uint32_t sharcPathIndex;
 };
+
+// Plain path tracing never consumes the SHARC payload or the ReSTIR visibility
+// flags. Its queue is dense, so omitting those four words saves both the shade
+// write and the shadow read rather than merely shrinking the allocation.
+struct CompactShadowRay
+{
+    packed_float3 origin;
+    packed_float3 direction;
+    packed_float3 weight;
+    float maxDistance;
+    uint32_t pixelIndex;
+    float rrCutoff;
+    uint32_t medium;
+};
+static_assert(sizeof(CompactShadowRay) == 52, "CompactShadowRay ABI changed");
 
 // EnvAliasEntry is shared by Metal, OptiX and host tests.
 #include <env_alias_sampling.h>

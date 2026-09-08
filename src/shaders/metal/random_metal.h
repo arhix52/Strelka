@@ -4,6 +4,9 @@
 
 using namespace metal;
 
+constant uint32_t kFcSamplerType [[function_constant(18)]];
+constant uint32_t FIXED_SAMPLER_TYPE = is_function_constant_defined(kFcSamplerType) ? kFcSamplerType : 0xffffffffu;
+
 // source: https://github.com/mmp/pbrt-v4
 constant constexpr float FloatOneMinusEpsilon = 0x1.fffffep-1;
 
@@ -1128,6 +1131,15 @@ inline uint32_t sobol_uint(uint32_t index, uint32_t dim)
     return X;
 }
 
+// Ablation: Owen scrambling with van der Corput only -- no sb_matrix reads.
+// Dimension 0 of the Joe-Kuo table is van der Corput; Owen's per-dimension seed
+// still separates draws. Not bit-identical to Sobol; isolates table load cost.
+inline uint32_t sobol_uint_notable(uint32_t index, uint32_t dim)
+{
+    (void)dim;
+    return reverse_bits(index);
+}
+
 // Owen scrambling needs every output bit to depend on lower input bits; multiplicative seed mixing
 // decorrelates consecutive dimension seeds used by the screen-wide blue-noise samplers.
 inline uint32_t laine_karras_permutation(uint32_t value, uint32_t seed)
@@ -1146,6 +1158,13 @@ inline uint32_t nested_uniform_scramble(uint32_t value, uint32_t seed)
     value = laine_karras_permutation(value, seed);
     value = reverse_bits(value);
     return value;
+}
+
+inline uint32_t sobol_scramble_bits_notable(uint32_t index, uint32_t matrixIndex, uint32_t scrambleDim, uint32_t seed)
+{
+    seed = hash(seed);
+    index = nested_uniform_scramble(index, seed);
+    return nested_uniform_scramble(sobol_uint_notable(index, matrixIndex), hash_combine(seed, scrambleDim));
 }
 
 // `matrixIndex` selects one of the tabulated Sobol direction matrices;
@@ -1179,6 +1198,22 @@ static uint32_t randomSobolBits(thread SamplerState& state)
 {
     const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     return sobol_scramble_bits(state.sampleIdx, dimension % 256u, dimension, state.seed + state.depth);
+}
+
+template <SampleDimension Dim>
+static float randomSobolNoTable(thread SamplerState& state)
+{
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+    return min(
+        sobol_scramble_bits_notable(state.sampleIdx, dimension % 256u, dimension, state.seed + state.depth) * 0x1p-32f,
+        FloatOneMinusEpsilon);
+}
+
+template <SampleDimension Dim>
+static uint32_t randomSobolNoTableBits(thread SamplerState& state)
+{
+    const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+    return sobol_scramble_bits_notable(state.sampleIdx, dimension % 256u, dimension, state.seed + state.depth);
 }
 
 // ── Sobol with a blue-noise screen-space error distribution ─────────────────
@@ -1276,11 +1311,14 @@ static uint32_t randomHybridBits(thread SamplerState& state)
 
 // ── Sampler dispatch ────────────────────────────────────────────────────────
 // 0 = Halton, 1 = PCG, 2 = Sobol (Owen scrambled), 3 = Sobol + blue noise,
-// 4 = hybrid (3 below bnSwitch samples, 2 above)
+// 4 = hybrid (3 below bnSwitch samples, 2 above), 5 = Owen + VDC (no table, ablation)
 
 template <SampleDimension Dim>
 static float random(thread SamplerState& state, uint32_t samplerType)
 {
+    samplerType = FIXED_SAMPLER_TYPE != 0xffffffffu ? FIXED_SAMPLER_TYPE : samplerType;
+    if (samplerType == 5)
+        return randomSobolNoTable<Dim>(state);
     if (samplerType == 4)
         return randomHybrid<Dim>(state);
     if (samplerType == 3)
@@ -1295,6 +1333,9 @@ static float random(thread SamplerState& state, uint32_t samplerType)
 template <SampleDimension Dim>
 static uint32_t randomBits(thread SamplerState& state, uint32_t samplerType)
 {
+    samplerType = FIXED_SAMPLER_TYPE != 0xffffffffu ? FIXED_SAMPLER_TYPE : samplerType;
+    if (samplerType == 5)
+        return randomSobolNoTableBits<Dim>(state);
     if (samplerType == 4)
         return randomHybridBits<Dim>(state);
     if (samplerType == 3)

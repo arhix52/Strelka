@@ -183,6 +183,7 @@ void MetalMaterials::release()
         mOpenPBRTexBuffer = nullptr;
     }
     mSceneHasOpenPBRMaterials = false;
+    mSceneAllOpenPBRMaterials = false;
     mSceneHasAlphaMaterials = false;
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
@@ -287,6 +288,7 @@ void MetalMaterials::publishParameters(Scene* scene)
     mSceneHasAlphaMaterials = false;
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
+    mSceneAllOpenPBRMaterials = !matDescs.empty();
 
     // Which material model the scene shades with. A render setting rather than a
     // scene property on purpose: it makes the two models an A/B on one asset,
@@ -452,6 +454,8 @@ void MetalMaterials::publishParameters(Scene* scene)
                 }
             }
         }
+        if (st.gpuMaterials.back().material_type != MATERIAL_TYPE_OPENPBR)
+            mSceneAllOpenPBRMaterials = false;
         if (p.alpha_mode != ALPHA_MODE_OPAQUE)
             mSceneHasAlphaMaterials = true;
         // Both kinds of medium compile into the same free-flight path.
@@ -634,4 +638,3 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
 }
 
 } // namespace oka::metal
-
