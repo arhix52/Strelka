@@ -199,7 +199,9 @@ if(APPLE)
     if(STRELKA_METAL_STRICT_FP)
         list(APPEND METAL_BUILD_FLAGS -ffp-contract=off)
     endif()
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    option(STRELKA_METAL_PROFILE_SOURCES
+        "Embed Metal line tables and sources for Shader Profiler captures" OFF)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR STRELKA_METAL_PROFILE_SOURCES)
         list(APPEND METAL_BUILD_FLAGS -gline-tables-only -frecord-sources)
     endif()
 
