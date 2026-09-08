@@ -372,8 +372,10 @@ float2 samplePolygonAperture(float u1, float u2, int blades)
 
 float2 sampleAperture(thread SamplerState& sampler, const constant Uniforms& params)
 {
-    float u1 = random<SampleDimension::eLensU>(sampler, params.samplerType);
-    float u2 = random<SampleDimension::eLensV>(sampler, params.samplerType);
+    const float2 lensSample =
+        random2<SampleDimension::eLensU, SampleDimension::eLensV>(sampler, params.samplerType).value;
+    const float u1 = lensSample.x;
+    const float u2 = lensSample.y;
 
     float2 p;
     if (params.apertureBlades < 3)
@@ -422,10 +424,10 @@ void generateCameraRay(uint2 pixelIndex,
     // when one is running the whole image moves together and the per-pixel random
     // jitter -- which is antialiasing for a still frame -- would only add noise it
     // has to filter out.
-    const float2 subpixel_jitter = params.useFrameJitter ?
-                                       float2(params.jitterX + 0.5f, params.jitterY + 0.5f) :
-                                       float2(random<SampleDimension::ePixelX>(samplerRnd, params.samplerType),
-                                              random<SampleDimension::ePixelY>(samplerRnd, params.samplerType));
+    const float2 subpixel_jitter =
+        params.useFrameJitter ?
+            float2(params.jitterX + 0.5f, params.jitterY + 0.5f) :
+            random2<SampleDimension::ePixelX, SampleDimension::ePixelY>(samplerRnd, params.samplerType).value;
     float2 pixelPos{ pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y) };
 
     float2 dimension{ (float)params.width, (float)params.height };
@@ -997,11 +999,11 @@ LightConnection connectLight(constant Uniforms& uniforms,
                              float analyticSelectionPdf,
                              float lightSelectionPdf)
 {
-    const float2 uv =
-        float2(lightOpenUnitInterval(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType)),
-               lightOpenUnitInterval(random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType)));
-    const uint2 retryWords = uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
-                                   randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
+    const RandomSample4 lightRandom =
+        random4<SampleDimension::eLightPointX, SampleDimension::eLightPointY, SampleDimension::eLightRetryU,
+                SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType);
+    const float2 uv = float2(lightOpenUnitInterval(lightRandom.value.x), lightOpenUnitInterval(lightRandom.value.y));
+    const uint2 retryWords = lightRandom.bits.zw;
     return connectLightSample(uniforms, light, lightId, uv, retryWords, {}, false, si, volumeEvent, iesBuffer,
                               localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
 }
@@ -1043,12 +1045,13 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                                 texture2d<float> envMapTexture,
                                 bool volumeEvent)
 {
-    const uint2 aliasWords = uint2(randomBits<SampleDimension::eLightBucket>(samplerRnd, uniforms.samplerType),
-                                   randomBits<SampleDimension::eLightAlias>(samplerRnd, uniforms.samplerType));
-    const float2 jitter = float2(random<SampleDimension::eLightPointX>(samplerRnd, uniforms.samplerType),
-                                 random<SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType));
-    const uint2 retryWords = uint2(randomBits<SampleDimension::eLightRetryU>(samplerRnd, uniforms.samplerType),
-                                   randomBits<SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType));
+    const RandomSample4 envRandom =
+        random4<SampleDimension::eLightBucket, SampleDimension::eLightAlias, SampleDimension::eLightPointX,
+                SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType);
+    const uint2 aliasWords = envRandom.bits.xy;
+    const float2 jitter = envRandom.value.zw;
+    const uint2 retryWords =
+        random2<SampleDimension::eLightRetryU, SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType).bits;
 
     float envPdf = 0.0f;
     float3 dir = sampleEnvMap(aliasWords, jitter, retryWords, envAliasTable, uniforms.envMapWidth,
@@ -1290,8 +1293,8 @@ static LightConnection connectEmissiveMesh(constant Uniforms& uniforms,
         return makeEmptyConnection();
     }
     const uint32_t primitiveId = sampleEmissiveTriangleIndex(uniforms, sampler, uniforms.emissiveMeshes[meshId]);
-    const float2 randomSample = float2(random<SampleDimension::eLightPointX>(sampler, uniforms.samplerType),
-                                       random<SampleDimension::eLightPointY>(sampler, uniforms.samplerType));
+    const float2 randomSample =
+        random2<SampleDimension::eLightPointX, SampleDimension::eLightPointY>(sampler, uniforms.samplerType).value;
     return connectEmissiveMeshSample(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, materials, si,
                                      meshId, primitiveId, randomSample, motionTime, volumeEvent, localSelectionPdf,
                                      meshClassPdf, uniforms.numEmissiveMeshes);

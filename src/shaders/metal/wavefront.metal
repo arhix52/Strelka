@@ -928,11 +928,11 @@ static void sssWalkImpl(uint gid,
 
         const float3 channelPdf = sssChannelPdf(throughput, mp.albedo);
         SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
+        const float2 distanceRandom =
+            random2<SampleDimension::eSssChannel, SampleDimension::eSssDistance>(wrng, uniforms.samplerType).value;
         float scatterDistance = 0.0f;
-        const bool sampledScatter =
-            sssSampleDistance(mp.sigmaT, channelPdf, uniforms.sceneExtent,
-                              random<SampleDimension::eSssChannel>(wrng, uniforms.samplerType),
-                              random<SampleDimension::eSssDistance>(wrng, uniforms.samplerType), scatterDistance);
+        const bool sampledScatter = sssSampleDistance(
+            mp.sigmaT, channelPdf, uniforms.sceneExtent, distanceRandom.x, distanceRandom.y, scatterDistance);
 
         ray sssRay;
         sssRay.min_distance = 1e-6f;
@@ -968,9 +968,9 @@ static void sssWalkImpl(uint gid,
         throughput *= sssScatterWeight(mp.sigmaT, mp.albedo, channelPdf, scatterDistance);
         const float3 scatterPoint = rayOrigin + rayDirection * scatterDistance;
         float phasePdf = 0.0f;
-        const float3 nextDirection =
-            hgSample(-rayDirection, anisotropy, random<SampleDimension::eSssPhaseU>(wrng, uniforms.samplerType),
-                     random<SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType), phasePdf);
+        const float2 phaseRandom =
+            random2<SampleDimension::eSssPhaseU, SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType).value;
+        const float3 nextDirection = hgSample(-rayDirection, anisotropy, phaseRandom.x, phaseRandom.y, phasePdf);
         const float survive = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05f, 1.0f);
         if (random<SampleDimension::eRussianRoulette>(wrng, uniforms.samplerType) >= survive)
         {
@@ -1130,11 +1130,12 @@ static void extendImpl(uint gid,
                 const float3 albedo = mp.albedo;
                 const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
                 SamplerState srng = samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags) + step);
+                const float2 distanceRandom =
+                    random2<SampleDimension::eSssChannel, SampleDimension::eSssDistance>(srng, uniforms.samplerType).value;
                 // Bound free flights by the scene: a longer draw left the medium and can wedge traversal on leaked
                 // paths.
-                if (sssSampleDistance(sigmaT, channelPdf, uniforms.sceneExtent,
-                                      random<SampleDimension::eSssChannel>(srng, uniforms.samplerType),
-                                      random<SampleDimension::eSssDistance>(srng, uniforms.samplerType), mediumScatterT))
+                if (sssSampleDistance(
+                        sigmaT, channelPdf, uniforms.sceneExtent, distanceRandom.x, distanceRandom.y, mediumScatterT))
                 {
                     mediumHitBit = HIT_SSS_BIT;
                 }
@@ -2470,9 +2471,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         float phasePdf = 0.0f;
-        const float3 nextDir =
-            hgSample(-rayDir, uniforms.fogAnisotropy, random<SampleDimension::eFogPhaseU>(rng, uniforms.samplerType),
-                     random<SampleDimension::eFogPhaseV>(rng, uniforms.samplerType), phasePdf);
+        const float2 phaseRandom =
+            random2<SampleDimension::eFogPhaseU, SampleDimension::eFogPhaseV>(rng, uniforms.samplerType).value;
+        const float3 nextDir = hgSample(-rayDir, uniforms.fogAnisotropy, phaseRandom.x, phaseRandom.y, phasePdf);
 
         radianceOut[tid] += float4(radiance, 0.0f);
 
@@ -2623,9 +2624,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         float phasePdf = 0.0f;
-        const float3 nextDir =
-            hgSample(-rayDir, mm.subsurface_anisotropy, random<SampleDimension::eSssPhaseU>(wrng, uniforms.samplerType),
-                     random<SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType), phasePdf);
+        const float2 phaseRandom =
+            random2<SampleDimension::eSssPhaseU, SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType).value;
+        const float3 nextDir = hgSample(-rayDir, mm.subsurface_anisotropy, phaseRandom.x, phaseRandom.y, phasePdf);
 
         radianceOut[tid] += float4(radiance, 0.0f);
 
@@ -3040,9 +3041,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
         }
 
-        const float3 exitDir =
-            sssCosineDirection(outward, random<SampleDimension::eSssPhaseU>(xrng, uniforms.samplerType),
-                               random<SampleDimension::eSssPhaseV>(xrng, uniforms.samplerType));
+        const float2 phaseRandom =
+            random2<SampleDimension::eSssPhaseU, SampleDimension::eSssPhaseV>(xrng, uniforms.samplerType).value;
+        const float3 exitDir = sssCosineDirection(outward, phaseRandom.x, phaseRandom.y);
 
         radianceOut[tid] += float4(radiance, 0.0f);
 
@@ -4065,12 +4066,12 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
     }
 
-    const float4 xi = float4(random<SampleDimension::eBSDF0>(rng, uniforms.samplerType),
-                             random<SampleDimension::eBSDF1>(rng, uniforms.samplerType),
-                             random<SampleDimension::eBSDF2>(rng, uniforms.samplerType),
-                             random<SampleDimension::eBSDF3>(rng, uniforms.samplerType));
-    const uint32_t lobeWord = randomBits<SampleDimension::eBSDF2>(rng, uniforms.samplerType) >> 9u;
-    const uint32_t fresnelWord = randomBits<SampleDimension::eBSDF3>(rng, uniforms.samplerType) >> 9u;
+    const RandomSample4 bsdfRandom =
+        random4<SampleDimension::eBSDF0, SampleDimension::eBSDF1, SampleDimension::eBSDF2, SampleDimension::eBSDF3>(
+            rng, uniforms.samplerType);
+    const float4 xi = bsdfRandom.value;
+    const uint32_t lobeWord = bsdfRandom.bits.z >> 9u;
+    const uint32_t fresnelWord = bsdfRandom.bits.w >> 9u;
     BsdfSampleResult sampleResult =
         isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) : bsdf_sample(si, xi, lobeWord, fresnelWord);
 
@@ -4217,14 +4218,17 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
     iorStacks[tid] = iorStack;
 
-    const float3 nextDir = sssRefractedEntry ?
-                               subsurface_entry_direction(
-                                   float3(si.wo),
-                                   (dot(float3(si.shading_normal), float3(si.wo)) > 0.0f) ? float3(si.shading_normal) :
-                                                                                            -float3(si.shading_normal),
-                                   random<SampleDimension::eSssChannel>(rng, uniforms.samplerType),
-                                   random<SampleDimension::eSssDistance>(rng, uniforms.samplerType)) :
-                               normalize(sampleResult.wi);
+    float3 nextDir = normalize(sampleResult.wi);
+    if (sssRefractedEntry)
+    {
+        const float2 entryRandom =
+            random2<SampleDimension::eSssChannel, SampleDimension::eSssDistance>(rng, uniforms.samplerType).value;
+        nextDir = subsurface_entry_direction(float3(si.wo),
+                                             (dot(float3(si.shading_normal), float3(si.wo)) > 0.0f) ?
+                                                 float3(si.shading_normal) :
+                                                 -float3(si.shading_normal),
+                                             entryRandom.x, entryRandom.y);
+    }
 
     // A refracted entry that came back out on the viewer's side of the geometric
     // normal never entered anything, and the walk it would start is a walk

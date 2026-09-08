@@ -15,6 +15,16 @@ float uintToFloat(uint x)
     return as_type<float>(0x3f800000 | (x >> 9)) - 1.f;
 }
 
+float2 uintToFloat(uint2 x)
+{
+    return as_type<float2>(0x3f800000u | (x >> 9u)) - 1.0f;
+}
+
+float4 uintToFloat(uint4 x)
+{
+    return as_type<float4>(0x3f800000u | (x >> 9u)) - 1.0f;
+}
+
 enum class SampleDimension : uint32_t
 {
     ePixelX,
@@ -1160,6 +1170,28 @@ inline uint32_t nested_uniform_scramble(uint32_t value, uint32_t seed)
     return value;
 }
 
+inline uint4 nested_uniform_scramble(uint4 value, uint4 seed)
+{
+    value = reverse_bits(value);
+    value ^= value * 0x3d20adeau;
+    value += seed;
+    value *= (seed >> 16u) | 1u;
+    value ^= value * 0x05526c56u;
+    value ^= value * 0x53a22864u;
+    return reverse_bits(value);
+}
+
+inline uint2 nested_uniform_scramble(uint2 value, uint2 seed)
+{
+    value = reverse_bits(value);
+    value ^= value * 0x3d20adeau;
+    value += seed;
+    value *= (seed >> 16u) | 1u;
+    value ^= value * 0x05526c56u;
+    value ^= value * 0x53a22864u;
+    return reverse_bits(value);
+}
+
 inline uint32_t sobol_scramble_bits_notable(uint32_t index, uint32_t matrixIndex, uint32_t scrambleDim, uint32_t seed)
 {
     seed = hash(seed);
@@ -1346,4 +1378,158 @@ static uint32_t randomBits(thread SamplerState& state, uint32_t samplerType)
     // word to preserve. Use the same dimensioned PCG permutation as sampler 1
     // for categorical decisions; continuous Halton dimensions are unchanged.
     return randomPCGBits<Dim>(state);
+}
+
+struct RandomSample4
+{
+    float4 value;
+    uint4 bits;
+};
+
+struct RandomSample2
+{
+    float2 value;
+    uint2 bits;
+};
+
+template <SampleDimension Dim0, SampleDimension Dim1>
+static RandomSample2 random2(thread SamplerState& state, uint32_t samplerType)
+{
+    samplerType = FIXED_SAMPLER_TYPE != 0xffffffffu ? FIXED_SAMPLER_TYPE : samplerType;
+    if (samplerType == 1u)
+    {
+        RandomSample2 result;
+        result.bits = uint2(randomPCGBits<Dim0>(state), randomPCGBits<Dim1>(state));
+        result.value = uintToFloat(result.bits);
+        return result;
+    }
+    if (samplerType == 5u)
+    {
+        RandomSample2 result;
+        result.bits = uint2(randomSobolNoTableBits<Dim0>(state), randomSobolNoTableBits<Dim1>(state));
+        result.value = min(float2(result.bits) * 0x1p-32f, float2(FloatOneMinusEpsilon));
+        return result;
+    }
+    if (samplerType >= 2u && samplerType <= 4u)
+    {
+        uint32_t index = state.sampleIdx;
+        uint32_t seed = state.seed + state.depth;
+        bool useBlueNoise = samplerType == 3u && state.depth == 0u;
+        if (samplerType == 4u)
+        {
+            const bool inBlueNoisePrefix = state.sampleIdx < state.bnSwitch;
+            useBlueNoise = inBlueNoisePrefix && state.depth == 0u;
+            if (!inBlueNoisePrefix)
+            {
+                index -= state.bnSwitch;
+            }
+        }
+        if (useBlueNoise)
+        {
+            seed = kBlueNoiseGlobalSeed;
+        }
+
+        seed = hash(seed);
+        index = nested_uniform_scramble(index, seed);
+        const uint2 dimensions =
+            uint2(uint32_t(Dim0), uint32_t(Dim1)) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+        uint2 words = 0u;
+        for (uint32_t remaining = index; remaining != 0u; remaining &= remaining - 1u)
+        {
+            const uint32_t bit = ctz(remaining);
+            words ^= uint2(sb_matrix[bit][dimensions.x % 256u], sb_matrix[bit][dimensions.y % 256u]);
+        }
+        words = nested_uniform_scramble(words, uint2(hash_combine(seed, dimensions.x), hash_combine(seed, dimensions.y)));
+
+        RandomSample2 result;
+        result.bits = words;
+        result.value = min(float2(words) * 0x1p-32f, float2(FloatOneMinusEpsilon));
+        if (useBlueNoise)
+        {
+            const float2 shifts = float2(blueNoiseShift(state.bn, dimensions.x), blueNoiseShift(state.bn, dimensions.y));
+            result.value = fract(result.value + shifts);
+            result.bits += uint2(shifts * 16777216.0f) << 8u;
+        }
+        return result;
+    }
+
+    RandomSample2 result;
+    result.value = float2(random<Dim0>(state, samplerType), random<Dim1>(state, samplerType));
+    result.bits = uint2(randomBits<Dim0>(state, samplerType), randomBits<Dim1>(state, samplerType));
+    return result;
+}
+
+template <SampleDimension Dim0, SampleDimension Dim1, SampleDimension Dim2, SampleDimension Dim3>
+static RandomSample4 random4(thread SamplerState& state, uint32_t samplerType)
+{
+    samplerType = FIXED_SAMPLER_TYPE != 0xffffffffu ? FIXED_SAMPLER_TYPE : samplerType;
+    if (samplerType == 1u)
+    {
+        RandomSample4 result;
+        result.bits = uint4(randomPCGBits<Dim0>(state), randomPCGBits<Dim1>(state), randomPCGBits<Dim2>(state),
+                            randomPCGBits<Dim3>(state));
+        result.value = uintToFloat(result.bits);
+        return result;
+    }
+    if (samplerType == 5u)
+    {
+        RandomSample4 result;
+        result.bits = uint4(randomSobolNoTableBits<Dim0>(state), randomSobolNoTableBits<Dim1>(state),
+                            randomSobolNoTableBits<Dim2>(state), randomSobolNoTableBits<Dim3>(state));
+        result.value = min(float4(result.bits) * 0x1p-32f, float4(FloatOneMinusEpsilon));
+        return result;
+    }
+    if (samplerType >= 2u && samplerType <= 4u)
+    {
+        uint32_t index = state.sampleIdx;
+        uint32_t seed = state.seed + state.depth;
+        bool useBlueNoise = samplerType == 3u && state.depth == 0u;
+        if (samplerType == 4u)
+        {
+            const bool inBlueNoisePrefix = state.sampleIdx < state.bnSwitch;
+            useBlueNoise = inBlueNoisePrefix && state.depth == 0u;
+            if (!inBlueNoisePrefix)
+            {
+                index -= state.bnSwitch;
+            }
+        }
+        if (useBlueNoise)
+        {
+            seed = kBlueNoiseGlobalSeed;
+        }
+
+        seed = hash(seed);
+        index = nested_uniform_scramble(index, seed);
+        const uint4 dimensions = uint4(uint32_t(Dim0), uint32_t(Dim1), uint32_t(Dim2), uint32_t(Dim3)) +
+                                 state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
+        uint4 words = 0u;
+        for (uint32_t remaining = index; remaining != 0u; remaining &= remaining - 1u)
+        {
+            const uint32_t bit = ctz(remaining);
+            words ^= uint4(sb_matrix[bit][dimensions.x % 256u], sb_matrix[bit][dimensions.y % 256u],
+                           sb_matrix[bit][dimensions.z % 256u], sb_matrix[bit][dimensions.w % 256u]);
+        }
+        const uint4 scrambleSeeds = uint4(hash_combine(seed, dimensions.x), hash_combine(seed, dimensions.y),
+                                          hash_combine(seed, dimensions.z), hash_combine(seed, dimensions.w));
+        words = nested_uniform_scramble(words, scrambleSeeds);
+
+        RandomSample4 result;
+        result.bits = words;
+        result.value = min(float4(words) * 0x1p-32f, float4(FloatOneMinusEpsilon));
+        if (useBlueNoise)
+        {
+            const float4 shifts = float4(blueNoiseShift(state.bn, dimensions.x), blueNoiseShift(state.bn, dimensions.y),
+                                         blueNoiseShift(state.bn, dimensions.z), blueNoiseShift(state.bn, dimensions.w));
+            result.value = fract(result.value + shifts);
+            result.bits += uint4(shifts * 16777216.0f) << 8u;
+        }
+        return result;
+    }
+
+    RandomSample4 result;
+    result.value = float4(random<Dim0>(state, samplerType), random<Dim1>(state, samplerType),
+                          random<Dim2>(state, samplerType), random<Dim3>(state, samplerType));
+    result.bits = uint4(randomBits<Dim0>(state, samplerType), randomBits<Dim1>(state, samplerType),
+                        randomBits<Dim2>(state, samplerType), randomBits<Dim3>(state, samplerType));
+    return result;
 }
