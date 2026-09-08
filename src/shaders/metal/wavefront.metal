@@ -3487,10 +3487,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     if (didNee)
     {
         auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
-        const bool restirInitial = uniforms.restirDIEnabled != 0u && depth == 0u;
+        const bool restirInitial = SPEC_RESTIR && uniforms.restirDIEnabled != 0u && depth == 0u;
         const uint32_t candidates = restirInitial ?
                                         max(uniforms.initialCandidateCount, 1u) :
-                                        (uniforms.restirDIEnabled != 0u ? 1u : max(uniforms.risCandidates, 1u));
+                                        (SPEC_RESTIR ? 1u : max(uniforms.risCandidates, 1u));
 
         if (restirInitial)
         {
