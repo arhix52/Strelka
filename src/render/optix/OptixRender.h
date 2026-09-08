@@ -172,6 +172,8 @@ private:
     struct PipelineSpec
     {
         uint32_t sharcCapacity = 0;
+        /// Whether the sampler's blue-noise mask is compiled in; see Params.
+        uint32_t hasBlueNoise = 0;
         /// Whether any light is responsive. A constant rather than a runtime
         /// read because it gates a second hash probe on every cached read and a
         /// second set of atomics on every deposit; a scene without a responsive
@@ -236,6 +238,9 @@ private:
 
     // Previous-frame settings for change detection (replaces static locals in render())
     uint32_t mPrevRectLightSamplingMethod = 0;
+    /// Last value warned about for render/pt/samplerType, so an unimplemented
+    /// one is reported when it is chosen rather than on every frame after.
+    uint32_t mReportedSamplerType = 2;
     bool mPrevEnableAccumulation = false;
     uint32_t mPrevSspTotal = 0;
 

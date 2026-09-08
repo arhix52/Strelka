@@ -3,6 +3,20 @@
 #include <cuda.h>
 
 #include <OptixRenderParams.h>
+
+// samplerBlueNoiseEnabled() is declared in <random.h> and defined here, where
+// params is in scope. hasBlueNoise is a bound value, so a module compiled
+// without the mask has the sampler's blue-noise path folded away rather than
+// branching over it on every draw.
+extern "C"
+{
+    __constant__ Params params;
+}
+
+static __device__ bool samplerBlueNoiseEnabled()
+{
+    return params.hasBlueNoise != 0u;
+}
 #include <cuda_helpers/helpers.h>
 #include <cuda_helpers/curve.h>
 
@@ -28,10 +42,6 @@
 #include "fog.h"
 #include <curve_layout.h>
 
-extern "C"
-{
-    __constant__ Params params;
-}
 
 // ---------------------------------------------------------------------------
 // OpenPBR Surface 1.1.1

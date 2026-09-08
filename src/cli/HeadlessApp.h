@@ -33,9 +33,14 @@ struct RenderConfig
     uint32_t subsurfaceIterations = 64;
     // 0=Halton, 1=PCG, 2=Sobol, 3=Sobol+BN, 4=Hybrid (BN→Sobol)
     //
-    // Sobol, not the blue-noise variants the editor defaults to: a headless
-    // render is a still frame at a few hundred samples, which is past the count
-    // where a toroidal shift stops paying for itself.
+    // The same value EditorApp::loadSettings() sets, because the two
+    // applications rendering one config two different ways is a defect rather
+    // than a preference. It used to be plain Sobol here on the reasoning that a
+    // headless still frame runs past the count where a toroidal shift pays --
+    // which is true, and is what the hybrid's handover already expresses: the
+    // mask covers the first blueNoiseSwitchSpp samples and everything after is
+    // the plain sequence, so a long render is the old default with four samples
+    // drawn differently at the start.
     //
     // Not Halton, which this used to be. Its dimensions are told apart only by
     // an offset into a table of 32 bases, and a depth-8 path draws 117, so
@@ -44,7 +49,7 @@ struct RenderConfig
     // -- roughly twice the samples for the same picture -- and worse than the
     // plain PCG white noise at every count, with a convergence slope that
     // stalls near zero and then jumps as the correlated dimensions come apart.
-    uint32_t samplerType = 2;
+    uint32_t samplerType = 4;
     // MetalFX denoising. Off by default: it is a temporal filter and a still
     // frame gives it one frame to work with, so whether it helps is a question
     // to be measured per scene rather than assumed.
@@ -174,7 +179,12 @@ struct RenderConfig
     uint32_t textureDownscale = 1;
     // Debug visualisation; 0 renders normally.
     uint32_t debugMode = 0;
-    uint32_t blueNoiseSwitchSpp = 16;
+    // Matches EditorApp::loadSettings(). The two applications have to agree on
+    // the sampler or the same config renders two different images, and the
+    // editor's pair is the one with a measurement behind it: blue noise wins on
+    // post-filter error up to four samples and loses past it, so the hybrid
+    // hands over at four and everything after is the plain sequence.
+    uint32_t blueNoiseSwitchSpp = 4;
     // Upper bound on one indirect path's contribution; 0 = unclamped, which is
     // the default because clamping is a bias the caller has to ask for.
     float clampIndirect = 0.0f;

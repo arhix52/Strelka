@@ -6,6 +6,135 @@ already been ruled out, so a reader starting cold can act without repeating the
 elimination. What is closed is here too, because the *why* is what the next
 person needs and it is the same why either way.
 
+## The sampler, 2026-09-08
+
+The profile below put `random.h:278` -- `X ^= sb_matrix[lowestSetBit(bits)][dim]`
+-- at the top of every scene's PC samples, 12.8% to 26.7% of them. It is gone,
+along with the 32 KB table it read. Editor defaults, 1280x720 `max_depth` 4,
+interleaved A/B over four rounds: **iso_bathroom 5.93 -> 5.10 ms (-13.9%),
+kids_room 9.83 -> 9.35 ms (-4.8%)**.
+
+### What the table cost, before deciding what to do about it
+
+Replacing the table read with arithmetic and changing nothing else: iso_bathroom
+5.90 -> 4.80, kids_room 9.90 -> 7.50, pine 12.65 -> 11.00, bar 9.60 -> 8.70. The
+Owen scramble around it is free -- that variant is no slower than plain PCG,
+which has neither table nor scramble. So the sampler's whole cost was the gather.
+
+Two things measured on the way, both worth not repeating:
+
+* **Moving the pixel from the Sobol' index into the scramble seed, to match
+  Metal, is 7-9% slower.** The index is Owen-scrambled with that seed, so a
+  per-pixel seed leaves the walk exactly as divergent as a per-pixel index did
+  and makes the value scramble divergent too, which it was not.
+* **A nibble-radix fold of the table** -- eight fixed XORs against a 128 KB table
+  whose entries are the XOR of the direction numbers a nibble names, bit-exact
+  with the walk -- is a win on one scene and a loss on two: iso_bathroom -9.3%,
+  kids_room -0.5%, pine +0.4%, bar +2.1%. Trading sixteen loads of 32 KB for
+  eight of 128 KB does not pay.
+
+### What replaced it
+
+Two dimensions, and padding. A draw used to ask for dimension
+`Dim + depth * eNUM_DIMENSIONS`, which reaches 117 on a depth-8 path and is the
+only reason 256 dimensions had to be tabulated. A path is now a list of 21
+*decisions*; every decision draws from the same two-dimensional sequence and is
+told apart by its Owen scramble seed. Cycles is built this way for the same
+reason. What is paired is what is genuinely 2D and consumed together -- pixel
+offset, lens point, light point, BSDF direction -- so those keep the
+(0,2)-sequence's joint stratification; the categorical draws stay 1D.
+
+Both dimensions have a closed form, checked against the columns they replace on
+all 32 rows each:
+
+* dimension 0's direction numbers are `1 << (31 - k)`, so the walk is a bit
+  reversal;
+* dimension 1's are `v0 = 1 << 31, vk = vk-1 ^ (vk-1 >> 1)` -- Pascal's triangle
+  mod 2, which is the fifth Kronecker power of `[[1,0],[1,1]]` and therefore
+  decomposes into five masked shift-XOR stages. Verified exhaustively on the 32
+  basis vectors, which by linearity settles every index.
+
+Two draws, compiled standalone and disassembled: **112 SASS instructions, 5 LDG,
+5 BRA, 2 FLO before; 104, 3, 1, 0 after** -- and the three remaining LDG are the
+probe's own parameter load and stores. The data-dependent loop and the `__ffs`
+chain are gone with the table.
+
+### The bug this grew, and the test that now catches it
+
+Padding by scrambling one value with per-decision seeds is wrong, and wrong in
+exactly the way the note above the old table describes. An Owen scramble is a
+bijection, so two decisions plotted against each other trace a curve rather than
+covering the square -- each uniform alone, the pair degenerate. Written that way
+it converged **kids_room 8.2% dark**, which is what a light selection taking two
+coordinates off a diagonal looks like. Padding has to shuffle the *index* per
+decision as well; a nested scramble maps dyadic blocks to dyadic blocks, so
+nothing the Z-curve argument depends on is lost.
+
+`tests/render/test_sobol_matrix.cpp` grades a pair of draws by how much of a
+16x16 grid they cover over 4096 indices. Inequality was not enough and would not
+have caught this: the degenerate pair differs at every index. Coverage is 0.0625
+without the index shuffle -- sixteen cells of 256, a diagonal -- against a bar of
+0.95.
+
+After the fix the two samplers agree where it matters: at 1024 spp the mean
+differs by 2e-4 relative on both scenes, and the blur-surviving residual fell
+6-8x.
+
+### Quality
+
+FLIP against each sampler's own converged 1024 spp, editor defaults:
+
+| | 1 spp | 2 spp | 4 spp | 16 spp |
+|---|---|---|---|---|
+| iso_bathroom, tabulated | 0.6788 | 0.5681 | 0.4837 | 0.3431 |
+| iso_bathroom, padded | 0.7031 | 0.5731 | 0.4793 | 0.3435 |
+| kids_room, tabulated | 0.4685 | 0.3596 | 0.2730 | 0.1633 |
+| kids_room, padded | 0.4592 | 0.3497 | 0.2644 | 0.1699 |
+
+A wash: a few percent each way, no systematic loss from giving up stratification
+between decisions. That was the risk and it did not materialise.
+
+### The Z-curve, and what its scramble is worth
+
+`initSampler` hands each pixel a block of one global sequence and orders the
+pixels along a Morton curve, so a 2x2 quad holds the four child blocks of one
+parent and neighbouring errors anti-correlate. That is Ahmed and Wonka's
+ZSampler (SIGGRAPH Asia 2020) and it was already the construction here; what was
+missing was the hierarchical scramble that removes the curve's regularity.
+Added, in both the cheap form (a two-bit XOR per level, four of the twenty-four
+permutations) and the full one (all twenty-four).
+
+Both measure as **nothing**: time within noise, FLIP identical to the fourth
+decimal, SSIM to 1e-4, and the lag-1 autocorrelation of the high-passed residual
+unmoved. The full version is kept because it is the construction the paper
+describes and it is free, not because it was shown to help. What was not tested
+is whether it removes a *visible* Z-curve pattern -- no summary statistic sees a
+structured artefact the eye does.
+
+The anti-correlation the blocking is supposed to produce is there and is small:
+lag-1 on iso_bathroom is -0.065 against -0.050 for white noise through the same
+high-pass, so the mechanism operates but does not dominate.
+
+### Blue noise, and headless against the editor
+
+`render/pt/samplerType` was read by the Metal backend alone -- OptiX ignored it
+and always ran plain Sobol', so the editor's default of 4 silently rendered
+something else there. OptiX now implements 2, 3 and 4, and says so once when
+handed a value it does not (0 and 1 are Metal's). Ahmed and Wonka's toroidal-shift
+mask is ported with it, sharing Metal's 128x128 void-and-cluster tile so the two
+backends shift identically.
+
+`hasBlueNoise` is a bound value, and that is not decoration: as a runtime test
+the branch cost 3-9% *with the mask off*, on bit-identical output, because it
+inlines into every one of a path's draws. Written as an `if/else` it was worse
+still -- both sides inlined their own copy of the draw and two draws went from
+112 SASS instructions to 224. The mask now picks the draw's arguments rather than
+which draw to make.
+
+`RenderConfig::samplerType` and `blueNoiseSwitchSpp` were 2 and 16 against the
+editor's 4 and 4, so one config rendered two different images depending on which
+application opened it. They are the editor's values now.
+
 ## The 2026-09-07 profile, four scenes
 
 A full pass over `iso_bathroom` (its perspective camera, index 1), `kids_room`,

@@ -1,6 +1,20 @@
 #include <optix.h>
 
 #include <OptixRenderParams.h>
+
+// samplerBlueNoiseEnabled() is declared in <random.h> and defined here, where
+// params is in scope. hasBlueNoise is a bound value, so a module compiled
+// without the mask has the sampler's blue-noise path folded away rather than
+// branching over it on every draw.
+extern "C"
+{
+    __constant__ Params params;
+}
+
+static __device__ bool samplerBlueNoiseEnabled()
+{
+    return params.hasBlueNoise != 0u;
+}
 #include <cuda_helpers/helpers.h>
 #include <random.h>
 
@@ -12,10 +26,6 @@
 
 #include "optix_device_utils.h"
 
-extern "C"
-{
-    __constant__ Params params;
-}
 
 // Concentric disk mapping (Shirley & Chiu 1997)
 __device__ float2 concentricDiskSample(float u1, float u2)
@@ -289,8 +299,8 @@ extern "C" __global__ void __raygen__rg()
         // here -- but it passed `height` for row 0, and having one expression for
         // "this pixel" is what keeps the film flip in generateCameraRay, where it
         // has to take the jitter with it.
-        prd.sampler =
-            initSampler(launch_index.x, launch_index.y, linearPixelIndex, sampleIndex, params.maxSampleCount, 52u);
+        prd.sampler = initSampler(launch_index.x, launch_index.y, linearPixelIndex, sampleIndex, params.maxSampleCount,
+                                    params.mortonLevels, params.blueNoiseSwitch);
 
         prd.radiance = make_float3(0.0f);
         prd.throughput = make_float3(1.0f);
@@ -441,7 +451,7 @@ extern "C" __global__ void __raygen__rg()
             // past it, so there is no reason to keep tracing.
             if (DEBUG_MODE_IS_SINGLE_HIT(params.debug))
                 break;
-            prd.sampler.depth++;
+            samplerAdvanceDepth(prd.sampler);
         }
 
         // The path is over, so what it gathered after the cache visit is known.

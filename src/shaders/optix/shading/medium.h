@@ -135,7 +135,7 @@ static __forceinline__ __device__ SamplerState mediumSampler(const SamplerState&
                                                              uint32_t step)
 {
     SamplerState s = base;
-    s.depth = base.depth + step;
+    samplerSetDepthWithoutBlueNoise(s, samplerDepth(base) + step);
     s.seed = hash_combine(base.seed, step * 0x9E3779B9u + 0x2545F491u);
     return s;
 }

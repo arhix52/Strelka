@@ -248,6 +248,23 @@ struct Params
     uint32_t subframe_index;
     uint32_t samples_per_launch;
     uint32_t maxSampleCount;
+    /// Levels of the Morton curve the image uses, ceil(log2(max(w, h))). The
+    /// sampler scrambles the pixel's Morton index that far and no further:
+    /// digits above are zero, and scrambling them would push the per-pixel block
+    /// index past what maxSampleCount can multiply.
+    uint32_t mortonLevels;
+    /// Whether the mask is in use at all, as a bound value: with it constant,
+    /// OptiX folds the sampler's blue-noise path out of a module that does not
+    /// want it. Left as a runtime test it measured 3-9% on four scenes while
+    /// producing bit-identical images, because it inlines into every draw of an
+    /// issue-bound launch.
+    uint32_t hasBlueNoise;
+    /// How many of a pixel's first samples distribute their error over the
+    /// screen with a blue-noise mask instead of scrambling each pixel
+    /// independently: 0 is off, 0xffffffff never switches back. The mask is
+    /// worth it while the frame is young and a loss once it is not, which is why
+    /// there is a count here and not a flag; see initSampler in random.h.
+    uint32_t blueNoiseSwitch;
     float4* image;
     float4* accum;
     /// The first-event split. Null unless somebody asked for it -- see

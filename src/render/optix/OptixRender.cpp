@@ -2043,6 +2043,7 @@ void OptiXRender::createModule()
         STRELKA_BOUND_VALUE(misHeuristic),       STRELKA_BOUND_VALUE(subsurfaceIterations),
         STRELKA_BOUND_VALUE(risCandidates),      STRELKA_BOUND_VALUE(denoiseDepthMode),
         STRELKA_BOUND_VALUE(hasBoundedMedium),   STRELKA_BOUND_VALUE(hasFog),
+        STRELKA_BOUND_VALUE(hasBlueNoise),
         STRELKA_BOUND_VALUE(enableMotionBlur),   STRELKA_BOUND_VALUE(writeAov),
         STRELKA_BOUND_VALUE(writeSplitAov),      STRELKA_BOUND_VALUE(guidePrimaryHit),
         STRELKA_BOUND_VALUE(hasEnvMap),          STRELKA_BOUND_VALUE(hasEnvBackground),
@@ -2315,6 +2316,7 @@ OptiXRender::PipelineSpec OptiXRender::specFor(const Params& params) const
     spec.denoiseDepthMode = params.denoiseDepthMode;
     spec.hasBoundedMedium = params.hasBoundedMedium;
     spec.hasFog = params.hasFog;
+    spec.hasBlueNoise = params.hasBlueNoise;
     spec.enableMotionBlur = params.enableMotionBlur;
     spec.writeAov = params.writeAov;
     spec.writeSplitAov = params.writeSplitAov;
@@ -3809,6 +3811,44 @@ void OptiXRender::render(Buffer* output)
     params.samples_per_launch = samplesThisLaunch;
     params.enableAccumulation = enableAccumulation;
     params.maxSampleCount = totalSpp;
+    {
+        uint32_t levels = 1u;
+        const uint32_t extent = std::max(params.image_width, params.image_height);
+        while ((1u << levels) < extent)
+        {
+            ++levels;
+        }
+        params.mortonLevels = levels;
+    }
+
+    // The same key the Metal backend reads, so a scene or a config selects the
+    // same sampler on both. 2, 3 and 4 are implemented here; Halton (0) and PCG
+    // (1) exist on Metal alone, and saying so once beats returning a silent
+    // default -- which is how this key went unread on this backend entirely
+    // until the sampler was profiled.
+    {
+        const uint32_t samplerType = settings.getAs<uint32_t>("render/pt/samplerType");
+        switch (samplerType)
+        {
+        case 3u: // Sobol' + blue noise, for the whole render
+            params.blueNoiseSwitch = std::numeric_limits<uint32_t>::max();
+            break;
+        case 4u: // blue noise while the frame is young, per-pixel scrambling after
+            params.blueNoiseSwitch = settings.getAs<uint32_t>("render/pt/blueNoiseSwitchSpp");
+            break;
+        default:
+            if (samplerType != 2u && samplerType != mReportedSamplerType)
+            {
+                STRELKA_WARNING("render/pt/samplerType={} is not implemented on the OptiX backend; using Sobol'. "
+                                "2 = Sobol', 3 = Sobol' + blue noise, 4 = blue noise then Sobol'.",
+                                samplerType);
+            }
+            params.blueNoiseSwitch = 0u;
+            break;
+        }
+        mReportedSamplerType = samplerType;
+        params.hasBlueNoise = (params.blueNoiseSwitch != 0u) ? 1u : 0u;
+    }
 
     // Last, because it reads the finished parameters: everything the modules are
     // compiled against has to be settled before they are compiled against it.
