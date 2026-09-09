@@ -1508,13 +1508,10 @@ static inline float3 fibreExitOrigin(float3 position, float3 tangent, float3 nor
 
 // The same fetch, interpolated on the way out.
 //
-// `shade` is the register-starved kernel of the three -- the pipeline caps it at
-// 384 threads per threadgroup where `extend` takes 640, and Instruments records
-// it spilling. Holding three vertices of position, normal, tangent, colour and
-// uv keeps 42 floats live at once purely to feed a barycentric blend a few lines
-// later; blending inside brings that down to twelve. The geometric normal is the
-// only thing that needs the vertices themselves, so the two edges are kept and
-// the third position is not.
+// Blend each vertex as it is loaded instead of retaining three complete vertex
+// records. Keeping only the accumulated attributes limits live state in
+// wavefrontShade without baking a particular threadgroup limit into this code.
+// The geometric normal and ray-cone footprint need only two position/uv edges.
 static void fetchTriangleBlended(device const char* vertexBuffer,
                                  device const char* prevVertexBuffer,
                                  device const uint32_t* indexBuffer,
@@ -2909,21 +2906,19 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
     float2 uv;
     float tangentSign = 1.0f;
-    float3 objEdge1, objEdge2;
-    float uvArea2 = 0.0f;
+    float lodBase = -1e30f;
     // Only a curve hit has one, and only the fibre paths below read it.
     float curveRadius = 0.0f;
-
-    const auto inst = instances[rec.instanceIndex];
-    const float4x4 objectToWorld =
-        float4x4(float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
-                 float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
 
     const float3 worldPosition = rayOrigin + rayDir * rec.distance;
 
     float3 shadingNormal, shadingTangent, shadingGeomNormal;
     if (isCurve)
     {
+        const auto inst = instances[rec.instanceIndex];
+        const float4x4 objectToWorld = float4x4(
+            float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
+            float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
         // Built in world space rather than fetched in object space and
         // transformed out, because the radial normal is taken *from the hit
         // point* -- and the hit point only exists in world space. Coming back the
@@ -2935,19 +2930,36 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // cylinder, so the shading normal is the geometric one.
         shadingGeomNormal = shadingNormal;
         vertexColor = float3(1.0f);
-        objEdge1 = shadingTangent;
-        objEdge2 = shadingNormal;
-        uvArea2 = 0.0f; // no uv derivatives, and a strand is thinner than a texel
     }
     else
     {
+        float3 objectEdge1, objectEdge2;
+        float uvArea2 = 0.0f;
         fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
                              motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
-                             objectGeomNormal, objEdge1, objEdge2, uvArea2);
-        shadingNormal = transformNormal(normalize(objectNormal), objectToWorld);
-        shadingTangent =
-            orthonormalizeTangent(shadingNormal, transformDirection(normalize(objectTangent), objectToWorld));
-        shadingGeomNormal = transformNormal(objectGeomNormal, objectToWorld);
+                             objectGeomNormal, objectEdge1, objectEdge2, uvArea2);
+        const auto inst = instances[rec.instanceIndex];
+        const float3 axisX = float3(inst.transformationMatrix[0]);
+        const float3 axisY = float3(inst.transformationMatrix[1]);
+        const float3 axisZ = float3(inst.transformationMatrix[2]);
+        const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
+        shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                            normalTransform.cofactorZ, normalTransform.orientation);
+        const float3 worldGeomNormal = normalTransform.cofactorX * objectGeomNormal.x +
+                                       normalTransform.cofactorY * objectGeomNormal.y +
+                                       normalTransform.cofactorZ * objectGeomNormal.z;
+        const float worldArea2 = length(worldGeomNormal);
+        shadingGeomNormal = normalTransform.orientation * (worldGeomNormal / worldArea2);
+        shadingTangent = orthonormalizeTangent(shadingNormal, transformDirection(objectTangent, axisX, axisY, axisZ));
+
+        const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
+        const float coneSpread = (depth == 0u || (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
+        const float coneWidthHere = coneSpread * rec.distance;
+        if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f && coneWidthHere > 0.0f)
+        {
+            const float ndotd = max(abs(dot(shadingGeomNormal, rayDir)), 1e-4f);
+            lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+        }
     }
 
     const float3 worldNormal = shadingNormal;
@@ -3177,25 +3189,26 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         return;
     }
 
-    // Derive texture LOD because compute kernels have no derivatives and carrying a cone would expand 24-byte
-    // PathState. Specular paths keep pixel spread; diffuse events widen the cone to a hemisphere.
-    const float3 worldEdge1 = transformDirection(objEdge1, objectToWorld);
-    const float3 worldEdge2 = transformDirection(objEdge2, objectToWorld);
-    const float worldArea2 = length(cross(worldEdge1, worldEdge2));
-    const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
-    const bool coneIsPixelWide = (depth == 0u) || ((p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u);
-    const float coneSpread = coneIsPixelWide ? pixelSpread : 1.0f;
-    const float coneWidthHere = coneSpread * rec.distance;
-    float lodBase = -1e30f;
-    if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f && coneWidthHere > 0.0f)
-    {
-        const float ndotd = max(abs(dot(geomNormal, rayDir)), 1e-4f);
-        lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
-    }
+    device const Material& hitMaterial = materials[entry.materialId];
+    const bool isOpenPBR = SPEC_ALL_OPENPBR || (SPEC_OPENPBR && hitMaterial.material_type == MATERIAL_TYPE_OPENPBR);
+    const bool nativeOpenPBR =
+        SPEC_ALL_NATIVE_OPENPBR || (isOpenPBR && (hitMaterial.features & MATERIAL_FEATURE_NATIVE_OPENPBR) != 0u);
 
     SurfaceInteraction si;
-    initSurfaceInteraction(si, materials[entry.materialId], worldPosition, worldNormal, geomNormal, worldTangent,
-                           worldBinormal, uv, rayDir, vertexColor, lodBase);
+    if (nativeOpenPBR)
+    {
+        // The all-native function-constant variant compiles the generic
+        // Material path out completely. Mixed scenes retain this per-material
+        // gate so authored OpenPBR still avoids it without changing converted
+        // glTF texture semantics.
+        initSurfaceGeometry(si, worldPosition, worldNormal, geomNormal, worldTangent, worldBinormal, uv, rayDir);
+        initOpenPBRSurfaceMaterial(si, uniforms.openpbrParams[entry.materialId], vertexColor);
+    }
+    else
+    {
+        initSurfaceInteraction(si, hitMaterial, worldPosition, worldNormal, geomNormal, worldTangent, worldBinormal, uv,
+                               rayDir, vertexColor, lodBase);
+    }
 
     // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
     // neither the hemisphere tests nor the ray offsets below apply. Gated on the
@@ -3277,11 +3290,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
     }
 
-    // Resolve OpenPBR before producing guides. Its parameter block and maps are
-    // the source of truth for base color, metalness, roughness, layered
-    // specular response, and its normal map; the generic Material record only
-    // mirrors the subset older shading paths require.
-    const bool isOpenPBR = SPEC_ALL_OPENPBR || (SPEC_OPENPBR && si.material_type == MATERIAL_TYPE_OPENPBR);
+    // Resolve the full OpenPBR block only after the early fibre/coverage exits.
+    // The native initializer above reads its four required groups directly from
+    // device memory, so this large thread value starts at the same point as it
+    // did before the native fast path and does not inflate the early live state.
     OpenPBRParams openpbrMat;
     if (isOpenPBR)
     {
@@ -3596,7 +3608,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         float emissionMis = 1.0f;
         if (SPEC_LIGHTS && depth > 0u && !specularBounce && neeDone && !isCurve && uniforms.numEmissiveMeshes > 0u)
         {
-            const uint32_t geometryId = rec.geomEntryIndex - inst.userID;
+            const uint32_t geometryId = rec.geomEntryIndex - instances[rec.instanceIndex].userID;
             const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
             const float lightPdf =
                 emissiveMeshHitPdf(uniforms, instances, vertexBuffer, prevVertexBuffer, indexBuffer, rec.instanceIndex,
@@ -4545,9 +4557,15 @@ static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
         fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, stored.primitiveId, interpolateMotion,
                              motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
                              geometryNormal, edge1, edge2, uvArea2);
-        normal = transformNormal(normalize(objectNormal), objectToWorld);
-        tangent = orthonormalizeTangent(normal, transformDirection(normalize(objectTangent), objectToWorld));
-        geometryNormal = transformNormal(geometryNormal, objectToWorld);
+        const float3 axisX = objectToWorld[0].xyz;
+        const float3 axisY = objectToWorld[1].xyz;
+        const float3 axisZ = objectToWorld[2].xyz;
+        const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
+        normal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                     normalTransform.cofactorZ, normalTransform.orientation);
+        geometryNormal = transformNormalFast(geometryNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                             normalTransform.cofactorZ, normalTransform.orientation);
+        tangent = orthonormalizeTangent(normal, transformDirection(objectTangent, axisX, axisY, axisZ));
     }
     initSurfaceInteraction(si, materials[entry.materialId], position, normal, geometryNormal, tangent,
                            cross(normal, tangent) * tangentSign, uv, float3(stored.rayDirection), vertexColor,
@@ -5119,10 +5137,16 @@ static void guideImpl(uint gid,
             fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, hit.primitiveId, interpolateMotion,
                                  motionTime, hit.barycentrics, objectNormal, objectTangent, uv, vertexColor,
                                  tangentSign, objectGeomNormal, edge1, edge2, uvArea2);
-            shadingNormal = transformNormal(normalize(objectNormal), objectToWorld);
-            shadingTangent =
-                orthonormalizeTangent(shadingNormal, transformDirection(normalize(objectTangent), objectToWorld));
-            shadingGeomNormal = transformNormal(objectGeomNormal, objectToWorld);
+            const float3 axisX = objectToWorld[0].xyz;
+            const float3 axisY = objectToWorld[1].xyz;
+            const float3 axisZ = objectToWorld[2].xyz;
+            const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
+            shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                                normalTransform.cofactorZ, normalTransform.orientation);
+            shadingGeomNormal =
+                transformNormalFast(objectGeomNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                    normalTransform.cofactorZ, normalTransform.orientation);
+            shadingTangent = orthonormalizeTangent(shadingNormal, transformDirection(objectTangent, axisX, axisY, axisZ));
         }
 
         const float3 binormal = cross(shadingNormal, shadingTangent) * tangentSign;

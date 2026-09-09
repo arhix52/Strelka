@@ -48,6 +48,9 @@ public:
     static constexpr uint32_t kAllOpenPBR = 1u << 18;
     static constexpr uint32_t kSamplerShift = 19u;
     static constexpr uint32_t kSamplerMask = 7u << kSamplerShift;
+    // Every surface was authored as OpenPBR rather than translated from glTF.
+    // This lets shade delete the generic material initializer entirely.
+    static constexpr uint32_t kAllNativeOpenPBR = 1u << 22;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -104,6 +107,7 @@ struct IntegratorFeatureInputs
     bool risOne = false;
     bool writeAov = false;
     bool allOpenPBR = false;
+    bool allNativeOpenPBR = false;
     uint32_t samplerType = 0u;
 };
 
@@ -146,6 +150,8 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kAov;
     if (in.allOpenPBR)
         features |= WavefrontFeatures::kAllOpenPBR | WavefrontFeatures::kOpenPBR;
+    if (in.allNativeOpenPBR)
+        features |= WavefrontFeatures::kAllNativeOpenPBR | WavefrontFeatures::kAllOpenPBR | WavefrontFeatures::kOpenPBR;
     features |= (in.samplerType & 7u) << WavefrontFeatures::kSamplerShift;
     return WavefrontFeatures(features);
 }

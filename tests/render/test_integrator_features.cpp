@@ -72,6 +72,13 @@ TEST_CASE("packWavefrontFeatures sets each independent flag")
     CHECK(allOpenPBR.has(WavefrontFeatures::kOpenPBR));
 
     in = {};
+    in.allNativeOpenPBR = true;
+    const WavefrontFeatures allNativeOpenPBR = packWavefrontFeatures(in);
+    CHECK(allNativeOpenPBR.has(WavefrontFeatures::kAllNativeOpenPBR));
+    CHECK(allNativeOpenPBR.has(WavefrontFeatures::kAllOpenPBR));
+    CHECK(allNativeOpenPBR.has(WavefrontFeatures::kOpenPBR));
+
+    in = {};
     in.samplerType = 4u;
     const uint32_t sampler =
         (packWavefrontFeatures(in).bits() & WavefrontFeatures::kSamplerMask) >> WavefrontFeatures::kSamplerShift;

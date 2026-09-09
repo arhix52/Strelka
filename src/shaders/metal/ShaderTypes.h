@@ -1106,6 +1106,10 @@ struct IesGpuProfileHeader
 #define MATERIAL_FEATURE_SUBSURFACE (1u << 13)
 #define MATERIAL_FEATURE_IRIDESCENCE (1u << 14)
 #define MATERIAL_FEATURE_SPECULAR_COLOR (1u << 15)
+// Authored OpenPBR owns its factors and maps outright. A material translated
+// from glTF still needs the generic texture path before the OpenPBR BSDF, so
+// keep the two cases distinguishable after both use MATERIAL_TYPE_OPENPBR.
+#define MATERIAL_FEATURE_NATIVE_OPENPBR (1u << 16)
 
 struct Material
 {

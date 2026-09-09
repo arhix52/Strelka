@@ -1728,6 +1728,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&allOpenPBR, MTL::DataTypeBool, (NS::UInteger)17);
     const uint32_t samplerType = (features & WavefrontFeatures::kSamplerMask) >> WavefrontFeatures::kSamplerShift;
     values->setConstantValue(&samplerType, MTL::DataTypeUInt, (NS::UInteger)18);
+    const bool allNativeOpenPBR = (features & WavefrontFeatures::kAllNativeOpenPBR) != 0;
+    values->setConstantValue(&allNativeOpenPBR, MTL::DataTypeBool, (NS::UInteger)19);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
@@ -1856,9 +1858,9 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     }
     STRELKA_INFO(
         "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
-        "curves={} sharcUpdate={} openpbr={} allOpenpbr={} risOne={} aov={} sampler={} metal4={}",
+        "curves={} sharcUpdate={} openpbr={} allOpenpbr={} allNativeOpenpbr={} risOne={} aov={} sampler={} metal4={}",
         envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, allOpenPBR,
-        risOne, aov, samplerType, useMetal4);
+        allNativeOpenPBR, risOne, aov, samplerType, useMetal4);
     // maxTotalThreadsPerThreadgroup is Metal's available proxy for per-pipeline register pressure.
     auto tgLimit = [](MTL::ComputePipelineState* p) -> uint32_t {
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;

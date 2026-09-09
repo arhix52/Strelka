@@ -53,6 +53,7 @@ constant bool kFcRestir [[function_constant(14)]];
 constant bool kFcRisOne [[function_constant(15)]];
 constant bool kFcAov [[function_constant(16)]];
 constant bool kFcAllOpenPBR [[function_constant(17)]];
+constant bool kFcAllNativeOpenPBR [[function_constant(19)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -87,15 +88,40 @@ constant bool SPEC_RESTIR = is_function_constant_defined(kFcRestir) ? kFcRestir 
 constant bool SPEC_RIS_ONE = is_function_constant_defined(kFcRisOne) ? kFcRisOne : false;
 constant bool SPEC_AOV = is_function_constant_defined(kFcAov) ? kFcAov : true;
 constant bool SPEC_ALL_OPENPBR = is_function_constant_defined(kFcAllOpenPBR) ? kFcAllOpenPBR : false;
+constant bool SPEC_ALL_NATIVE_OPENPBR = is_function_constant_defined(kFcAllNativeOpenPBR) ? kFcAllNativeOpenPBR : false;
 
-__attribute__((always_inline)) float3 transformDirection(float3 p, float4x4 transform)
+__attribute__((always_inline)) float3 transformDirection(float3 p, float3 axisX, float3 axisY, float3 axisZ)
 {
-    return (transform * float4(p.x, p.y, p.z, 0.0f)).xyz;
+    return axisX * p.x + axisY * p.y + axisZ * p.z;
 }
 
-__attribute__((always_inline)) float3 transformNormal(float3 n, float4x4 transform)
+struct FastNormalTransform
 {
-    return transformAffineNormal(transform[0].xyz, transform[1].xyz, transform[2].xyz, n);
+    float3 cofactorX;
+    float3 cofactorY;
+    float3 cofactorZ;
+    float orientation;
+};
+
+// Triangle instances have ordinary scene-scale affine transforms. Compute the
+// inverse-transpose numerator once per hit and share it between the interpolated
+// and geometric normals. The robust analytic-light path intentionally remains
+// in analytic_light.h for extreme or nearly singular light transforms.
+static __attribute__((always_inline)) FastNormalTransform makeFastNormalTransform(float3 axisX, float3 axisY, float3 axisZ)
+{
+    FastNormalTransform result;
+    result.cofactorX = cross(axisY, axisZ);
+    result.cofactorY = cross(axisZ, axisX);
+    result.cofactorZ = cross(axisX, axisY);
+    result.orientation = dot(result.cofactorZ, axisZ) < 0.0f ? -1.0f : 1.0f;
+    return result;
+}
+
+static __attribute__((always_inline)) float3
+transformNormalFast(float3 n, float3 cofactorX, float3 cofactorY, float3 cofactorZ, float orientation)
+{
+    const float3 cofactorNormal = cofactorX * n.x + cofactorY * n.y + cofactorZ * n.z;
+    return orientation * normalize(cofactorNormal);
 }
 
 //  valid range of coordinates [-1; 1]
@@ -497,6 +523,76 @@ inline float texLod(Tex2D tex, float lodBase, bool hasLod)
     }
     const float dim = float(tex.get_width() * tex.get_height());
     return max(0.0f, lodBase + 0.5f * log2(max(dim, 1.0f)));
+}
+
+// Geometry-only half of surface initialisation. Native OpenPBR materials use
+// it without ever touching the parallel generic Material record; their maps
+// need the frame before their parameter block can be finalised below.
+static void initSurfaceGeometry(thread SurfaceInteraction& si,
+                                float3 worldPosition,
+                                float3 worldNormal,
+                                float3 geomNormal,
+                                float3 worldTangent,
+                                float3 worldBinormal,
+                                float2 uv,
+                                float3 rayDir)
+{
+    si.position = worldPosition;
+    si.shading_normal = worldNormal;
+    si.geometry_normal = geomNormal;
+    si.tangent = worldTangent;
+    si.bitangent = worldBinormal;
+    si.uv = uv;
+    si.wo = -rayDir;
+    si.front_face = dot(geomNormal, -rayDir) > 0.0f;
+    si.diffuse_faces_away = false;
+    si.bump_normal = worldNormal;
+}
+
+// Project only the OpenPBR values the integrator reads outside the OpenPBR
+// library. The BSDF itself consumes `p` directly. This avoids constructing a
+// generic MaterialParams block, and in an all-native scene avoids the 296-byte
+// Material table altogether in shade.
+static __attribute__((always_inline)) void initOpenPBRSurfaceMaterial(thread SurfaceInteraction& si,
+                                                                      device const OpenPBRParams& p,
+                                                                      float3 vertexColor)
+{
+    const float3 base = float3(p.base_color.r, p.base_color.g, p.base_color.b);
+    si.albedo = base * vertexColor;
+    // OpenPBR opacity has historically not participated in Metal traversal or
+    // shadow coverage. Preserve that contract here; making it coherent across
+    // all ray types is a separate correctness change, not part of this fast path.
+    si.opacity = 1.0f;
+    // These are compatibility fields read by common integrator code, not by
+    // the OpenPBR BSDF. Match the old MaterialX -> Material projection so this
+    // optimisation changes neither path topology nor the estimator.
+    si.metallic = 0.0f;
+    si.roughness = 0.0001f;
+    si.ior = 0.0f;
+    si.transmission = 0.0f;
+    si.emission = float3(p.emission_color.r, p.emission_color.g, p.emission_color.b) * p.emission_luminance;
+    si.clearcoat = 0.0f;
+    si.clearcoat_roughness = 0.0001f;
+    si.clearcoat_ior = 1.5f;
+    si.anisotropy = 0.0f;
+    si.specular = 0.0f;
+    si.specular_color = float3(1.0f);
+    si.subsurface_reference = float3(0.0f);
+    si.iridescence = 0.0f;
+    si.iridescence_ior = 1.3f;
+    si.iridescence_thickness = 0.0f;
+    si.diffuse_transmission = 0.0f;
+    si.diffuse_transmission_color = float3(0.0f);
+    si.sheen = 0.0f;
+    si.sheen_roughness = 0.0f;
+    si.sheen_color = float3(0.0f);
+    si.subsurface = saturate(p.subsurface_weight);
+    si.subsurface_radius = float3(0.0f);
+    si.subsurface_anisotropy = 0.0f;
+    si.material_type = MATERIAL_TYPE_OPENPBR;
+    si.thin_walled = p.geometry_thin_walled;
+    si.dielectric_priority = 0u;
+    si.exterior_ior = 1.0f;
 }
 
 // Fill SurfaceInteraction from hit geometry and sample Material textures

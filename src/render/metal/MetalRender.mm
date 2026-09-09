@@ -1945,6 +1945,7 @@ void MetalRender::render(Buffer* output)
             featureIn.hasCurves = mGeometry.hasCurves();
             featureIn.hasOpenPBR = mMaterials.hasOpenPBRMaterials();
             featureIn.allOpenPBR = mMaterials.allMaterialsOpenPBR() && !featureIn.hasCurves;
+            featureIn.allNativeOpenPBR = mMaterials.allMaterialsNativeOpenPBR() && !featureIn.hasCurves;
             featureIn.auditRenderWork = auditRenderWork;
             featureIn.restirRayTracedDiagnostic = pUniformData->restirBiasCorrection == 2u ||
                                                   pUniformData->restirInitialVisibility != 0u ||

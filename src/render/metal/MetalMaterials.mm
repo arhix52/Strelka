@@ -23,6 +23,14 @@ namespace oka::metal
 /// read as colour loses the two-channel encoding the BC5 path depends on.
 namespace
 {
+bool isNativeOpenPBRDescription(const Scene::MaterialDescription& desc)
+{
+    // MaterialX may bind over an existing glTF material and intentionally
+    // leaves its old paths in the scene description. The type is the source of
+    // truth: scene-wide glTF conversion changes only the GPU mirror later.
+    return desc.params.material_type == MATERIAL_TYPE_OPENPBR;
+}
+
 std::pair<bool, TextureKind> openpbrSlotKind(uint32_t slot)
 {
     switch (slot)
@@ -159,7 +167,8 @@ Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
                         (p.iridescence > 0.0f ? MATERIAL_FEATURE_IRIDESCENCE : 0u) |
                         ((p.specular_color.x != 1.0f || p.specular_color.y != 1.0f || p.specular_color.z != 1.0f) ?
                              MATERIAL_FEATURE_SPECULAR_COLOR :
-                             0u);
+                             0u) |
+                        (isNativeOpenPBRDescription(currMatDesc) ? MATERIAL_FEATURE_NATIVE_OPENPBR : 0u);
 
     return material;
 }
@@ -198,6 +207,7 @@ void MetalMaterials::release()
     }
     mSceneHasOpenPBRMaterials = false;
     mSceneAllOpenPBRMaterials = false;
+    mSceneAllNativeOpenPBRMaterials = false;
     mSceneHasAlphaMaterials = false;
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
@@ -306,6 +316,7 @@ void MetalMaterials::publishParameters(Scene* scene)
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
     mSceneAllOpenPBRMaterials = !matDescs.empty();
+    mSceneAllNativeOpenPBRMaterials = !matDescs.empty();
 
     // Which material model the scene shades with. A render setting rather than a
     // scene property on purpose: it makes the two models an A/B on one asset,
@@ -340,6 +351,10 @@ void MetalMaterials::publishParameters(Scene* scene)
     {
         const auto& p = desc.params;
         st.gpuMaterials.push_back(makeMaterialParams(desc));
+        if (!isNativeOpenPBRDescription(desc))
+        {
+            mSceneAllNativeOpenPBRMaterials = false;
+        }
         if (openpbrModel || anyAuthored)
         {
             // The table stays dense so one material id indexes both arrays, even

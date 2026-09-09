@@ -91,6 +91,10 @@ public:
     {
         return mSceneAllOpenPBRMaterials;
     }
+    bool allMaterialsNativeOpenPBR() const
+    {
+        return mSceneAllNativeOpenPBRMaterials;
+    }
     bool hasAlphaMaterials() const
     {
         return mSceneHasAlphaMaterials;
@@ -126,6 +130,7 @@ private:
     MTL::Buffer* mOpenPBRTexBuffer = nullptr;
     bool mSceneHasOpenPBRMaterials = false;
     bool mSceneAllOpenPBRMaterials = false;
+    bool mSceneAllNativeOpenPBRMaterials = false;
     bool mSceneHasAlphaMaterials = false;
     bool mSceneHasBoundedMedium = false;
     bool mSceneHasSubsurfaceMaterials = false;
