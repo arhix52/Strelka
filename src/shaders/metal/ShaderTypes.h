@@ -676,6 +676,10 @@ struct GeometryEntry
 
 #define GEOM_FLAG_CURVE (1u << 31)
 #define GEOM_CURVE_CUBIC (1u << 30)
+// Scheduling hint only: group similarly expensive BSDFs without a separate
+// sort pass. It never selects shading behavior, so a stale hint is harmless.
+#define GEOM_SHADE_BUCKET_SHIFT 28u
+#define GEOM_SHADE_BUCKET_MASK (3u << GEOM_SHADE_BUCKET_SHIFT)
 #define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
 // Wavefront path state is memory-traffic critical and fixed at 24 bytes; feature-specific state uses side tables.

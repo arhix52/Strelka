@@ -297,6 +297,10 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         entry.vbOffset = mesh.mVbOffset;
         entry.indexOffset = mesh.mIndex;
         entry.materialId = inst.mMaterialId;
+        if (inst.mMaterialId < mMaterials->shadeBucket().size())
+        {
+            entry.flags = uint32_t(mMaterials->shadeBucket()[inst.mMaterialId]) << GEOM_SHADE_BUCKET_SHIFT;
+        }
         mGeometry->geometryEntries().push_back(entry);
     }
 
@@ -362,6 +366,10 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
     entry.materialId = inst.mMaterialId;
     entry.flags = GEOM_FLAG_CURVE | (range.segmentsPerStrand & GEOM_CURVE_STRAND_MASK) |
                   (curve.mType == oka::Curve::Type::eLinear ? 0u : GEOM_CURVE_CUBIC);
+    if (inst.mMaterialId < mMaterials->shadeBucket().size())
+    {
+        entry.flags |= uint32_t(mMaterials->shadeBucket()[inst.mMaterialId]) << GEOM_SHADE_BUCKET_SHIFT;
+    }
     mGeometry->geometryEntries().push_back(entry);
 
     const NS::Object* const geoms[] = { geom };

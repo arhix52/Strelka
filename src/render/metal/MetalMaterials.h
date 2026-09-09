@@ -111,6 +111,10 @@ public:
     {
         return mMaterialIsMediumBoundary;
     }
+    const std::vector<uint8_t>& shadeBucket() const
+    {
+        return mMaterialShadeBucket;
+    }
 
 private:
     MTL::Device* mDevice = nullptr;
@@ -127,6 +131,7 @@ private:
     bool mSceneHasSubsurfaceMaterials = false;
     std::vector<uint32_t> mMaterialIsMediumBoundary;
     std::vector<uint8_t> mMaterialIsCutout;
+    std::vector<uint8_t> mMaterialShadeBucket;
 
     MaterialBuildState* mBuild = nullptr;
 };

@@ -132,6 +132,7 @@ WF_ANALYTIC_INTERSECTION_FAMILY(RestirSpatialDiagnostic)
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
 #define WF_CTRL_STATS_PATHS 32
 #define WF_CTRL_STATS_SHADOW 64
+#define WF_HIT_BUCKET_COUNT 4u
 
 // Shared pre-traversal breadcrumbs. The prepare dispatch completes before
 // extend starts, so these survive even when one of the first few rays wedges in
@@ -785,6 +786,81 @@ static inline device HitRecord* wavefrontHitRecord(device char* records, uint32_
     return (device HitRecord*)(records + size_t(index) * stride);
 }
 
+static inline void bucketPush(device atomic_uint* counter, device uint32_t* queueOut, uint32_t pathIndex)
+{
+    const uint32_t rank = simd_prefix_exclusive_sum(1u);
+    const uint32_t total = simd_sum(1u);
+    uint32_t base = 0u;
+    if (simd_is_first())
+    {
+        base = atomic_fetch_add_explicit(counter, total, memory_order_relaxed);
+    }
+    queueOut[simd_broadcast_first(base) + rank] = pathIndex;
+}
+
+// Bucket at the producer rather than scanning the completed hit queue. The
+// total count and each participating bucket cost one SIMD-coalesced atomic;
+// there is no sorting dispatch and no per-hit atomic.
+static inline void hitQueuePush(constant Uniforms& uniforms,
+                                device atomic_uint* totalCounter,
+                                device uint32_t* queue,
+                                uint32_t pathIndex,
+                                uint32_t capacity,
+                                uint32_t bucket)
+{
+    const uint32_t total = simd_sum(1u);
+    if (simd_is_first())
+    {
+        const uint32_t base = atomic_fetch_add_explicit(totalCounter, total, memory_order_relaxed);
+        auditWork(uniforms, WORK_QUEUE_APPENDS, total);
+        if (base >= capacity || total > capacity - base)
+        {
+            auditWork(uniforms, WORK_QUEUE_OVERFLOWS, base >= capacity ? total : total - (capacity - base));
+        }
+    }
+
+    device atomic_uint* counters = (device atomic_uint*)queue;
+    device uint32_t* buckets = queue + WF_HIT_BUCKET_COUNT;
+    switch (bucket)
+    {
+    case 0u:
+        bucketPush(&counters[0], buckets, pathIndex);
+        break;
+    case 1u:
+        bucketPush(&counters[1], buckets + capacity, pathIndex);
+        break;
+    case 2u:
+        bucketPush(&counters[2], buckets + 2u * capacity, pathIndex);
+        break;
+    default:
+        bucketPush(&counters[3], buckets + 3u * capacity, pathIndex);
+        break;
+    }
+}
+
+static inline uint32_t bucketedHitIndex(uint32_t index, device const uint32_t* queue, device const uint32_t* control)
+{
+    const uint32_t capacity = control[WF_CTRL_CAPACITY];
+    const uint32_t count0 = min(queue[0], capacity);
+    if (index < count0)
+    {
+        return WF_HIT_BUCKET_COUNT + index;
+    }
+    index -= count0;
+    const uint32_t count1 = min(queue[1], capacity);
+    if (index < count1)
+    {
+        return WF_HIT_BUCKET_COUNT + capacity + index;
+    }
+    index -= count1;
+    const uint32_t count2 = min(queue[2], capacity);
+    if (index < count2)
+    {
+        return WF_HIT_BUCKET_COUNT + 2u * capacity + index;
+    }
+    return WF_HIT_BUCKET_COUNT + 3u * capacity + index - count2;
+}
+
 static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
                                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                        thread const ExtendIntersection& hit,
@@ -794,7 +870,8 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
                                        device atomic_uint* hitCounter,
                                        device uint32_t* missQueue,
                                        device atomic_uint* missCounter,
-                                       device const uint32_t* control)
+                                       device const uint32_t* control,
+                                       device const GeometryEntry* geometryEntries)
 {
     if (hit.type == intersection_type::none)
     {
@@ -812,7 +889,9 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
         (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
     rec.distance = hit.distance;
     *wavefrontHitRecord(hits, tid) = rec;
-    queuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
+    const uint32_t bucket =
+        isLight ? 3u : ((geometryEntries[rec.geomEntryIndex].flags & GEOM_SHADE_BUCKET_MASK) >> GEOM_SHADE_BUCKET_SHIFT);
+    hitQueuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY], bucket);
 }
 
 // Compact only dense subsurface paths. Normal paths stay in the original queue:
@@ -886,7 +965,8 @@ static void sssWalkImpl(uint gid,
                         device uint32_t* queueOut,
                         device atomic_uint* outCounter,
                         device const uint32_t* control,
-                        uint32_t rayMask)
+                        uint32_t rayMask,
+                        device const GeometryEntry* geometryEntries)
 {
     if (gid >= sssControl[1])
     {
@@ -961,8 +1041,8 @@ static void sssWalkImpl(uint gid,
             paths[tid] = p;
             mediumState.medium = medium | (step << MEDIUM_STEP_SHIFT);
             mediumPaths[tid] = mediumState;
-            enqueueExtendSurfaceResult(
-                uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control);
+            enqueueExtendSurfaceResult(uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue,
+                                       missCounter, control, geometryEntries);
             return;
         }
 
@@ -1012,11 +1092,12 @@ static void sssWalkImpl(uint gid,
                      device atomic_uint* hitCounter [[buffer(12)]], device uint32_t* missQueue [[buffer(13)]],         \
                      device atomic_uint* missCounter [[buffer(14)]], device uint32_t* queueOut [[buffer(15)]],         \
                      device atomic_uint* outCounter [[buffer(16)]], device const uint32_t* control [[buffer(17)]],     \
-                     constant uint32_t& rayMask [[buffer(18)]])                                                        \
+                     constant uint32_t& rayMask [[buffer(18)]],                                                        \
+                     device const GeometryEntry* geometryEntries [[buffer(19)]])                                       \
     {                                                                                                                  \
         sssWalkImpl<TRAITS>(gid, uniforms, instances, volumeAccelerationStructure, rays, paths, mediumPaths,           \
                             materials, sampleIdx, sssQueue, sssControl, hits, hitQueue, hitCounter, missQueue,         \
-                            missCounter, queueOut, outCounter, control, rayMask);                                      \
+                            missCounter, queueOut, outCounter, control, rayMask, geometryEntries);                     \
     }
 
 WF_SSS_WALK_ENTRY(wavefrontSssWalk, MotionTraversal)
@@ -1045,6 +1126,7 @@ static void extendImpl(uint gid,
                        // sample a free flight and reads it from the material the path is inside.
                        device const Material* materials,
                        device const MediumPathState* mediumPaths,
+                       device const GeometryEntry* geometryEntries,
                        typename T::table functionTable,
                        // Chosen per dispatch rather than per ray: the only thing it distinguishes
                        // is the camera bounce from the rest, and `extend` is encoded once per
@@ -1205,12 +1287,12 @@ static void extendImpl(uint gid,
         mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
         mediumRec.distance = mediumScatterT;
         *wavefrontHitRecord(hits, tid) = mediumRec;
-        queuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY]);
+        hitQueuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY], 3u);
         return;
     }
 
     enqueueExtendSurfaceResult(
-        uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control);
+        uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control, geometryEntries);
 }
 
 
@@ -1226,11 +1308,11 @@ static void extendImpl(uint gid,
         device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
         constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
         constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],       \
-        TRAITS::table functionTable [[buffer(19)]])                                                                    \
+        device const GeometryEntry* geometryEntries [[buffer(18)]], TRAITS::table functionTable [[buffer(19)]])        \
     {                                                                                                                  \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
                            rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
-                           materials, mediumPaths, functionTable, rayMask);                                            \
+                           materials, mediumPaths, geometryEntries, functionTable, rayMask);                           \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -2327,7 +2409,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     {
         return;
     }
-    const uint32_t tid = queue[gid];
+    const uint32_t tid = queue[bucketedHitIndex(gid, queue, control)];
     device SharcHashEntry* sharcHashEntries = (device SharcHashEntry*)uniforms.sharcHashData;
     device const packed_float3* curvePoints = (device const packed_float3*)uniforms.curvePointData;
     device const char* prevFrameVertexBuffer = sharcPassBuffer0;
@@ -4070,6 +4152,16 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
     }
 
+    // Direct lighting at this vertex is complete. A terminal path has no next
+    // segment, so drawing and evaluating the full layered BSDF cannot affect
+    // the image. SHARC update still needs the sampled lobe to record its
+    // radiance-direction weight.
+    if (!SPEC_SHARC_UPDATE && depth + 1u >= uniforms.maxDepth)
+    {
+        radianceOut[tid] += float4(radiance, 0.0f);
+        return;
+    }
+
     const RandomSample4 bsdfRandom =
         random4<SampleDimension::eBSDF0, SampleDimension::eBSDF1, SampleDimension::eBSDF2, SampleDimension::eBSDF3>(
             rng, uniforms.samplerType);
@@ -5155,7 +5247,8 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
                              constant uint32_t& traversalBatchCount [[buffer(11)]],
                              device const MediumPathState* mediumPaths [[buffer(12)]],
                              constant uint32_t& diagnosticsMediumEnabled [[buffer(13)]],
-                             device uint32_t* sssControl [[buffer(14)]])
+                             device uint32_t* sssControl [[buffer(14)]],
+                             device uint32_t* hitQueue [[buffer(15)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t n = min(control[srcIdx], control[WF_CTRL_CAPACITY]);
@@ -5207,6 +5300,10 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_HIT] = 0u;
     control[WF_CTRL_MISS] = 0u;
     sssControl[0] = 0u;
+    for (uint32_t bucket = 0u; bucket < WF_HIT_BUCKET_COUNT; ++bucket)
+    {
+        hitQueue[bucket] = 0u;
+    }
 }
 
 // Between `extend` and the two stages that consume its classification.

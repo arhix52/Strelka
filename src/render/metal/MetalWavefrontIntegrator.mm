@@ -717,6 +717,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(mMediumPathStateBuffer, 0, 12);
                 table->setAddress(diagnosticsMediumEnabled, 13);
                 bind(mSssControlBuffer, 0, 14);
+                bind(mHitQueueBuffer, 0, 15);
                 enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
                 barrier();
                 mark(kStageExtend);
@@ -743,7 +744,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setAddress(ring.push(extendMask), 14);
             table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
             bind(mMediumPathStateBuffer, 0, 17);
-            bind(scene.lightBuffer, 0, 18);
+            bind(scene.geometryEntryBuffer, 0, 18);
             table->setResource(
                 (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
             const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete ? 0u : chunk.traversalBatchBegin;
@@ -787,7 +788,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     table->setAddress(ring.push(extendMask), 14);
                     table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
                     bind(mMediumPathStateBuffer, 0, 17);
-                    bind(scene.lightBuffer, 0, 18);
+                    bind(scene.geometryEntryBuffer, 0, 18);
                     table->setResource(
                         (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
                 }
@@ -835,6 +836,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             const uint32_t extendMask =
                 (bounce == 0) ? uniforms->primaryRayMask : (uniforms->primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN);
             table->setAddress(ring.push(extendMask), 18);
+            bind(scene.geometryEntryBuffer, 0, 19);
             enc->dispatchThreadgroups(mSssControlBuffer->gpuAddress() + 2u * sizeof(uint32_t), tg);
             barrier();
         }
@@ -1356,6 +1358,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(mMediumPathStateBuffer, 0, 12);
             enc->setBytes(&diagnosticsMediumEnabled, sizeof(diagnosticsMediumEnabled), 13);
             enc->setBuffer(mSssControlBuffer, 0, 14);
+            enc->setBuffer(mHitQueueBuffer, 0, 15);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             // Sort the queue this bounce is about to traverse. Bounce 0 is the
@@ -1400,7 +1403,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setAccelerationStructure(scene.volumeAccelerationStructure, 15);
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 16);
             enc->setBuffer(mMediumPathStateBuffer, 0, 17);
-            enc->setBuffer(scene.lightBuffer, 0, 18);
+            enc->setBuffer(scene.geometryEntryBuffer, 0, 18);
             MTL::IntersectionFunctionTable* extendTable =
                 useMotion ? variant->extendTableMotion : variant->extendTableStatic;
             enc->setIntersectionFunctionTable(extendTable, 19);
@@ -1437,6 +1440,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->setBuffer(mControlBuffer, dst * sizeof(uint32_t), 16);
                 enc->setBuffer(mControlBuffer, 0, 17);
                 enc->setBytes(&extendMask, sizeof(uint32_t), 18);
+                enc->setBuffer(scene.geometryEntryBuffer, 0, 19);
                 enc->dispatchThreadgroups(mSssControlBuffer, 2u * sizeof(uint32_t), tg);
                 enc->memoryBarrier(MTL::BarrierScopeBuffers);
             }
@@ -2033,7 +2037,8 @@ void MetalWavefrontIntegrator::ensureBuffers(
         memset(mIorStatsBuffer->contents(), 0, mIorStatsBuffer->length());
     }
     mAovBuffer = mDevice->newBuffer(layout.aovBytes, MTL::ResourceStorageModePrivate);
-    mHitQueueBuffer = mDevice->newBuffer(layout.hitQueueBytes, MTL::ResourceStorageModePrivate);
+    mHitQueueBuffer =
+        mDevice->newBuffer(4u * layout.hitQueueBytes + 4u * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mMissQueueBuffer = mDevice->newBuffer(layout.missQueueBytes, MTL::ResourceStorageModePrivate);
     if (restirEnabled)
     {

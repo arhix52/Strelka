@@ -189,6 +189,7 @@ void MetalMaterials::release()
     mSceneHasSubsurfaceMaterials = false;
     mMaterialIsMediumBoundary.clear();
     mMaterialIsCutout.clear();
+    mMaterialShadeBucket.clear();
 }
 
 void MetalMaterials::uploadOpenPBRBuffer(const std::vector<OpenPBRParams>& params)
@@ -285,6 +286,8 @@ void MetalMaterials::publishParameters(Scene* scene)
     st.gpuMaterials.reserve(matDescs.size());
     mMaterialIsCutout.clear();
     mMaterialIsMediumBoundary.clear();
+    mMaterialShadeBucket.clear();
+    mMaterialShadeBucket.reserve(matDescs.size());
     mSceneHasAlphaMaterials = false;
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
@@ -456,6 +459,34 @@ void MetalMaterials::publishParameters(Scene* scene)
         }
         if (st.gpuMaterials.back().material_type != MATERIAL_TYPE_OPENPBR)
             mSceneAllOpenPBRMaterials = false;
+
+        // Four broad classes are enough to keep the main OpenPBR branches
+        // coherent. The key is packed into GeometryEntry once; extend then
+        // reads no material data merely to schedule shade.
+        uint8_t shadeBucket = 0u;
+        if (st.gpuMaterials.back().material_type == MATERIAL_TYPE_HAIR)
+        {
+            shadeBucket = 3u;
+        }
+        else if (st.gpuMaterials.back().material_type == MATERIAL_TYPE_OPENPBR && !openpbrParams.empty())
+        {
+            const OpenPBRParams& o = openpbrParams.back();
+            const uint32_t volumeMaps = (1u << OPENPBR_TEX_SUBSURFACE_WEIGHT) | (1u << OPENPBR_TEX_SUBSURFACE_COLOR) |
+                                        (1u << OPENPBR_TEX_SUBSURFACE_RADIUS);
+            const uint32_t layerMaps = (1u << OPENPBR_TEX_COAT_WEIGHT) | (1u << OPENPBR_TEX_FUZZ_WEIGHT) |
+                                       (1u << OPENPBR_TEX_COAT_COLOR) | (1u << OPENPBR_TEX_FUZZ_COLOR);
+            if (o.transmission_weight > 0.0f || o.subsurface_weight > 0.0f || (o.texture_mask & volumeMaps) != 0u)
+            {
+                shadeBucket = 2u;
+            }
+            else if (o.coat_weight > 0.0f || o.fuzz_weight > 0.0f || o.thin_film_weight > 0.0f ||
+                     (o.texture_mask & layerMaps) != 0u)
+            {
+                shadeBucket = 1u;
+            }
+        }
+        mMaterialShadeBucket.push_back(shadeBucket);
+
         if (p.alpha_mode != ALPHA_MODE_OPAQUE)
             mSceneHasAlphaMaterials = true;
         // Both kinds of medium compile into the same free-flight path.
