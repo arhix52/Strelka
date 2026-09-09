@@ -104,28 +104,26 @@ Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
     material.roughness = p.roughness;
     material.ior = p.ior;
     material.specular = p.specular;
-    material.subsurface_reference = packed_float3(simd_make_float3(
-    p.subsurface_reference.x, p.subsurface_reference.y, p.subsurface_reference.z));
+    material.subsurface_reference =
+        packed_float3(simd_make_float3(p.subsurface_reference.x, p.subsurface_reference.y, p.subsurface_reference.z));
     material.iridescence = p.iridescence;
     material.iridescence_ior = p.iridescence_ior;
     material.iridescence_thickness = p.iridescence_thickness;
-    material.specular_color = packed_float3(
-    simd_make_float3(p.specular_color.x, p.specular_color.y, p.specular_color.z));
+    material.specular_color = packed_float3(simd_make_float3(p.specular_color.x, p.specular_color.y, p.specular_color.z));
     material.clearcoat_ior = p.clearcoat_ior;
     material.medium_flags = p.medium_flags;
-    material.medium_emission = packed_float3(
-    simd_make_float3(p.medium_emission.x, p.medium_emission.y, p.medium_emission.z));
+    material.medium_emission =
+        packed_float3(simd_make_float3(p.medium_emission.x, p.medium_emission.y, p.medium_emission.z));
     material.subsurface = p.subsurface;
     material.subsurface_anisotropy = p.subsurface_anisotropy;
-    material.subsurface_radius = packed_float3(
-    simd_make_float3(p.subsurface_radius.x, p.subsurface_radius.y, p.subsurface_radius.z));
+    material.subsurface_radius =
+        packed_float3(simd_make_float3(p.subsurface_radius.x, p.subsurface_radius.y, p.subsurface_radius.z));
     material.sheen = p.sheen;
     material.sheen_roughness = p.sheen_roughness;
-    material.sheen_color =
-    packed_float3(simd_make_float3(p.sheen_color.x, p.sheen_color.y, p.sheen_color.z));
+    material.sheen_color = packed_float3(simd_make_float3(p.sheen_color.x, p.sheen_color.y, p.sheen_color.z));
     material.diffuse_transmission = p.diffuse_transmission;
     material.diffuse_transmission_color = packed_float3(simd_make_float3(
-    p.diffuse_transmission_color.x, p.diffuse_transmission_color.y, p.diffuse_transmission_color.z));
+        p.diffuse_transmission_color.x, p.diffuse_transmission_color.y, p.diffuse_transmission_color.z));
     material.transmission = p.transmission;
     material.clearcoat = p.clearcoat;
     material.clearcoat_roughness = p.clearcoat_roughness;
@@ -137,8 +135,8 @@ Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
     material.alpha_cutoff = p.alpha_cutoff;
     material.alpha_mode = p.alpha_mode;
     material.base_color_alpha = p.base_color_alpha;
-    material.attenuation_color = packed_float3(
-    simd_make_float3(p.attenuation_color.x, p.attenuation_color.y, p.attenuation_color.z));
+    material.attenuation_color =
+        packed_float3(simd_make_float3(p.attenuation_color.x, p.attenuation_color.y, p.attenuation_color.z));
     material.attenuation_distance = p.attenuation_distance;
     material.uv_offset = simd_make_float2(p.uv_offset_x, p.uv_offset_y);
     material.uv_scale = simd_make_float2(p.uv_scale_x, p.uv_scale_y);
@@ -146,6 +144,22 @@ Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
     material.material_type = p.material_type;
     material.thin_walled = p.thin_walled;
     material.dielectric_priority = p.dielectric_priority;
+
+    material.features = (!currMatDesc.baseColorTexPath.empty() ? MATERIAL_TEX_BASE_COLOR : 0u) |
+                        (!currMatDesc.metallicRoughnessTexPath.empty() ? MATERIAL_TEX_METALLIC_ROUGHNESS : 0u) |
+                        (!currMatDesc.normalTexPath.empty() ? MATERIAL_TEX_NORMAL : 0u) |
+                        (!currMatDesc.emissionTexPath.empty() ? MATERIAL_TEX_EMISSION : 0u) |
+                        (!currMatDesc.occlusionTexPath.empty() ? MATERIAL_TEX_OCCLUSION : 0u) |
+                        (p.transmission > 0.0f ? MATERIAL_FEATURE_TRANSMISSION : 0u) |
+                        (p.clearcoat > 0.0f ? MATERIAL_FEATURE_CLEARCOAT : 0u) |
+                        (p.anisotropy != 0.0f ? MATERIAL_FEATURE_ANISOTROPY : 0u) |
+                        (p.diffuse_transmission > 0.0f ? MATERIAL_FEATURE_DIFFUSE_TRANSMISSION : 0u) |
+                        (p.sheen > 0.0f ? MATERIAL_FEATURE_SHEEN : 0u) |
+                        (p.subsurface > 0.0f ? MATERIAL_FEATURE_SUBSURFACE : 0u) |
+                        (p.iridescence > 0.0f ? MATERIAL_FEATURE_IRIDESCENCE : 0u) |
+                        ((p.specular_color.x != 1.0f || p.specular_color.y != 1.0f || p.specular_color.z != 1.0f) ?
+                             MATERIAL_FEATURE_SPECULAR_COLOR :
+                             0u);
 
     return material;
 }
@@ -569,8 +583,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
             return false;
         }
     }
-    auto loadTex = [&](const std::string& path, bool srgb,
-                       TextureKind kind = TextureKind::Color) -> MTL::ResourceID {
+    auto loadTex = [&](const std::string& path, bool srgb, TextureKind kind = TextureKind::Color) -> MTL::ResourceID {
         if (path.empty())
             return MTL::ResourceID{};
         const fs::path fullPath = resourcePath / path;
@@ -606,8 +619,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         // published frame without the table being rebuilt.
         Material& material = st.gpuMaterials[index];
         material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath, true);
-        material.metallicRoughnessTexture =
-            loadTex(currMatDesc.metallicRoughnessTexPath, false, TextureKind::NonColor);
+        material.metallicRoughnessTexture = loadTex(currMatDesc.metallicRoughnessTexPath, false, TextureKind::NonColor);
         material.normalTexture = loadTex(currMatDesc.normalTexPath, false, TextureKind::Normal);
         material.emissionTexture = loadTex(currMatDesc.emissionTexPath, true);
         material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath, false, TextureKind::NonColor);
@@ -635,8 +647,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         }
 
         if (budgetMs > 0.0 &&
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() >=
-                budgetMs)
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() >= budgetMs)
         {
             if (progress)
             {
@@ -656,8 +667,8 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         {
             bytes += t ? t->allocatedSize() : 0;
         }
-        STRELKA_INFO("Textures: {} from cache, {} built and cached, {:.1f} MB on device",
-                     mTextures->cacheHits(), mTextures->cacheMisses(), (double)bytes / (1024.0 * 1024.0));
+        STRELKA_INFO("Textures: {} from cache, {} built and cached, {:.1f} MB on device", mTextures->cacheHits(),
+                     mTextures->cacheMisses(), (double)bytes / (1024.0 * 1024.0));
     }
 
     // The buffer has been live since the parameters were written, and every

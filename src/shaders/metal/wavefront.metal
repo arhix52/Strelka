@@ -771,10 +771,9 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
         mediumPaths[pixelIndex] = mediumState;
     }
 
-    // ior_stack_* take a thread reference; device memory cannot bind to one.
-    IorStack stack;
-    ior_stack_init(stack);
-    iorStacks[pixelIndex] = stack;
+    // The inactive bit in PathState makes stale IOR side-table bytes
+    // unreachable. Initialise the table lazily if this path actually enters a
+    // solid dielectric instead of streaming 36 bytes for every camera sample.
 }
 
 // ---------------------------------------------------------------------------
@@ -1879,7 +1878,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
 
     // Counted here because here is the only place it is visible: the path is
     // gone and it still thinks it is inside glass. See ior_stack.h.
-    if (iorStacks[tid].top >= 0)
+    if ((p.depthAndFlags & PATH_FLAG_IOR_STACK_ACTIVE) != 0u)
     {
         atomic_fetch_add_explicit(&iorStats[IOR_STAT_ESCAPED_INSIDE], 1u, memory_order_relaxed);
     }
@@ -2458,14 +2457,17 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
 
     // Apply enclosing IOR absorption once before all vertex branches; rec.distance is the segment just travelled.
     // Subsurface walks carry their own extinction, while bounded volumes can still overlap enclosing glass.
+    const bool hasIorStack = (p.depthAndFlags & PATH_FLAG_IOR_STACK_ACTIVE) != 0u;
     {
         const uint32_t walk = mediumState.medium & MEDIUM_INDEX_MASK;
         const bool inSubsurfaceWalk =
             SPEC_SSS && walk != 0u && (materials[walk - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u;
-        IorStack preStack = iorStacks[tid];
-        const uint32_t inside = ior_stack_current_material(preStack);
-        if (!inSubsurfaceWalk && inside != 0xFFFFFFFFu)
+        if (!inSubsurfaceWalk && hasIorStack)
         {
+            // The active bit guarantees a valid head; only these paths touch
+            // the strided IOR side table.
+            const int iorTop = iorStacks[tid].top;
+            const uint32_t inside = iorStacks[tid].entries[iorTop].packed & IOR_ENTRY_MATERIAL_MASK;
             device const Material& im = materials[inside];
             const float3 sigma_t =
                 volume_extinction(float3(im.attenuation_color), im.attenuation_distance, uniforms.volumeModel);
@@ -3323,10 +3325,30 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         return;
     }
 
-    IorStack iorStack = iorStacks[tid];
     const bool entering = si.front_face;
-    si.exterior_ior =
-        entering ? ior_stack_current_ior(iorStack) : ior_stack_peek_after_pop_material(iorStack, entry.materialId);
+    if (entering && !hasIorStack)
+    {
+        si.exterior_ior = 1.0f;
+    }
+    else if (entering)
+    {
+        const int iorTop = iorStacks[tid].top;
+        si.exterior_ior = iorTop >= 0 ? iorStacks[tid].entries[iorTop].ior : 1.0f;
+    }
+    else if (hasIorStack)
+    {
+        // Exits need to look below the matching material. They are the uncommon
+        // case that pays for copying the full stack.
+        const IorStack iorStack = iorStacks[tid];
+        si.exterior_ior = ior_stack_peek_after_pop_material(iorStack, entry.materialId);
+    }
+    else
+    {
+        // The camera may start inside a mesh, or an open mesh may expose a back
+        // face before this path has entered any tracked dielectric. Do not read
+        // the deliberately uninitialised cold side table in that case.
+        si.exterior_ior = 1.0f;
+    }
 
     const float3 surfaceEmission = float3(si.emission);
 
@@ -3419,7 +3441,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             guide.origin = packed_float3(offset_ray(si.position, transmitted ? -faceNg : faceNg));
             guide.flags = GUIDE_RAY_ACTIVE | (replaceMaterial ? GUIDE_RAY_REPLACE_MATERIAL : 0u);
             guide.direction = packed_float3(normalize(guideDirection));
-            IorStack guideIorStack = iorStack;
+            IorStack guideIorStack;
+            if (hasIorStack)
+            {
+                guideIorStack = iorStacks[tid];
+            }
+            else
+            {
+                ior_stack_init(guideIorStack);
+            }
             if (!si.thin_walled && !guideOpaque)
             {
                 if (transmitted)
@@ -4226,6 +4256,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // past the critical angle.
         if (!si.thin_walled && !startsSubsurfaceWalk && !diffuseTransmission && !fibreMaterial)
         {
+            IorStack iorStack;
+            if (hasIorStack)
+            {
+                iorStack = iorStacks[tid];
+            }
+            else
+            {
+                ior_stack_init(iorStack);
+            }
             if (entering)
             {
                 // Count stack failures because either leaves the path carrying the wrong medium.
@@ -4242,6 +4281,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     atomic_fetch_add_explicit(&iorStats[IOR_STAT_UNMATCHED], 1u, memory_order_relaxed);
                 }
                 ior_stack_pop_material(iorStack, entry.materialId);
+            }
+            iorStacks[tid] = iorStack;
+            if (iorStack.top >= 0)
+            {
+                p.depthAndFlags |= PATH_FLAG_IOR_STACK_ACTIVE;
+            }
+            else
+            {
+                p.depthAndFlags &= ~PATH_FLAG_IOR_STACK_ACTIVE;
             }
         }
         nextOrigin = offset_ray(si.position, -faceNg);
@@ -4312,8 +4360,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     {
         nextOrigin = offset_ray(si.position, faceNg);
     }
-    iorStacks[tid] = iorStack;
-
     float3 nextDir = normalize(sampleResult.wi);
     if (sssRefractedEntry)
     {
@@ -4412,9 +4458,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const float previousSharcRoughness = unpackSharcRoughness(p.depthAndFlags);
     const float sharcRoughness = min(
         previousSharcRoughness + (((sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0) ? 1.0f : si.roughness), 1.0f);
-    p.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE | (nextSpecular ? PATH_FLAG_SPECULAR : 0u) |
-                      (didNee ? PATH_FLAG_NEE_DONE : 0u) | (p.depthAndFlags & PATH_FLAG_AOV_DONE) |
-                      packSharcRoughness(sharcRoughness);
+    p.depthAndFlags =
+        (depth + 1u) | PATH_FLAG_ALIVE | (nextSpecular ? PATH_FLAG_SPECULAR : 0u) | (didNee ? PATH_FLAG_NEE_DONE : 0u) |
+        (p.depthAndFlags & (PATH_FLAG_AOV_DONE | PATH_FLAG_IOR_STACK_ACTIVE)) | packSharcRoughness(sharcRoughness);
     paths[tid] = p;
 
     auditWork(uniforms, WORK_PATH_CONTINUATIONS);

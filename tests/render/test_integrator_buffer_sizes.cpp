@@ -89,7 +89,7 @@ TEST_CASE("preview presets make wavefront memory growth explicit")
     sz.mediumPathState = 8;
     sz.sharcUpdateState = 168;
     sz.pathRay = 24;
-    sz.hitRecord = 32;
+    sz.hitRecord = 24;
     sz.iorStack = 52;
     sz.radiance = 16;
     sz.guideRay = 32;
@@ -117,13 +117,13 @@ TEST_CASE("preview presets make wavefront memory growth explicit")
 TEST_CASE("ReSTIR scratch reservoir fits in hit storage")
 {
     WavefrontElementSizes sz;
-    sz.hitRecord = 32;
+    sz.hitRecord = 24;
     sz.restirReservoir = 40;
 
     const auto restir = wavefrontBufferLayout(320, 240, sz, 1, true);
     const auto nee = wavefrontBufferLayout(320, 240, sz, 1, false);
     CHECK(restir.hitBytes == size_t{ 320 } * 240 * 40);
-    CHECK(nee.hitBytes == size_t{ 320 } * 240 * 32);
+    CHECK(nee.hitBytes == size_t{ 320 } * 240 * 24);
 }
 
 TEST_CASE("SHARC update state follows the sparse update grid")

@@ -259,7 +259,7 @@ static float resolveOpacity(device const Material& material, float2 uv)
     // glTF defaults to REPEAT, so transformed UVs must not use Metal's clamp-to-edge default.
     constexpr sampler alphaSampler(mag_filter::linear, min_filter::linear, address::repeat);
     float alpha = material.base_color_alpha;
-    if (!is_null_texture(material.baseColorTexture))
+    if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
     {
         uv = applyTextureTransform(uv, material);
         // RGBA8Unorm_sRGB puts only RGB through the transfer function, so the
@@ -532,7 +532,8 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     const bool hasLod = lodBase > -1e29f;
     // One transform for every slot of the material -- see readTextureTransform()
     // in the loader for why that is not a compromise in practice.
-    const float2 tuv = applyTextureTransform(uv, material);
+    const uint32_t materialFeatures = material.features;
+    const float2 tuv = (materialFeatures & MATERIAL_TEXTURE_MASK) != 0u ? applyTextureTransform(uv, material) : uv;
     si.wo = -rayDir;
     si.front_face = dot(geomNormal, -rayDir) > 0.0f;
     // Initialize every field because callers may pass an uninitialized SurfaceInteraction.
@@ -542,7 +543,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     // Sample base color texture. glTF composes base colour as
     // baseColorFactor * baseColorTexture * COLOR_0, all three multiplicative.
     float3 baseColor = float3(material.base_color) * vertexColor;
-    if (!is_null_texture(material.baseColorTexture))
+    if ((materialFeatures & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
     {
         baseColor *= (hasLod ? material.baseColorTexture.sample(
                                    texSamplerMip, tuv, level(texLod(material.baseColorTexture, lodBase, hasLod))) :
@@ -555,7 +556,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     // Sample metallic-roughness texture (glTF: G = roughness, B = metallic)
     float resolvedRoughness = material.roughness;
     float resolvedMetallic = material.metallic;
-    if (!is_null_texture(material.metallicRoughnessTexture))
+    if ((materialFeatures & MATERIAL_TEX_METALLIC_ROUGHNESS) != 0u && !is_null_texture(material.metallicRoughnessTexture))
     {
         float4 mrTex =
             (hasLod ? material.metallicRoughnessTexture.sample(
@@ -570,7 +571,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     // For a unit-length tangent-space normal this is the value that was dropped,
     // and reading it the same way whether or not the texture was compressed
     // keeps the two paths from disagreeing.
-    if (!is_null_texture(material.normalTexture))
+    if ((materialFeatures & MATERIAL_TEX_NORMAL) != 0u && !is_null_texture(material.normalTexture))
     {
         float2 bumpXY = (hasLod ? material.normalTexture.sample(
                                       texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) :
@@ -604,7 +605,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
 
     // Sample emission texture
     float3 emissionColor = float3(material.emission);
-    if (!is_null_texture(material.emissionTexture))
+    if ((materialFeatures & MATERIAL_TEX_EMISSION) != 0u && !is_null_texture(material.emissionTexture))
     {
         // Emission is an integrand shared by NEE and BSDF-hit strategies. A
         // strategy-dependent ray-cone mip would make the two evaluate different
@@ -621,28 +622,49 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     matParams.roughness = resolvedRoughness;
     matParams.metallic = resolvedMetallic;
     matParams.ior = material.ior;
-    matParams.transmission = material.transmission;
-    matParams.clearcoat = material.clearcoat;
-    matParams.clearcoat_roughness = material.clearcoat_roughness;
-    matParams.anisotropy = material.anisotropy;
     matParams.specular = material.specular;
-    matParams.specular_color = float3(material.specular_color);
-    // si.subsurface is what gates the random walk in shade(); leaving it out of
-    // this copy left every subsurface material behaving as plain diffuse
-    // transmission, with the mean free path having no effect on the image at all.
-    matParams.subsurface = material.subsurface;
-    matParams.subsurface_radius = float3(material.subsurface_radius);
-    matParams.subsurface_anisotropy = material.subsurface_anisotropy;
-    matParams.subsurface_reference = float3(material.subsurface_reference);
-    matParams.iridescence = material.iridescence;
-    matParams.iridescence_ior = material.iridescence_ior;
-    matParams.iridescence_thickness = material.iridescence_thickness;
-    matParams.diffuse_transmission = material.diffuse_transmission;
-    matParams.diffuse_transmission_color = float3(material.diffuse_transmission_color);
-    matParams.clearcoat_ior = material.clearcoat_ior;
-    matParams.sheen = material.sheen;
-    matParams.sheen_roughness = material.sheen_roughness;
-    matParams.sheen_color = float3(material.sheen_color);
+    matParams.specular_color =
+        (materialFeatures & MATERIAL_FEATURE_SPECULAR_COLOR) != 0u ? float3(material.specular_color) : float3(1.0f);
+    if ((materialFeatures & MATERIAL_FEATURE_TRANSMISSION) != 0u)
+    {
+        matParams.transmission = material.transmission;
+    }
+    if ((materialFeatures & MATERIAL_FEATURE_CLEARCOAT) != 0u)
+    {
+        matParams.clearcoat = material.clearcoat;
+        matParams.clearcoat_roughness = material.clearcoat_roughness;
+        matParams.clearcoat_ior = material.clearcoat_ior;
+    }
+    if ((materialFeatures & MATERIAL_FEATURE_ANISOTROPY) != 0u)
+    {
+        matParams.anisotropy = material.anisotropy;
+    }
+    if ((materialFeatures & MATERIAL_FEATURE_DIFFUSE_TRANSMISSION) != 0u)
+    {
+        matParams.diffuse_transmission = material.diffuse_transmission;
+        matParams.diffuse_transmission_color = float3(material.diffuse_transmission_color);
+    }
+    if ((materialFeatures & MATERIAL_FEATURE_SHEEN) != 0u)
+    {
+        matParams.sheen = material.sheen;
+        matParams.sheen_roughness = material.sheen_roughness;
+        matParams.sheen_color = float3(material.sheen_color);
+    }
+    if ((materialFeatures & MATERIAL_FEATURE_SUBSURFACE) != 0u)
+    {
+        // si.subsurface is what gates the random walk in shade(); leaving it
+        // out made every subsurface material plain diffuse transmission.
+        matParams.subsurface = material.subsurface;
+        matParams.subsurface_radius = float3(material.subsurface_radius);
+        matParams.subsurface_anisotropy = material.subsurface_anisotropy;
+        matParams.subsurface_reference = float3(material.subsurface_reference);
+    }
+    if ((materialFeatures & MATERIAL_FEATURE_IRIDESCENCE) != 0u)
+    {
+        matParams.iridescence = material.iridescence;
+        matParams.iridescence_ior = material.iridescence_ior;
+        matParams.iridescence_thickness = material.iridescence_thickness;
+    }
     matParams.material_type = material.material_type;
     matParams.thin_walled = material.thin_walled;
     matParams.dielectric_priority = material.dielectric_priority;
@@ -1140,7 +1162,7 @@ static float3 emissiveMeshRadiance(constant Uniforms& uniforms,
     }
 
     float3 emission = float3(material.emission) * material.emission_strength;
-    if (!is_null_texture(material.emissionTexture))
+    if ((material.features & MATERIAL_TEX_EMISSION) != 0u && !is_null_texture(material.emissionTexture))
     {
         constexpr sampler emissionSampler(mag_filter::linear, min_filter::linear, address::repeat);
         emission *= material.emissionTexture.sample(emissionSampler, applyTextureTransform(uv, material)).rgb;

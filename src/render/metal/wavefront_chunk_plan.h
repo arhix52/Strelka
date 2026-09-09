@@ -113,10 +113,11 @@ inline std::vector<WavefrontChunk> makeMetal4WavefrontChunkPlan(const std::vecto
                                                                 uint32_t traversalBatchCount,
                                                                 uint32_t maxTraversalBatchesPerChunk,
                                                                 uint32_t isolatedBounces,
-                                                                bool splitTraversal)
+                                                                bool splitTraversal,
+                                                                bool forceBounceIsolation = false)
 {
     const uint32_t batchLimit = std::max(maxTraversalBatchesPerChunk, 1u);
-    if (traversalBatchCount <= batchLimit || isolatedBounces == 0u)
+    if ((!forceBounceIsolation && traversalBatchCount <= batchLimit) || isolatedBounces == 0u)
     {
         return chunks;
     }
@@ -191,4 +192,3 @@ inline const char* wavefrontChunkPhaseName(WavefrontChunkPhase phase)
 }
 
 } // namespace oka::metal
-

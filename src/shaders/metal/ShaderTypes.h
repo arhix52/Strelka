@@ -863,8 +863,13 @@ struct SharcUpdateState
 // 12..17, leaving this byte cold in the existing flags word.
 #define PATH_SHARC_ROUGHNESS_SHIFT 18u
 #define PATH_SHARC_ROUGHNESS_MASK (0xffu << PATH_SHARC_ROUGHNESS_SHIFT)
+// Avoid touching the strided 36-byte IOR side table for the common path that
+// has never entered a solid dielectric. The remaining high bits are free.
+#define PATH_FLAG_IOR_STACK_ACTIVE (1u << 26)
 static_assert((PATH_PASSTHROUGH_MASK & PATH_SHARC_ROUGHNESS_MASK) == 0u,
               "path pass-through count overlaps packed roughness");
+static_assert((PATH_FLAG_IOR_STACK_ACTIVE & (PATH_PASSTHROUGH_MASK | PATH_SHARC_ROUGHNESS_MASK)) == 0u,
+              "path IOR flag overlaps packed path data");
 
 // What `extend` hands to `shade`. Deliberately small: `intersection.primitive_data`
 // is only valid inside the kernel that ran the intersect, so instead of copying
@@ -872,13 +877,16 @@ static_assert((PATH_PASSTHROUGH_MASK & PATH_SHARC_ROUGHNESS_MASK) == 0u,
 // the geometry entry — the same lookup the motion-blur path already performs.
 struct HitRecord
 {
+    // Keep the 8-byte-aligned field first: placing it after the three indices
+    // inserts four bytes of padding and rounds the record from 24 to 32 bytes.
+    vector_float2 barycentrics; // not float2: this header is compiled by the host too
     uint32_t geomEntryIndex; // instance userID + intersection.geometry_id
     // Carried because a BLAS may be shared by instances while only the intersection identifies the TLAS instance.
     uint32_t instanceIndex;
     uint32_t primitiveId;
-    vector_float2 barycentrics; // not float2: this header is compiled by the host too
     float distance; // < 0 means the ray escaped
 };
+static_assert(sizeof(HitRecord) == 24, "HitRecord must stay a compact wavefront record");
 
 #define RESTIR_SURFACE_VALID (1u << 31)
 #define RESTIR_SURFACE_MATERIAL_MASK 0x7fffffffu
@@ -1076,6 +1084,25 @@ struct IesGpuProfileHeader
     float pad2;
 };
 
+// Presence and cold-lobe bits for Material. Texture presence is authored data,
+// not inferred from a bindless handle: that lets the shader skip descriptor
+// loads while textures stream in and still fall back safely if a named file
+// failed to decode.
+#define MATERIAL_TEX_BASE_COLOR (1u << 0)
+#define MATERIAL_TEX_METALLIC_ROUGHNESS (1u << 1)
+#define MATERIAL_TEX_NORMAL (1u << 2)
+#define MATERIAL_TEX_EMISSION (1u << 3)
+#define MATERIAL_TEX_OCCLUSION (1u << 4)
+#define MATERIAL_TEXTURE_MASK ((1u << 5) - 1u)
+#define MATERIAL_FEATURE_TRANSMISSION (1u << 8)
+#define MATERIAL_FEATURE_CLEARCOAT (1u << 9)
+#define MATERIAL_FEATURE_ANISOTROPY (1u << 10)
+#define MATERIAL_FEATURE_DIFFUSE_TRANSMISSION (1u << 11)
+#define MATERIAL_FEATURE_SHEEN (1u << 12)
+#define MATERIAL_FEATURE_SUBSURFACE (1u << 13)
+#define MATERIAL_FEATURE_IRIDESCENCE (1u << 14)
+#define MATERIAL_FEATURE_SPECULAR_COLOR (1u << 15)
+
 struct Material
 {
     // PBR parameters (layout uses packed_float3 for host/GPU compatibility)
@@ -1085,7 +1112,7 @@ struct Material
     float roughness; //  4 bytes
     float ior; //  4 bytes
     float specular; //  4 bytes
-    float _pad_specular; //  4 bytes  -- 32
+    uint32_t features; // MaterialFeatureBits; occupies the old padding word -- 32
 
     float transmission; //  4 bytes
     float clearcoat; //  4 bytes

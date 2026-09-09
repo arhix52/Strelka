@@ -110,3 +110,20 @@ TEST_CASE("Metal 4 plan leaves small traversal workloads unchanged")
     const auto chunks = makeMetal4WavefrontChunkPlan(logical, 4, 4, 8, true);
     CHECK(chunks == logical);
 }
+
+TEST_CASE("Metal 4 plan isolates SSS bounces even when traversal fits one group")
+{
+    const auto logical = makeWavefrontChunkPlan(1, 16, 16);
+    const auto chunks = makeMetal4WavefrontChunkPlan(logical, 2, 4, 8, false, true);
+
+    REQUIRE(chunks.size() == 9);
+    for (size_t i = 0; i < 8; ++i)
+    {
+        CHECK(chunks[i].phase == WavefrontChunkPhase::Complete);
+        CHECK(chunks[i].bounceBegin == i);
+        CHECK(chunks[i].bounceEnd == i + 1);
+    }
+    CHECK(chunks.back().bounceBegin == 8);
+    CHECK(chunks.back().bounceEnd == 16);
+    CHECK(chunks.back().resolve);
+}
