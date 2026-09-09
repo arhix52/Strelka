@@ -477,8 +477,8 @@ static inline uint32_t pathDepth(uint32_t depthAndFlags)
     return depthAndFlags & PATH_DEPTH_MASK;
 }
 
-// The sampler is never stored: it is a pure function of these three values, and
-// recomputing it costs less than the 12 bytes it would add to every path.
+// The sampler is never stored in the bandwidth-critical path queues. Rebuild it
+// once per stage and reuse that register state for alternate depths locally.
 static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx, uint32_t depth)
 {
     // Ordinary accumulation advances subframeIndex by the number of samples
@@ -490,7 +490,8 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
         uniforms.useFrameJitter != 0u, uniforms.enableAccumulation != 0u, uniforms.restirDIEnabled != 0u,
         uniforms.frameIndex, uniforms.samples_per_launch, uniforms.subframeIndex);
     const uint32_t sequenceIndex = SPEC_SHARC_UPDATE ? uniforms.sharcFrameIndex : sequenceBase + sampleIdx;
-    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp);
+    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp,
+                                 uniforms.sobolSampleBlockBits, uniforms.samplerType);
     s.depth = depth;
     return s;
 }
@@ -914,6 +915,7 @@ static void sssWalkImpl(uint gid,
     const MediumProps mp = mediumPropsFor(uniforms, materials, medium - 1u, mediumState.mediumAlbedo);
     const float anisotropy = materials[medium - 1u].subsurface_anisotropy;
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
+    SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, 0u);
 
     for (uint32_t fusedStep = 0u; fusedStep < SSS_FUSED_STEPS; ++fusedStep)
     {
@@ -927,7 +929,7 @@ static void sssWalkImpl(uint gid,
         auditWork(uniforms, WORK_EXTENSION_QUERIES);
 
         const float3 channelPdf = sssChannelPdf(throughput, mp.albedo);
-        SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
+        wrng.depth = depth + step;
         const float2 distanceRandom =
             random2<SampleDimension::eSssChannel, SampleDimension::eSssDistance>(wrng, uniforms.samplerType).value;
         float scatterDistance = 0.0f;
@@ -2551,7 +2553,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
-        SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
+        SamplerState wrng = rng;
+        wrng.depth = depth + step;
 
         // A bounded volume is the one kind of medium worth connecting to a light
         // from: it is thin, it is lit from outside, and the shafts and the glow
@@ -2972,7 +2975,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // Use the geometric normal for offsets and the interpolated normal for the exit lobe and light connection.
         const float3 outwardGeom = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
         const float3 outward = (dot(worldNormal, outwardGeom) > 0.0f) ? worldNormal : -worldNormal;
-        SamplerState xrng = samplerFor(uniforms, tid, sampleIdx, depth + step);
+        SamplerState xrng = rng;
+        xrng.depth = depth + step;
 
         // As in the fog path: available, not delivered. The exit lobe is a cosine
         // hemisphere, which is smooth at every parameter, so there is nothing
@@ -3136,7 +3140,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     if (si.opacity < 1.0f)
     {
         const uint32_t layer = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
-        SamplerState orng = samplerFor(uniforms, tid, sampleIdx, depth);
+        SamplerState orng = rng;
         float u = random<SampleDimension::eOpacity>(orng, uniforms.samplerType);
         // Rotated by which layer of cutout this is.
         //

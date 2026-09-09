@@ -395,7 +395,10 @@ struct Uniforms
 #endif
 
     uint32_t numInfiniteLights;
-    uint32_t renderWorkPadding;
+    /// log2 of the power-of-two sample block reserved for each pixel by the
+    /// padded Sobol sampler. Occupies what was alignment padding before
+    /// infiniteLightIndices.
+    uint32_t sobolSampleBlockBits;
 #ifdef __METAL_VERSION__
     device const uint32_t* infiniteLightIndices;
 #else

@@ -9,6 +9,7 @@
 #include <log.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <numbers>
@@ -142,6 +143,10 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d). See volume.h.
     pUniformData->volumeModel = settings.getAs<uint32_t>("render/material/volumeModel");
     pUniformData->samples_per_launch = spp;
+    // Padded Sobol assigns each pixel one dyadic block. Store its log2 so the
+    // shader can use shifts and masks instead of dynamic integer division.
+    const uint32_t sobolSampleBlockSize = std::bit_ceil(std::max(sspTotal, 1u));
+    pUniformData->sobolSampleBlockBits = std::bit_width(sobolSampleBlockSize) - 1u;
     pUniformData->enableAccumulation = (uint32_t)accumulationActive;
     pUniformData->risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
     // 0 = balance, 1 = power. The same key OptiX reads, so the two backends can
