@@ -1893,11 +1893,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         values->setConstantValue(&shadeTailDisabled, MTL::DataTypeBool, (NS::UInteger)24);
         const bool disabled = false;
         values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)21);
+        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)22);
         const bool shadeLayerEnabled = true;
         values->setConstantValue(&shadeLayerEnabled, MTL::DataTypeBool, (NS::UInteger)25);
         v.shadeLayer = make("wavefrontShade");
         values->setConstantValue(&shadeLayerDisabled, MTL::DataTypeBool, (NS::UInteger)25);
-        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)22);
         values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)20);
         const bool shadeBaseEnabled = true;
         values->setConstantValue(&shadeBaseEnabled, MTL::DataTypeBool, (NS::UInteger)26);

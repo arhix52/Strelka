@@ -855,6 +855,27 @@ static inline void hitQueuePush(constant Uniforms& uniforms,
 static inline uint32_t bucketedHitIndex(uint32_t index, device const uint32_t* queue, device const uint32_t* control)
 {
     const uint32_t capacity = control[WF_CTRL_CAPACITY];
+
+    // The three OpenPBR shade PSOs already know which contiguous logical
+    // segment they consume. Avoid walking the preceding bucket counters again
+    // for the base and layer segments; only the tail PSO still has to choose
+    // between its two physical buckets.
+    if (SPEC_SHADE_BASE)
+    {
+        return WF_HIT_BUCKET_COUNT + index;
+    }
+    if (SPEC_SHADE_LAYER)
+    {
+        return WF_HIT_BUCKET_COUNT + capacity + index - control[WF_CTRL_SHADE_LAYER_START];
+    }
+    if (SPEC_SHADE_TAIL)
+    {
+        index -= control[WF_CTRL_SHADE_TAIL_START];
+        const uint32_t count2 = min(queue[2], capacity);
+        return index < count2 ? WF_HIT_BUCKET_COUNT + 2u * capacity + index :
+                                WF_HIT_BUCKET_COUNT + 3u * capacity + index - count2;
+    }
+
     const uint32_t count0 = min(queue[0], capacity);
     if (index < count0)
     {
@@ -1541,12 +1562,9 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
                                  thread float3& outColor,
                                  thread float& tangentSign,
                                  thread float3& outGeomNormal,
-                                 // For the ray-cone texture LOD: the two object-space
-                                 // edges and twice the triangle's area in uv. Both fall
-                                 // out of loads this function already does, so the
-                                 // footprint costs no extra memory traffic.
-                                 thread float3& outEdge1,
-                                 thread float3& outEdge2,
+                                 // For the ray-cone texture LOD: twice the triangle's
+                                 // area in uv. It falls out of loads this function
+                                 // already does, so the footprint costs no extra traffic.
                                  thread float& outUvArea2)
 {
     constexpr uint32_t vtxStride = 32;
@@ -1609,8 +1627,6 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
             e2 = pos - p0;
     }
     outGeomNormal = cross(e1, e2);
-    outEdge1 = e1;
-    outEdge2 = e2;
     outUvArea2 = abs(uvE1.x * uvE2.y - uvE2.x * uvE1.y);
 }
 
@@ -2460,7 +2476,6 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         aov[tid].guideStateOrBounceDepth = (float)depth;
     }
 
-    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
     const float3 rayOrigin = float3(pr.origin);
@@ -2507,6 +2522,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // rather than absorbs.
     if (SPEC_FOG && (rec.geomEntryIndex & HIT_FOG_BIT) != 0u)
     {
+        SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
         const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
         throughput *= float3(uniforms.fogAlbedo);
         if (SPEC_SHARC_UPDATE)
@@ -2658,7 +2674,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
 
         const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
-        SamplerState wrng = rng;
+        SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth);
         wrng.depth = depth + step;
 
         // A bounded volume is the one kind of medium worth connecting to a light
@@ -2957,11 +2973,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
     else
     {
-        float3 objectEdge1, objectEdge2;
         float uvArea2 = 0.0f;
         fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
                              motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
-                             objectGeomNormal, objectEdge1, objectEdge2, uvArea2);
+                             objectGeomNormal, uvArea2);
         const auto inst = instances[rec.instanceIndex];
         const float3 axisX = float3(inst.transformationMatrix[0]);
         const float3 axisY = float3(inst.transformationMatrix[1]);
@@ -3095,7 +3110,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // Use the geometric normal for offsets and the interpolated normal for the exit lobe and light connection.
         const float3 outwardGeom = (dot(geomNormal, rayDir) > 0.0f) ? geomNormal : -geomNormal;
         const float3 outward = (dot(worldNormal, outwardGeom) > 0.0f) ? worldNormal : -worldNormal;
-        SamplerState xrng = rng;
+        SamplerState xrng = samplerFor(uniforms, tid, sampleIdx, depth);
         xrng.depth = depth + step;
 
         // As in the fog path: available, not delivered. The exit lobe is a cosine
@@ -3240,6 +3255,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // a curve hit has one.
     const bool fibreMaterial = scattersThroughFibre(si);
     const bool isFibre = isCurve && fibreMaterial;
+
+    // None of the surface setup above consumes randomness. Keep these five
+    // registers out of triangle reconstruction and material initialisation;
+    // the fog and volume exits construct their own branch-local sampler state.
+    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
 
     // Coverage. A MASK surface resolves to 0 or 1 and a BLEND one to its alpha,
     // so one stochastic test covers both: with probability (1 - opacity) the
@@ -3676,26 +3696,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     OpenPBR_BasePreparedBsdf openpbrBasePrepared;
     if (isOpenPBR)
     {
-        if (SPEC_SHADE_BASE)
+        // Base and layer queues cannot enter a volume. For the tail, finish
+        // the short-lived volume derivation before constructing the surface
+        // lobes so the two large OpenPBR states never overlap.
+        if (SPEC_SSS && !SPEC_SHADE_BASE && !SPEC_SHADE_LAYER)
         {
-            openpbrBasePrepared = openpbr_prepare_base_at(openpbrMat, si, throughput);
-        }
-        else
-        {
-            openpbrPrepared = openpbr_prepare_at(openpbrMat, si, throughput);
-        }
-
-        // Nothing below NEE needs the 272-byte parameter block. Preserve only
-        // the two values consumed after BSDF sampling. The common volume value
-        // already exists in the full prepared state; only MaterialX's mapped
-        // subsurface-detail convention needs a second, adjusted derivation.
-        if (SPEC_SSS)
-        {
-            openpbrEntersSubsurface =
-                openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u;
+            openpbrEntersSubsurface = openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u;
             if (openpbrEntersSubsurface)
             {
-                openpbrWalkAlbedo = openpbrPrepared.volume.albedo;
                 if (openpbrBaseMapDetailsSubsurface(openpbrMat))
                 {
                     OpenPBRParams walkMat = openpbrMat;
@@ -3704,7 +3712,20 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                     walkMat.subsurface_color = OpenPBRColor{ subsurface.x, subsurface.y, subsurface.z };
                     openpbrWalkAlbedo = openpbr_interior_volume(walkMat).albedo;
                 }
+                else
+                {
+                    openpbrWalkAlbedo = openpbr_interior_volume(openpbrMat).albedo;
+                }
             }
+        }
+
+        if (SPEC_SHADE_BASE)
+        {
+            openpbrBasePrepared = openpbr_prepare_base_at(openpbrMat, si, throughput);
+        }
+        else
+        {
+            openpbrPrepared = openpbr_prepare_surface_at(openpbrMat, si, throughput);
         }
     }
 
@@ -3818,6 +3839,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             const bool singleCandidateNee = !restirInitial && candidates == 1u;
             float singleCandidateW = 0.0f;
 
+            // Keep one candidate live at a time. The separate SPEC_RIS_ONE path
+            // bypasses this loop entirely; this controls the 2/4/8-candidate
+            // editor modes where unrolling otherwise multiplies the NEE state.
+#pragma clang loop unroll(disable)
             for (uint32_t i = 0; i < candidates; ++i)
             {
                 // Candidates differ by their scramble, not by their dimension: each
@@ -4274,7 +4299,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const float4 xi = bsdfRandom.value;
     const uint32_t lobeWord = bsdfRandom.bits.z >> 9u;
     const uint32_t fresnelWord = bsdfRandom.bits.w >> 9u;
-    BsdfSampleResult sampleResult = isOpenPBR ? (SPEC_SHADE_BASE ? openpbr_bsdf_sample(openpbrBasePrepared, xi) :
+    BsdfSampleResult sampleResult = isOpenPBR ? (SPEC_SHADE_BASE ? openpbr_bsdf_sample(openpbrBasePrepared, si.wo, xi) :
                                                                    openpbr_bsdf_sample(openpbrPrepared, xi)) :
                                                 bsdf_sample(si, xi, lobeWord, fresnelWord);
 
@@ -4605,11 +4630,11 @@ static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
     }
     else
     {
-        float3 objectNormal, objectTangent, edge1, edge2;
+        float3 objectNormal, objectTangent;
         float uvArea2;
         fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, stored.primitiveId, interpolateMotion,
                              motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
-                             geometryNormal, edge1, edge2, uvArea2);
+                             geometryNormal, uvArea2);
         const float3 axisX = objectToWorld[0].xyz;
         const float3 axisY = objectToWorld[1].xyz;
         const float3 axisZ = objectToWorld[2].xyz;
@@ -4632,7 +4657,7 @@ static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
         {
             applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv);
         }
-        openpbrPrepared = openpbr_prepare_at(openpbrMat, si, float3(stored.throughput));
+        openpbrPrepared = openpbr_prepare_surface_at(openpbrMat, si, float3(stored.throughput));
     }
     isFibre = isCurve && scattersThroughFibre(si);
     neeFrame = shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
@@ -5183,13 +5208,12 @@ static void guideImpl(uint gid,
         }
         else
         {
-            float3 edge1, edge2;
             float uvArea2 = 0.0f;
             const bool interpolateMotion =
                 SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
             fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, hit.primitiveId, interpolateMotion,
                                  motionTime, hit.barycentrics, objectNormal, objectTangent, uv, vertexColor,
-                                 tangentSign, objectGeomNormal, edge1, edge2, uvArea2);
+                                 tangentSign, objectGeomNormal, uvArea2);
             const float3 axisX = objectToWorld[0].xyz;
             const float3 axisY = objectToWorld[1].xyz;
             const float3 axisZ = objectToWorld[2].xyz;
