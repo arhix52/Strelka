@@ -358,11 +358,22 @@ DEVICE_FUNC float openpbr_bsdf_pdf(const THREAD_REF OpenPBR_PreparedBsdf& prepar
 // The base Metal shade queue excludes coat, fuzz, thin film, transmission and
 // subsurface materials. With those lobes absent, retaining the enclosing
 // Fuzz->Coat->Aggregate tree keeps hundreds of bytes live for fields that are
-// provably never read. Preserve the upstream lobe implementations and their
-// exact prepared values, but retain only the three active base lobes.
+// provably never read. Retain the upstream prepared values and math, but only
+// the three active base lobes and the reflection-only specular fields.
+struct OpenPBR_BaseSpecularLobe
+{
+    vec3 normal_ff;
+    OpenPBR_AnisotropicGGXSmithVNDFMicrofacetDistribution microfacet_distr;
+    vec3 eta_t_over_eta_i_for_opaque_part;
+    vec3 scale_for_reflection_for_opaque_part;
+    vec3 f0_for_metal;
+    vec3 f82_tint_for_metal;
+    float metal_amount;
+};
+
 struct OpenPBR_BasePreparedBsdf
 {
-    OpenPBR_ComprehensiveMicrofacetReflectionTransmissionLobe specular_lobe;
+    OpenPBR_BaseSpecularLobe specular_lobe;
     OpenPBR_MetalMicrofacetMultipleScatteringLobe metal_mms_lobe;
     OpenPBR_EnergyConservingRoughDiffuseLobe diffuse_lobe;
     float specular_weight;
@@ -371,13 +382,27 @@ struct OpenPBR_BasePreparedBsdf
     vec3 view_direction;
 };
 static_assert(sizeof(OpenPBR_PreparedBsdf) == 752, "Unexpected packed Metal OpenPBR layout");
-static_assert(sizeof(OpenPBR_BasePreparedBsdf) == 328, "Metal base OpenPBR state grew unexpectedly");
+static_assert(sizeof(OpenPBR_BasePreparedBsdf) == 216, "Metal base OpenPBR state grew unexpectedly");
+
+DEVICE_FUNC OpenPBR_BaseSpecularLobe
+openpbr_compact_base_specular(const THREAD_REF OpenPBR_ComprehensiveMicrofacetReflectionTransmissionLobe& lobe)
+{
+    OpenPBR_BaseSpecularLobe result;
+    result.normal_ff = lobe.normal_ff;
+    result.microfacet_distr = lobe.microfacet_distr;
+    result.eta_t_over_eta_i_for_opaque_part = lobe.refl_trans_coeff.eta_t_over_eta_i_for_opaque_part;
+    result.scale_for_reflection_for_opaque_part = lobe.refl_trans_coeff.scale_for_reflection_for_opaque_part;
+    result.f0_for_metal = lobe.refl_trans_coeff.f0_for_metal;
+    result.f82_tint_for_metal = lobe.refl_trans_coeff.f82_tint_for_metal;
+    result.metal_amount = lobe.refl_trans_coeff.metal_amount;
+    return result;
+}
 
 DEVICE_FUNC OpenPBR_BasePreparedBsdf openpbr_compact_base(const THREAD_REF OpenPBR_PreparedBsdf& prepared)
 {
     const THREAD_REF OpenPBR_AggregateLobe& base = prepared.fuzz_lobe.coating_lobe.base_lobe;
     OpenPBR_BasePreparedBsdf result;
-    result.specular_lobe = base.specular_lobe;
+    result.specular_lobe = openpbr_compact_base_specular(base.specular_lobe);
     result.metal_mms_lobe = base.metal_mms_lobe;
     result.diffuse_lobe = base.diffuse_lobe;
     result.specular_weight = base.lobe_weights[OpenPBR_SpecularLobeIndex];
@@ -385,6 +410,115 @@ DEVICE_FUNC OpenPBR_BasePreparedBsdf openpbr_compact_base(const THREAD_REF OpenP
     result.diffuse_weight = base.lobe_weights[OpenPBR_DiffuseLobeIndex];
     result.view_direction = prepared.view_direction;
     return result;
+}
+
+// Keep the full prepared tree inside the initializer.  The base shade variant
+// must retain only the compact return value across NEE and BSDF sampling; an
+// outer full-sized temporary makes both objects simultaneously visible to the
+// Metal register allocator at the call site.
+DEVICE_FUNC OpenPBR_BasePreparedBsdf openpbr_prepare_base_at(const THREAD_REF OpenPBRParams& p,
+                                                             const THREAD_REF SurfaceInteraction& si,
+                                                             float3 path_throughput)
+{
+    const OpenPBR_PreparedBsdf prepared = openpbr_prepare_at(p, si, path_throughput);
+    return openpbr_compact_base(prepared);
+}
+
+DEVICE_FUNC vec3 openpbr_base_reflection_coefficient(const THREAD_REF OpenPBR_BaseSpecularLobe& lobe,
+                                                     float idoth)
+{
+    vec3 result = lobe.scale_for_reflection_for_opaque_part *
+                  openpbr_fresnel_rgb(lobe.eta_t_over_eta_i_for_opaque_part, idoth, false);
+    if (OPENPBR_GET_SPECIALIZATION_CONSTANT(EnableMetallic))
+    {
+        result += lobe.metal_amount *
+                  openpbr_metal_schlick_with_f82_tint(lobe.f0_for_metal, lobe.f82_tint_for_metal, idoth);
+    }
+    return result;
+}
+
+DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_calculate_lobe_value(const THREAD_REF OpenPBR_BaseSpecularLobe& lobe,
+                                                                 float3 view_direction,
+                                                                 float3 light_direction)
+{
+    const float idotn = dot(lobe.normal_ff, view_direction);
+    const float odotn = dot(lobe.normal_ff, light_direction);
+    if (idotn * odotn <= 0.0f)
+    {
+        return openpbr_make_zero_diffuse_specular();
+    }
+
+    const vec3 half_vector = openpbr_fast_normalize(view_direction + light_direction);
+    const float idoth = dot(view_direction, half_vector);
+    const float D = openpbr_eval_ggx(lobe.microfacet_distr, half_vector, lobe.normal_ff);
+    const vec3 F = openpbr_base_reflection_coefficient(lobe, abs(idoth));
+    const float G = openpbr_eval_smith_g2(lobe.microfacet_distr, view_direction, light_direction, idotn, odotn);
+    return openpbr_make_diffuse_specular_from_specular(G * D * (1.0f / (4.0f * idotn)) * F);
+}
+
+DEVICE_FUNC float openpbr_calculate_lobe_pdf(const THREAD_REF OpenPBR_BaseSpecularLobe& lobe,
+                                             float3 view_direction,
+                                             float3 light_direction)
+{
+    const float idotn = dot(lobe.normal_ff, view_direction);
+    const float odotn = dot(lobe.normal_ff, light_direction);
+    if (idotn * odotn <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const vec3 half_vector = openpbr_fast_normalize(view_direction + light_direction);
+    const float idoth = dot(view_direction, half_vector);
+    const float odoth = dot(light_direction, half_vector);
+    if (idoth * odoth < 0.0f)
+    {
+        return 0.0f;
+    }
+    const float D = openpbr_eval_ggx(lobe.microfacet_distr, half_vector, lobe.normal_ff);
+    const float G = openpbr_eval_smith_g1(lobe.microfacet_distr, view_direction, idotn);
+    return G * D * idoth / (4.0f * odoth * idotn);
+}
+
+DEVICE_FUNC bool openpbr_sample_lobe(const THREAD_REF OpenPBR_BaseSpecularLobe& lobe,
+                                     vec3 rand,
+                                     vec3 view_direction,
+                                     THREAD_REF vec3& light_direction,
+                                     THREAD_REF OpenPBR_DiffuseSpecular& weight,
+                                     THREAD_REF float& pdf,
+                                     THREAD_REF OpenPBR_BsdfLobeType& sampled_type)
+{
+    const float idotn = dot(view_direction, lobe.normal_ff);
+    const vec3 half_vector =
+        openpbr_sample_ggx_smith_vndf(lobe.microfacet_distr, view_direction, lobe.normal_ff, rand.xy);
+    const float idoth = dot(view_direction, half_vector);
+    if (idoth < 0.0f)
+    {
+        openpbr_clear_lobe_sampling_output(light_direction, weight, pdf, sampled_type);
+        return false;
+    }
+
+    light_direction = openpbr_fast_normalize(-view_direction + half_vector * (2.0f * idoth));
+    const float odotn = dot(lobe.normal_ff, light_direction);
+    if (idotn * odotn <= 0.0f)
+    {
+        openpbr_clear_lobe_sampling_output(light_direction, weight, pdf, sampled_type);
+        return false;
+    }
+
+    const float odoth = dot(light_direction, half_vector);
+    const vec3 F = openpbr_base_reflection_coefficient(lobe, abs(idoth));
+    const float GShadowing = openpbr_eval_smith_g1(lobe.microfacet_distr, light_direction, odotn);
+    weight = openpbr_make_diffuse_specular_from_specular(F * GShadowing);
+    const float D = openpbr_eval_ggx(lobe.microfacet_distr, half_vector, lobe.normal_ff);
+    if (D <= 0.0f)
+    {
+        openpbr_clear_lobe_sampling_output(light_direction, weight, pdf, sampled_type);
+        return false;
+    }
+    const float GMasking = openpbr_eval_smith_g1(lobe.microfacet_distr, view_direction, idotn);
+    pdf = D * GMasking * idoth / (4.0f * odoth * idotn);
+    sampled_type = OpenPBR_BsdfLobeTypeGlossy | OpenPBR_BsdfLobeTypeReflection;
+    return true;
 }
 
 DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_base_value(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared, float3 wi)

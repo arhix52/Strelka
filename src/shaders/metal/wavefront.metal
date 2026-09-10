@@ -2088,7 +2088,7 @@ struct LightConnectionEvaluation
 
 template <typename OpenPBRPrepared>
 static float restirTargetOnly(thread const LightConnection& connection,
-                              thread SurfaceInteraction& si,
+                              thread const SurfaceInteraction& si,
                               bool isFibre,
                               thread const ShadedFrame& neeFrame,
                               bool isOpenPBR,
@@ -2113,7 +2113,7 @@ static float restirTargetOnly(thread const LightConnection& connection,
 
 template <typename OpenPBRPrepared>
 static LightConnectionEvaluation evaluateLightConnection(thread const LightConnection& connection,
-                                                         thread SurfaceInteraction& si,
+                                                         thread const SurfaceInteraction& si,
                                                          bool isFibre,
                                                          thread const ShadedFrame& neeFrame,
                                                          bool isOpenPBR,
@@ -3395,10 +3395,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // a second camera sample through every lighting and shadow stage.
     constexpr float kGuideRoughnessFloor = 0.05f;
     const bool writingAov = shouldWriteAov(uniforms, sampleIdx);
-    DenoiserMaterialGuides materialGuides = {};
-    bool guideOpaque = true;
     if (writingAov && depth == 0u)
     {
+        DenoiserMaterialGuides materialGuides = {};
         if (isOpenPBR)
         {
             const OpenPBR_ResolvedInputs openpbrInputs = openpbr_resolve_inputs(openpbrMat, si);
@@ -3408,7 +3407,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         {
             materialGuides = standardDenoiserGuides(si);
         }
-        guideOpaque = materialGuides.transmission <= kGuideRoughnessFloor;
+        const bool guideOpaque = materialGuides.transmission <= kGuideRoughnessFloor;
 
         // Depth and motion always belong to the camera-visible surface, even
         // when its material attributes will be replaced.
@@ -3670,20 +3669,47 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // Placed after si is finished with rather than beside initSurfaceInteraction:
     // the nested-dielectric exterior IOR is resolved above, and prepare() reads
     // it. SHARC eligibility never mutates these shading parameters.
+    const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
+    bool openpbrEntersSubsurface = false;
+    float3 openpbrWalkAlbedo = float3(0.0f);
     OpenPBR_PreparedBsdf openpbrPrepared;
     OpenPBR_BasePreparedBsdf openpbrBasePrepared;
     if (isOpenPBR)
     {
-        openpbrPrepared = openpbr_prepare_at(openpbrMat, si, throughput);
         if (SPEC_SHADE_BASE)
         {
-            openpbrBasePrepared = openpbr_compact_base(openpbrPrepared);
+            openpbrBasePrepared = openpbr_prepare_base_at(openpbrMat, si, throughput);
+        }
+        else
+        {
+            openpbrPrepared = openpbr_prepare_at(openpbrMat, si, throughput);
+        }
+
+        // Nothing below NEE needs the 272-byte parameter block. Preserve only
+        // the two values consumed after BSDF sampling. The common volume value
+        // already exists in the full prepared state; only MaterialX's mapped
+        // subsurface-detail convention needs a second, adjusted derivation.
+        if (SPEC_SSS)
+        {
+            openpbrEntersSubsurface =
+                openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u;
+            if (openpbrEntersSubsurface)
+            {
+                openpbrWalkAlbedo = openpbrPrepared.volume.albedo;
+                if (openpbrBaseMapDetailsSubsurface(openpbrMat))
+                {
+                    OpenPBRParams walkMat = openpbrMat;
+                    const float3 base = openpbr_color_to_float3(walkMat.base_color);
+                    const float3 subsurface = openpbr_color_to_float3(walkMat.subsurface_color) * base;
+                    walkMat.subsurface_color = OpenPBRColor{ subsurface.x, subsurface.y, subsurface.z };
+                    openpbrWalkAlbedo = openpbr_interior_volume(walkMat).albedo;
+                }
+            }
         }
     }
 
     const bool hasEmitter = (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
                             (SPEC_ENV_MAP && uniforms.hasEnvMap);
-    const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
     bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
     if (!smoothLobe)
     {
@@ -4292,9 +4318,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // A diffuse-transmission event crosses an infinitesimally thin sheet.
         // A subsurface event enters the separately tracked random walk. Neither
         // makes the following surface segment part of a dielectric volume.
-        const bool entersMedium = isOpenPBR ?
-                                      (openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u) :
-                                      (si.subsurface > 0.0f);
+        const bool entersMedium = isOpenPBR ? openpbrEntersSubsurface : (si.subsurface > 0.0f);
         const uint32_t entryEvent = isOpenPBR ? (sampleResult.event_type & BSDF_EVENT_TRANSMISSION) :
                                                 (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION);
         const bool startsSubsurfaceWalk = SPEC_SSS && entersMedium && entryEvent != 0u;
@@ -4360,17 +4384,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             float3 walkAlbedo;
             if (isOpenPBR)
             {
-                // MaterialX exports in the test scenes carry marble veining in
-                // base_color and a constant subsurface tint. Fold the former
-                // into the latter before OpenPBR maps it to single-scattering
-                // albedo; a separately mapped subsurface colour stays intact.
-                if (openpbrBaseMapDetailsSubsurface(openpbrMat))
-                {
-                    const float3 base = openpbr_color_to_float3(openpbrMat.base_color);
-                    const float3 subsurface = openpbr_color_to_float3(openpbrMat.subsurface_color) * base;
-                    openpbrMat.subsurface_color = OpenPBRColor{ subsurface.x, subsurface.y, subsurface.z };
-                }
-                walkAlbedo = openpbr_interior_volume(openpbrMat).albedo;
+                walkAlbedo = openpbrWalkAlbedo;
             }
             else
             {
