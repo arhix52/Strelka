@@ -6,7 +6,17 @@
 // the metallib whichever variant is built. That is data rather than
 // instructions, so it does not compete for the instruction cache this kernel is
 // bound by -- which is the whole reason the branch below is behind a constant.
+#define STRELKA_OPENPBR_FEATURE_EnableSheenAndCoat SPEC_OPENPBR_SHEEN_AND_COAT
+#define STRELKA_OPENPBR_FEATURE_EnableDispersion SPEC_OPENPBR_DISPERSION
+#define STRELKA_OPENPBR_FEATURE_EnableTranslucency SPEC_OPENPBR_TRANSLUCENCY
+#define STRELKA_OPENPBR_FEATURE_EnableMetallic SPEC_OPENPBR_METALLIC
+#define OPENPBR_GET_SPECIALIZATION_CONSTANT(name) STRELKA_OPENPBR_FEATURE_##name
 #include <strelka/material/openpbr/openpbr_bridge.h>
+#undef OPENPBR_GET_SPECIALIZATION_CONSTANT
+#undef STRELKA_OPENPBR_FEATURE_EnableMetallic
+#undef STRELKA_OPENPBR_FEATURE_EnableTranslucency
+#undef STRELKA_OPENPBR_FEATURE_EnableDispersion
+#undef STRELKA_OPENPBR_FEATURE_EnableSheenAndCoat
 #include <sharc_query_eligibility.h>
 
 // Path state stays pixel-indexed while queues compact live indices between stages.
@@ -128,6 +138,11 @@ WF_ANALYTIC_INTERSECTION_FAMILY(RestirSpatialDiagnostic)
 #define WF_CTRL_RESTIR 28
 #define WF_CTRL_RESTIR_N 28
 #define WF_CTRL_RESTIR_DIS 29
+#define WF_CTRL_SHADE_BASE_DIS 80
+#define WF_CTRL_SHADE_LAYER_START 83
+#define WF_CTRL_SHADE_LAYER_DIS 84
+#define WF_CTRL_SHADE_TAIL_START 87
+#define WF_CTRL_SHADE_TAIL_DIS 88
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
 #define WF_CTRL_STATS_PATHS 32
@@ -2401,7 +2416,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                            device MediumPathState* mediumPaths [[buffer(30)]],
                            texture2d<float> envMapTexture [[texture(0)]])
 {
-    if (gid >= control[WF_CTRL_HIT_N])
+    gid += SPEC_SHADE_TAIL ? control[WF_CTRL_SHADE_TAIL_START] :
+                             (SPEC_SHADE_LAYER ? control[WF_CTRL_SHADE_LAYER_START] : 0u);
+    const uint32_t segmentEnd =
+        SPEC_SHADE_TAIL ?
+            control[WF_CTRL_HIT_N] :
+            (SPEC_SHADE_LAYER ? control[WF_CTRL_SHADE_TAIL_START] :
+                                (SPEC_SHADE_BASE ? control[WF_CTRL_SHADE_LAYER_START] : control[WF_CTRL_HIT_N]));
+    if (gid >= segmentEnd)
     {
         return;
     }
@@ -5378,7 +5400,8 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
 
 // Between `extend` and the two stages that consume its classification.
 kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
-                                    constant uint32_t& threadsPerGroup [[buffer(1)]])
+                                    constant uint32_t& threadsPerGroup [[buffer(1)]],
+                                    device const uint32_t* hitQueue [[buffer(2)]])
 {
     device uint32_t* control = &controlRef;
     const uint32_t h = min(control[WF_CTRL_HIT], control[WF_CTRL_CAPACITY]);
@@ -5386,6 +5409,20 @@ kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_HIT_DIS + 0] = (h + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_HIT_DIS + 1] = 1u;
     control[WF_CTRL_HIT_DIS + 2] = 1u;
+
+    const uint32_t base = min(hitQueue[0], h);
+    control[WF_CTRL_SHADE_BASE_DIS + 0] = (base + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_SHADE_BASE_DIS + 1] = 1u;
+    control[WF_CTRL_SHADE_BASE_DIS + 2] = 1u;
+    const uint32_t layer = min(hitQueue[1], h - base);
+    control[WF_CTRL_SHADE_LAYER_START] = base;
+    control[WF_CTRL_SHADE_LAYER_DIS + 0] = (layer + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_SHADE_LAYER_DIS + 1] = 1u;
+    control[WF_CTRL_SHADE_LAYER_DIS + 2] = 1u;
+    control[WF_CTRL_SHADE_TAIL_START] = base + layer;
+    control[WF_CTRL_SHADE_TAIL_DIS + 0] = (h - base - layer + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_SHADE_TAIL_DIS + 1] = 1u;
+    control[WF_CTRL_SHADE_TAIL_DIS + 2] = 1u;
 
     const uint32_t m = min(control[WF_CTRL_MISS], control[WF_CTRL_CAPACITY]);
     control[WF_CTRL_MISS_N] = m;

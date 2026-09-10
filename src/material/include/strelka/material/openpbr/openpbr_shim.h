@@ -105,6 +105,54 @@
 
 #include <strelka/material/material_math.h>
 
+// OpenPBR's prepared BSDF is a large thread-local tree. Metal's native float3
+// has 16-byte size/alignment, so every stored three-vector carries a dead word
+// through the private stack. Keep FP32 arithmetic while using the packed Metal
+// storage type inside OpenPBR; the host and CUDA interop remain unchanged.
+#if defined(__METAL_VERSION__)
+#    define OPENPBR_USE_CUSTOM_VEC_TYPES 1
+using vec2 = float2;
+using vec3 = packed_float3;
+using vec4 = float4;
+
+template <typename T, int N>
+inline vec<bool, N> equal(vec<T, N> a, vec<T, N> b)
+{
+    return a == b;
+}
+inline bool3 equal(vec3 a, vec3 b)
+{
+    return float3(a) == float3(b);
+}
+template <typename T, int N>
+inline vec<bool, N> notEqual(vec<T, N> a, vec<T, N> b)
+{
+    return a != b;
+}
+inline bool3 notEqual(vec3 a, vec3 b)
+{
+    return float3(a) != float3(b);
+}
+template <typename T, int N>
+inline vec<bool, N> greaterThan(vec<T, N> a, vec<T, N> b)
+{
+    return a > b;
+}
+inline bool3 greaterThan(vec3 a, vec3 b)
+{
+    return float3(a) > float3(b);
+}
+template <typename T, int N>
+inline vec<bool, N> greaterThanEqual(vec<T, N> a, vec<T, N> b)
+{
+    return a >= b;
+}
+inline bool3 greaterThanEqual(vec3 a, vec3 b)
+{
+    return float3(a) >= float3(b);
+}
+#endif
+
 // (6) -- see above. Before openpbr.h, and before the interop layer it pulls in,
 // because it defines OPENPBR_USE_CUSTOM_VEC_TYPES.
 #if defined(__CUDACC__)

@@ -81,6 +81,8 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.extendStatic);
         safeRelease(kv.second.sssWalkMotion);
         safeRelease(kv.second.sssWalkStatic);
+        safeRelease(kv.second.shadeBase);
+        safeRelease(kv.second.shadeLayer);
         safeRelease(kv.second.shade);
         safeRelease(kv.second.restirSpatialFinal);
         safeRelease(kv.second.miss);
@@ -583,6 +585,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
     const NS::UInteger kHitArgsOffset = 13 * sizeof(uint32_t);
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
+    const NS::UInteger kShadeBaseArgsOffset = 80 * sizeof(uint32_t);
+    const NS::UInteger kShadeLayerArgsOffset = 84 * sizeof(uint32_t);
+    const NS::UInteger kShadeTailArgsOffset = 88 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
     const NS::UInteger kGuideArgsOffset = 25 * sizeof(uint32_t);
@@ -847,6 +852,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             enc->setComputePipelineState(mPrepareHitMissPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
+            bind(mHitQueueBuffer, 0, 2);
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
 
@@ -937,7 +943,19 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             {
                 table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
             }
-            enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+            if (variant->shadeBase)
+            {
+                enc->setComputePipelineState(variant->shadeBase);
+                enc->dispatchThreadgroups(control + kShadeBaseArgsOffset, tg);
+                enc->setComputePipelineState(variant->shadeLayer);
+                enc->dispatchThreadgroups(control + kShadeLayerArgsOffset, tg);
+                enc->setComputePipelineState(variant->shade);
+                enc->dispatchThreadgroups(control + kShadeTailArgsOffset, tg);
+            }
+            else
+            {
+                enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+            }
             barrier();
 
             if (uniforms->restirDIEnabled != 0u && bounce == 0u && !sharcUpdate)
@@ -1271,6 +1289,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
     const NS::UInteger kHitArgsOffset = 13 * sizeof(uint32_t);
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
+    const NS::UInteger kShadeBaseArgsOffset = 80 * sizeof(uint32_t);
+    const NS::UInteger kShadeLayerArgsOffset = 84 * sizeof(uint32_t);
+    const NS::UInteger kShadeTailArgsOffset = 88 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
     const NS::UInteger kGuideArgsOffset = 25 * sizeof(uint32_t);
@@ -1448,6 +1469,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setComputePipelineState(mPrepareHitMissPSO);
             enc->setBuffer(mControlBuffer, 0, 0);
             enc->setBytes(&kThreadsPerGroup, sizeof(uint32_t), 1);
+            enc->setBuffer(mHitQueueBuffer, 0, 2);
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageMiss);
@@ -1530,7 +1552,19 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBuffer(mIorStatsBuffer, 0, 28);
             enc->setBuffer(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
             enc->setBuffer(mMediumPathStateBuffer, 0, 30);
-            enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
+            if (variant->shadeBase)
+            {
+                enc->setComputePipelineState(variant->shadeBase);
+                enc->dispatchThreadgroups(mControlBuffer, kShadeBaseArgsOffset, tg);
+                enc->setComputePipelineState(variant->shadeLayer);
+                enc->dispatchThreadgroups(mControlBuffer, kShadeLayerArgsOffset, tg);
+                enc->setComputePipelineState(variant->shade);
+                enc->dispatchThreadgroups(mControlBuffer, kShadeTailArgsOffset, tg);
+            }
+            else
+            {
+                enc->dispatchThreadgroups(mControlBuffer, kHitArgsOffset, tg);
+            }
             enc->popDebugGroup();
 
             if (uniforms->restirDIEnabled != 0u && bounce == 0u && !sharcUpdate)
@@ -1730,6 +1764,17 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&samplerType, MTL::DataTypeUInt, (NS::UInteger)18);
     const bool allNativeOpenPBR = (features & WavefrontFeatures::kAllNativeOpenPBR) != 0;
     values->setConstantValue(&allNativeOpenPBR, MTL::DataTypeBool, (NS::UInteger)19);
+    const bool openpbrFeatureEnabled = true;
+    values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)20);
+    values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)21);
+    values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)22);
+    values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)23);
+    const bool shadeTailDisabled = false;
+    values->setConstantValue(&shadeTailDisabled, MTL::DataTypeBool, (NS::UInteger)24);
+    const bool shadeLayerDisabled = false;
+    values->setConstantValue(&shadeLayerDisabled, MTL::DataTypeBool, (NS::UInteger)25);
+    const bool shadeBaseDisabled = false;
+    values->setConstantValue(&shadeBaseDisabled, MTL::DataTypeBool, (NS::UInteger)26);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
@@ -1836,9 +1881,36 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         v.sssWalkMotion = make("wavefrontSssWalk");
         v.sssWalkStatic = make("wavefrontSssWalkStatic");
     }
-    v.shade = restirRayTracedDiagnostic ?
-                  makeTraversal("wavefrontShade", "RestirShadeDiagnostic", false, v.restirShadeDiagnosticTable) :
-                  make("wavefrontShade");
+    if (restirRayTracedDiagnostic)
+    {
+        v.shade = makeTraversal("wavefrontShade", "RestirShadeDiagnostic", false, v.restirShadeDiagnosticTable);
+    }
+    else if (openpbr)
+    {
+        const bool shadeTailEnabled = true;
+        values->setConstantValue(&shadeTailEnabled, MTL::DataTypeBool, (NS::UInteger)24);
+        v.shade = make("wavefrontShade");
+        values->setConstantValue(&shadeTailDisabled, MTL::DataTypeBool, (NS::UInteger)24);
+        const bool disabled = false;
+        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)21);
+        const bool shadeLayerEnabled = true;
+        values->setConstantValue(&shadeLayerEnabled, MTL::DataTypeBool, (NS::UInteger)25);
+        v.shadeLayer = make("wavefrontShade");
+        values->setConstantValue(&shadeLayerDisabled, MTL::DataTypeBool, (NS::UInteger)25);
+        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)22);
+        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)20);
+        const bool shadeBaseEnabled = true;
+        values->setConstantValue(&shadeBaseEnabled, MTL::DataTypeBool, (NS::UInteger)26);
+        v.shadeBase = make("wavefrontShade");
+        values->setConstantValue(&shadeBaseDisabled, MTL::DataTypeBool, (NS::UInteger)26);
+        values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)20);
+        values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)21);
+        values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)22);
+    }
+    else
+    {
+        v.shade = make("wavefrontShade");
+    }
     v.restirSpatialFinal = restirRayTracedDiagnostic ?
                                makeTraversal("wavefrontRestirSpatialFinal", "RestirSpatialDiagnostic", false,
                                              v.restirSpatialDiagnosticTable) :

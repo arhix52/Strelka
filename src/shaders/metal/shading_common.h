@@ -54,6 +54,13 @@ constant bool kFcRisOne [[function_constant(15)]];
 constant bool kFcAov [[function_constant(16)]];
 constant bool kFcAllOpenPBR [[function_constant(17)]];
 constant bool kFcAllNativeOpenPBR [[function_constant(19)]];
+constant bool kFcOpenPBRSheenAndCoat [[function_constant(20)]];
+constant bool kFcOpenPBRDispersion [[function_constant(21)]];
+constant bool kFcOpenPBRTranslucency [[function_constant(22)]];
+constant bool kFcOpenPBRMetallic [[function_constant(23)]];
+constant bool kFcShadeTail [[function_constant(24)]];
+constant bool kFcShadeLayer [[function_constant(25)]];
+constant bool kFcShadeBase [[function_constant(26)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -89,6 +96,15 @@ constant bool SPEC_RIS_ONE = is_function_constant_defined(kFcRisOne) ? kFcRisOne
 constant bool SPEC_AOV = is_function_constant_defined(kFcAov) ? kFcAov : true;
 constant bool SPEC_ALL_OPENPBR = is_function_constant_defined(kFcAllOpenPBR) ? kFcAllOpenPBR : false;
 constant bool SPEC_ALL_NATIVE_OPENPBR = is_function_constant_defined(kFcAllNativeOpenPBR) ? kFcAllNativeOpenPBR : false;
+constant bool SPEC_OPENPBR_SHEEN_AND_COAT =
+    is_function_constant_defined(kFcOpenPBRSheenAndCoat) ? kFcOpenPBRSheenAndCoat : true;
+constant bool SPEC_OPENPBR_DISPERSION = is_function_constant_defined(kFcOpenPBRDispersion) ? kFcOpenPBRDispersion : true;
+constant bool SPEC_OPENPBR_TRANSLUCENCY =
+    is_function_constant_defined(kFcOpenPBRTranslucency) ? kFcOpenPBRTranslucency : true;
+constant bool SPEC_OPENPBR_METALLIC = is_function_constant_defined(kFcOpenPBRMetallic) ? kFcOpenPBRMetallic : true;
+constant bool SPEC_SHADE_TAIL = is_function_constant_defined(kFcShadeTail) ? kFcShadeTail : false;
+constant bool SPEC_SHADE_LAYER = is_function_constant_defined(kFcShadeLayer) ? kFcShadeLayer : false;
+constant bool SPEC_SHADE_BASE = is_function_constant_defined(kFcShadeBase) ? kFcShadeBase : false;
 
 __attribute__((always_inline)) float3 transformDirection(float3 p, float3 axisX, float3 axisY, float3 axisZ)
 {
