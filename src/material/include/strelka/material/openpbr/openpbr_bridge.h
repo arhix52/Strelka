@@ -354,4 +354,170 @@ DEVICE_FUNC float openpbr_bsdf_pdf(const THREAD_REF OpenPBR_PreparedBsdf& prepar
     return openpbr_pdf(prepared, wi);
 }
 
+#if defined(__METAL_VERSION__)
+// The base Metal shade queue excludes coat, fuzz, thin film, transmission and
+// subsurface materials. With those lobes absent, retaining the enclosing
+// Fuzz->Coat->Aggregate tree keeps hundreds of bytes live for fields that are
+// provably never read. Preserve the upstream lobe implementations and their
+// exact prepared values, but retain only the three active base lobes.
+struct OpenPBR_BasePreparedBsdf
+{
+    OpenPBR_ComprehensiveMicrofacetReflectionTransmissionLobe specular_lobe;
+    OpenPBR_MetalMicrofacetMultipleScatteringLobe metal_mms_lobe;
+    OpenPBR_EnergyConservingRoughDiffuseLobe diffuse_lobe;
+    float specular_weight;
+    float metal_mms_weight;
+    float diffuse_weight;
+    vec3 view_direction;
+};
+static_assert(sizeof(OpenPBR_PreparedBsdf) == 752, "Unexpected packed Metal OpenPBR layout");
+static_assert(sizeof(OpenPBR_BasePreparedBsdf) == 328, "Metal base OpenPBR state grew unexpectedly");
+
+DEVICE_FUNC OpenPBR_BasePreparedBsdf openpbr_compact_base(const THREAD_REF OpenPBR_PreparedBsdf& prepared)
+{
+    const THREAD_REF OpenPBR_AggregateLobe& base = prepared.fuzz_lobe.coating_lobe.base_lobe;
+    OpenPBR_BasePreparedBsdf result;
+    result.specular_lobe = base.specular_lobe;
+    result.metal_mms_lobe = base.metal_mms_lobe;
+    result.diffuse_lobe = base.diffuse_lobe;
+    result.specular_weight = base.lobe_weights[OpenPBR_SpecularLobeIndex];
+    result.metal_mms_weight = base.lobe_weights[OpenPBR_MetalMMSLobeIndex];
+    result.diffuse_weight = base.lobe_weights[OpenPBR_DiffuseLobeIndex];
+    result.view_direction = prepared.view_direction;
+    return result;
+}
+
+DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_base_value(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared, float3 wi)
+{
+    OpenPBR_DiffuseSpecular result = openpbr_calculate_lobe_value(prepared.specular_lobe, prepared.view_direction, wi);
+    result = openpbr_add_diffuse_specular(
+        result, openpbr_calculate_lobe_value(prepared.metal_mms_lobe, prepared.view_direction, wi));
+    return openpbr_add_diffuse_specular(
+        result, openpbr_calculate_lobe_value(prepared.diffuse_lobe, prepared.view_direction, wi));
+}
+
+DEVICE_FUNC float openpbr_base_pdf(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared, float3 wi)
+{
+    float sum =
+        prepared.specular_weight * openpbr_calculate_lobe_pdf(prepared.specular_lobe, prepared.view_direction, wi);
+    sum += prepared.metal_mms_weight * openpbr_calculate_lobe_pdf(prepared.metal_mms_lobe, prepared.view_direction, wi);
+    sum += prepared.diffuse_weight * openpbr_calculate_lobe_pdf(prepared.diffuse_lobe, prepared.view_direction, wi);
+    const float total = prepared.specular_weight + prepared.metal_mms_weight + prepared.diffuse_weight;
+    return total > 0.0f ? sum / total : 0.0f;
+}
+
+DEVICE_FUNC BsdfEvalResult openpbr_bsdf_eval(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared,
+                                             const THREAD_REF SurfaceInteraction& si,
+                                             float3 wi)
+{
+    BsdfEvalResult result;
+    const OpenPBR_DiffuseSpecular value = openpbr_base_value(prepared, wi);
+    const float3 f_cos = value.diffuse + value.specular;
+    const float cos_i = fabsf(dot(si.shading_normal, wi));
+    result.bsdf = cos_i > 1e-6f ? f_cos / cos_i : float3(0.0f);
+    result.pdf = openpbr_base_pdf(prepared, wi);
+    return result;
+}
+
+DEVICE_FUNC BsdfSampleResult openpbr_bsdf_sample(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared, float4 xi)
+{
+    BsdfSampleResult result;
+    result.wi = float3(0.0f);
+    result.pdf = 0.0f;
+    result.bsdf_over_pdf = float3(0.0f);
+    result.event_type = BSDF_EVENT_ABSORB;
+
+    const float total = prepared.specular_weight + prepared.metal_mms_weight + prepared.diffuse_weight;
+    if (!(total > OpenPBR_FloatMin))
+    {
+        return result;
+    }
+
+    float selector = xi.x * total;
+    float selectedWeight;
+    uint selectedLobe;
+    if (selector < prepared.specular_weight)
+    {
+        selectedWeight = prepared.specular_weight;
+        selectedLobe = 0u;
+    }
+    else if (selector < prepared.specular_weight + prepared.metal_mms_weight)
+    {
+        selector -= prepared.specular_weight;
+        selectedWeight = prepared.metal_mms_weight;
+        selectedLobe = 1u;
+    }
+    else
+    {
+        selector -= prepared.specular_weight + prepared.metal_mms_weight;
+        selectedWeight = prepared.diffuse_weight;
+        selectedLobe = 2u;
+    }
+    selector /= selectedWeight;
+    openpbr_clamp_remapped_random_number(selector);
+
+    vec3 wi = float3(0.0f);
+    OpenPBR_DiffuseSpecular weight = openpbr_make_zero_diffuse_specular();
+    float pdf = 0.0f;
+    OpenPBR_BsdfLobeType sampledType = OpenPBR_BsdfLobeTypeNone;
+    const vec3 rand = float3(selector, xi.y, xi.z);
+    bool valid;
+    if (selectedLobe == 0u)
+    {
+        valid = openpbr_sample_lobe(prepared.specular_lobe, rand, prepared.view_direction, wi, weight, pdf, sampledType);
+    }
+    else if (selectedLobe == 1u)
+    {
+        valid = openpbr_sample_lobe(prepared.metal_mms_lobe, rand, prepared.view_direction, wi, weight, pdf, sampledType);
+    }
+    else
+    {
+        valid = openpbr_sample_lobe(prepared.diffuse_lobe, rand, prepared.view_direction, wi, weight, pdf, sampledType);
+    }
+    if (!valid)
+    {
+        return result;
+    }
+
+    if (!bool(sampledType & OpenPBR_BsdfLobeTypeSpecular))
+    {
+        OpenPBR_DiffuseSpecular bsdfCos = openpbr_scale_diffuse_specular(weight, pdf);
+        pdf *= selectedWeight;
+        if (selectedLobe != 0u)
+        {
+            bsdfCos = openpbr_add_diffuse_specular(
+                bsdfCos, openpbr_calculate_lobe_value(prepared.specular_lobe, prepared.view_direction, wi));
+            pdf += prepared.specular_weight *
+                   openpbr_calculate_lobe_pdf(prepared.specular_lobe, prepared.view_direction, wi);
+        }
+        if (selectedLobe != 1u)
+        {
+            bsdfCos = openpbr_add_diffuse_specular(
+                bsdfCos, openpbr_calculate_lobe_value(prepared.metal_mms_lobe, prepared.view_direction, wi));
+            pdf += prepared.metal_mms_weight *
+                   openpbr_calculate_lobe_pdf(prepared.metal_mms_lobe, prepared.view_direction, wi);
+        }
+        if (selectedLobe != 2u)
+        {
+            bsdfCos = openpbr_add_diffuse_specular(
+                bsdfCos, openpbr_calculate_lobe_value(prepared.diffuse_lobe, prepared.view_direction, wi));
+            pdf +=
+                prepared.diffuse_weight * openpbr_calculate_lobe_pdf(prepared.diffuse_lobe, prepared.view_direction, wi);
+        }
+        pdf /= total;
+        weight = openpbr_scale_diffuse_specular(bsdfCos, 1.0f / pdf);
+    }
+    else
+    {
+        weight = openpbr_scale_diffuse_specular(weight, total / selectedWeight);
+    }
+
+    result.wi = wi;
+    result.pdf = pdf;
+    result.bsdf_over_pdf = weight.diffuse + weight.specular;
+    result.event_type = openpbr_lobe_to_event(sampledType);
+    return result;
+}
+#endif
+
 #endif // STRELKA_MATERIAL_OPENPBR_BRIDGE_H

@@ -2086,12 +2086,13 @@ struct LightConnectionEvaluation
     float target;
 };
 
+template <typename OpenPBRPrepared>
 static float restirTargetOnly(thread const LightConnection& connection,
                               thread SurfaceInteraction& si,
                               bool isFibre,
                               thread const ShadedFrame& neeFrame,
                               bool isOpenPBR,
-                              thread const OpenPBR_PreparedBsdf& openpbrPrepared,
+                              thread const OpenPBRPrepared& openpbrPrepared,
                               uint32_t misHeuristic)
 {
     if (!connection.needsRay || !(connection.pdf > 0.0f) ||
@@ -2110,12 +2111,13 @@ static float restirTargetOnly(thread const LightConnection& connection,
     return luminance(connection.radiance * evalResult.bsdf * misWeight);
 }
 
+template <typename OpenPBRPrepared>
 static LightConnectionEvaluation evaluateLightConnection(thread const LightConnection& connection,
                                                          thread SurfaceInteraction& si,
                                                          bool isFibre,
                                                          thread const ShadedFrame& neeFrame,
                                                          bool isOpenPBR,
-                                                         thread const OpenPBR_PreparedBsdf& openpbrPrepared,
+                                                         thread const OpenPBRPrepared& openpbrPrepared,
                                                          uint32_t misHeuristic)
 {
     LightConnectionEvaluation result = {};
@@ -3669,9 +3671,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // the nested-dielectric exterior IOR is resolved above, and prepare() reads
     // it. SHARC eligibility never mutates these shading parameters.
     OpenPBR_PreparedBsdf openpbrPrepared;
+    OpenPBR_BasePreparedBsdf openpbrBasePrepared;
     if (isOpenPBR)
     {
         openpbrPrepared = openpbr_prepare_at(openpbrMat, si, throughput);
+        if (SPEC_SHADE_BASE)
+        {
+            openpbrBasePrepared = openpbr_compact_base(openpbrPrepared);
+        }
     }
 
     const bool hasEmitter = (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
@@ -3703,7 +3710,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                                         si, envAliasTable, envMapTexture, iesProfiles);
             auditNeeSampledConnection(uniforms, conn);
             const LightConnectionEvaluation candidate =
-                evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+                SPEC_SHADE_BASE ? evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrBasePrepared,
+                                                          uniforms.misHeuristic) :
+                                  evaluateLightConnection(
+                                      conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
             if (candidate.target > 0.0f)
             {
                 auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
@@ -3798,8 +3808,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                                             vertexBuffer, prevVertexBuffer, indexBuffer, motionTime,
                                                             crng, si, envAliasTable, envMapTexture, iesProfiles);
                 auditNeeSampledConnection(uniforms, conn);
-                const LightConnectionEvaluation candidate = evaluateLightConnection(
-                    conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+                const LightConnectionEvaluation candidate =
+                    SPEC_SHADE_BASE ? evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR,
+                                                              openpbrBasePrepared, uniforms.misHeuristic) :
+                                      evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared,
+                                                              uniforms.misHeuristic);
                 if (!(candidate.target > 0.0f))
                 {
                     if (conn.needsRay && !(conn.pdf > 0.0f))
@@ -4013,8 +4026,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                     uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
                                     motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousSampleAtCurrent);
                                 previousEvaluation =
-                                    evaluateLightConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
-                                                            openpbrPrepared, uniforms.misHeuristic);
+                                    SPEC_SHADE_BASE ?
+                                        evaluateLightConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
+                                                                openpbrBasePrepared, uniforms.misHeuristic) :
+                                        evaluateLightConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
+                                                                openpbrPrepared, uniforms.misHeuristic);
                                 if (previousEvaluation.target > 0.0f)
                                 {
                                     auditWork(uniforms, WORK_RESTIR_TEMPORAL_TARGET_POSITIVE);
@@ -4232,8 +4248,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const float4 xi = bsdfRandom.value;
     const uint32_t lobeWord = bsdfRandom.bits.z >> 9u;
     const uint32_t fresnelWord = bsdfRandom.bits.w >> 9u;
-    BsdfSampleResult sampleResult =
-        isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) : bsdf_sample(si, xi, lobeWord, fresnelWord);
+    BsdfSampleResult sampleResult = isOpenPBR ? (SPEC_SHADE_BASE ? openpbr_bsdf_sample(openpbrBasePrepared, xi) :
+                                                                   openpbr_bsdf_sample(openpbrPrepared, xi)) :
+                                                bsdf_sample(si, xi, lobeWord, fresnelWord);
 
     if (sampleResult.event_type == BSDF_EVENT_ABSORB)
     {
