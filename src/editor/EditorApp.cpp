@@ -1219,6 +1219,16 @@ void EditorApp::runBenchmark()
 void EditorApp::runJitterTest()
 {
     const uint32_t frames = std::max(16u, envUint("STRELKA_JITTER_TEST", 16));
+    // What this measures is the sign of the jitter fed to the upscaler, and only
+    // a backend with an upscaler reads it. Elsewhere the four sweeps render the
+    // same image and the table below is four copies of one number, which reads
+    // as "all four signs are equally good" rather than as "nothing was tested".
+    if (!m_render->honoursJitterSign())
+    {
+        STRELKA_INFO("JITTER skipped: this backend does not read render/pt/jitterSign, so the four signs "
+                     "render identically and there is nothing to compare");
+        return;
+    }
     m_settingsManager->setAs<bool>("render/pt/enableAcc", false);
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
     m_settingsManager->setAs<bool>("render/pt/denoise", true);
@@ -1256,16 +1266,32 @@ void EditorApp::runJitterTest()
     // which side of that tradeoff it sits on.
     std::vector<float> truth;
     uint32_t tw = 0, th = 0;
+    constexpr uint32_t kTruthSpp = 512;
     {
         m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
         m_settingsManager->setAs<bool>("render/pt/denoise", false);
         m_settingsManager->setAs<bool>("render/pt/enableAcc", true);
+        // Accumulation stops at sppTotal, and this wants more samples than any
+        // default it would otherwise inherit -- 256 from loadSettings(), or
+        // whatever -t was given, which is 64 unless someone passed one. Below
+        // the count this loop waits for, the estimator goes quiet and the loop
+        // spins until the process is killed. That is what it did.
+        m_settingsManager->setAs<uint32_t>("render/pt/sppTotal", kTruthSpp);
         m_sharedCtx->mSubframeIndex = 0;
-        while (m_sharedCtx->mSubframeIndex < 512 && !m_display->windowShouldClose())
+        // Bounded anyway. A converge loop with no way out turns any future
+        // reason for the estimator to stop into a hang with no output at all.
+        for (uint32_t guard = kTruthSpp * 4u + 16u;
+             m_sharedCtx->mSubframeIndex < kTruthSpp && guard-- > 0 && !m_display->windowShouldClose();)
         {
             m_display->pollEvents();
             m_render->triggerRenderIfIdle();
             usleep(300);
+        }
+        if (m_sharedCtx->mSubframeIndex < kTruthSpp)
+        {
+            STRELKA_WARNING("JITTER truth stopped at {} of {} spp; the comparison below is against an "
+                            "unconverged reference",
+                            (uint32_t)m_sharedCtx->mSubframeIndex, kTruthSpp);
         }
         usleep(200000);
         m_render->readDisplayTexture(truth, tw, th);

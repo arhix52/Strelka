@@ -48,6 +48,12 @@ public:
     Buffer* createBuffer(const BufferDesc& desc) override;
 
     void triggerRenderIfIdle() override;
+    /// The upscaler's input jitter is flipped with it, in MetalFrameUniforms.
+    bool honoursJitterSign() const override
+    {
+        return true;
+    }
+
     bool isRenderBusy() override
     {
         return mRenderBusy.load(std::memory_order_acquire);

@@ -147,6 +147,18 @@ public:
     /// The finished frame as a texture, when the backend can produce one.
     /// Nullptr means the caller should fall back to getReadyBuffer(); OptiX does.
     /// Returned as void* so this header stays free of Metal types.
+    /// Whether render/pt/jitterSign reaches this backend's sample positions.
+    ///
+    /// It is the knob the upscaler's input jitter is flipped with, and only the
+    /// Metal backend has an upscaler to feed. STRELKA_JITTER_TEST sweeps the
+    /// four signs and compares the reconstructions; where nothing reads the
+    /// setting, the four images are identical by construction and the four rows
+    /// it prints are not measurements of anything.
+    virtual bool honoursJitterSign() const
+    {
+        return false;
+    }
+
     /// Read the finished frame back to the CPU as linear RGBA floats -- what the
     /// screen shows, after tonemapping and any post effect. False when the
     /// backend cannot.
