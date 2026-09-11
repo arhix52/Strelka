@@ -40,6 +40,7 @@
 #include <fstream>
 #include <limits>
 #include <env.h>
+#include <hugepages.h>
 #include <log.h>
 
 namespace fs = std::filesystem;
@@ -1786,6 +1787,10 @@ bool readWholeFileMapped(std::vector<unsigned char>* out, std::string* err, cons
     ::madvise(mapped, size, MADV_SEQUENTIAL);
     ::madvise(mapped, size, MADV_WILLNEED);
     const unsigned char* bytes = static_cast<const unsigned char*>(mapped);
+    // Sized before the copy so the destination can be asked for huge pages: a
+    // 2.8 GB buffer is 700 000 faults at 4 KiB a page and 1 400 at 2 MiB.
+    out->reserve(size);
+    adviseHugePages(out->data(), size);
     out->assign(bytes, bytes + size);
     ::munmap(mapped, size);
     return true;

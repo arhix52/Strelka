@@ -15,6 +15,7 @@ set(FOUNDATION_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/env/env.h
     ${CMAKE_CURRENT_SOURCE_DIR}/paths/paths.h
     ${CMAKE_CURRENT_SOURCE_DIR}/progress/loadprogress.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/memory/hugepages.h
 )
 
 add_library(strelka_foundation STATIC ${FOUNDATION_SOURCES})
@@ -27,6 +28,7 @@ target_include_directories(strelka_foundation
         ${CMAKE_CURRENT_SOURCE_DIR}/env
         ${CMAKE_CURRENT_SOURCE_DIR}/paths
         ${CMAKE_CURRENT_SOURCE_DIR}/progress
+        ${CMAKE_CURRENT_SOURCE_DIR}/memory
 )
 
 target_link_libraries(strelka_foundation

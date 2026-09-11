@@ -1,3 +1,4 @@
+#include <hugepages.h>
 #include <strelka/scene/scene.h>
 
 #include <algorithm>
@@ -207,6 +208,9 @@ void Scene::reserveGeometry(size_t vertexCount, size_t indexCount, size_t skinCo
     };
     mVertices.reserve(pageRound(vertexCount, sizeof(Vertex)));
     mIndices.reserve(pageRound(indexCount, sizeof(uint32_t)));
+    // Every byte of both is written once, by the loader, immediately after this.
+    adviseHugePages(mVertices.data(), mVertices.capacity() * sizeof(Vertex));
+    adviseHugePages(mIndices.data(), mIndices.capacity() * sizeof(uint32_t));
     if (skinCount != 0)
     {
         mVerticesSkinData.reserve(skinCount);
