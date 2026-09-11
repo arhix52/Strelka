@@ -32,7 +32,11 @@
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
 
 #define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM)
-#define RAY_MASK_SHADOW (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)
+// Same change, and the same reason, as OptixRenderParams.h: an analytic light
+// does not stop a shadow ray, because Cycles does not have it stop one. See the
+// note there and tools/feature_tests/light_occlusion_probe.py. The value is the
+// contract between the two backends, so it has to move on both.
+#define RAY_MASK_SHADOW (GEOMETRY_MASK_GEOMETRY)
 #define RAY_MASK_SECONDARY (RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN)
 
 #define ANALYTIC_INTERSECTION_SPHERE 0

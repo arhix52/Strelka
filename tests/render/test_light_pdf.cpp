@@ -2103,8 +2103,15 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     //
     // Source text is not the geometry oracle here: the arithmetic above is.
     // What this pins is that the walks are gone and did not creep back, and
-    // that shadow rays still meet the emitters -- a mask that drops the light
-    // bits puts the light back in front of its own shadow.
+    // that an analytic emitter does not stand in another light's way.
+    //
+    // The mask carried the light bits until 2026-09-11, so that an emitter
+    // stopped a shadow ray the way a wall does. Cycles does not do that:
+    // tools/feature_tests/light_occlusion_probe.py hangs a small rect light
+    // under a big one over a grey floor, and the reference draws no silhouette
+    // under the blocker where Strelka drew one (0.540 against 0.254 across the
+    // floor). Mesh emitters are unaffected -- they are triangles and keep the
+    // geometry bit.
     const std::filesystem::path repository =
         std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
     const auto read = [&](const char* relative) {
@@ -2123,8 +2130,8 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     const size_t shadowMask = params.find("RAY_MASK_SHADOW =");
     REQUIRE(shadowMask != std::string::npos);
     const std::string shadowMaskLine = params.substr(shadowMask, params.find(',', shadowMask) - shadowMask);
-    CHECK(shadowMaskLine.find("GEOMETRY_MASK_LIGHT") != std::string::npos);
-    CHECK(shadowMaskLine.find("GEOMETRY_MASK_LIGHT_HIDDEN") != std::string::npos);
+    CHECK(shadowMaskLine.find("GEOMETRY_MASK_GEOMETRY") != std::string::npos);
+    CHECK(shadowMaskLine.find("GEOMETRY_MASK_LIGHT") == std::string::npos);
 }
 
 TEST_CASE("the nearest of two area emitters is the visible hit")

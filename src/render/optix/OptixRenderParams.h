@@ -37,10 +37,22 @@ enum : uint32_t
     GEOMETRY_MASK_GEOMETRY = GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE,
 
     RAY_MASK_PRIMARY = GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM,
-    // Lights are custom primitives in the same structure now, so a shadow ray is
-    // stopped by an emitter the way it is by geometry -- both sets, because a
-    // light hidden from the camera still casts.
-    RAY_MASK_SHADOW = GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN,
+    // An analytic light does not stand in another light's way. It used to: the
+    // lights are custom primitives in the same structure as the geometry, and
+    // carrying their bits here stopped a shadow ray on an emitter the way it is
+    // stopped by a wall. Cycles does not do that, and the probe that asked --
+    // tools/feature_tests/light_occlusion_probe.py, a small rect light hung
+    // under a big one over a grey floor -- shows the difference plainly: the
+    // reference floor peaks at 0.540 under the blocker, and with the light bits
+    // here it was 0.254, a silhouette Cycles does not draw.
+    //
+    // It is also a quarter of the PC samples in kids_room, because every shadow
+    // ray ran __intersection__light for it: 90.6 -> 75.6 ms per launch at
+    // 1280x720 depth 4 (docs/open-perf.md).
+    //
+    // Mesh emitters are unaffected. They are triangles, they keep the geometry
+    // bit, and they go on blocking -- which is also what Cycles does with them.
+    RAY_MASK_SHADOW = GEOMETRY_MASK_GEOMETRY,
     RAY_MASK_SECONDARY = RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN,
 };
 
