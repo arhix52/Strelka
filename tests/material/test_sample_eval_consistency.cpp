@@ -49,6 +49,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <thread>
+#include <vector>
 #include <cstdint>
 #include <limits>
 
@@ -2034,56 +2037,94 @@ TEST_CASE("bsdf_eval's density integrates to the probability of a non-delta even
         { MATERIAL_TYPE_STANDARD_PBR, 0.4f, 0.5f, 0.4f }, { MATERIAL_TYPE_DIELECTRIC, 0.2f, 1.0f, 0.4f },
         { MATERIAL_TYPE_DIELECTRIC, 0.4f, 1.0f, 0.9f },
     };
+    constexpr size_t kPointCount = sizeof(points) / sizeof(points[0]);
 
-    for (const Point& p : points)
+    struct Outcome
     {
+        double integral = 0.0;
+        double eventProbability = 0.0;
+        bool pdfFinite = true;
+        bool pdfNonNegative = true;
+    };
+    std::array<Outcome, kPointCount> outcomes{};
+
+    // A point per thread. This case is 28 million bsdf_eval calls and was 24.5 s
+    // of the suite's 31 s on its own, which is most of what an edit-build-test
+    // cycle waits for.
+    //
+    // The numbers do not move: each point already constructed its own LCG from
+    // its own fixed seed, so the seven streams were independent before they were
+    // concurrent. What moves is where the assertions happen -- they are made
+    // below, on this thread, because doctest's failure context is thread-local
+    // and a REQUIRE inside a worker would abort that worker rather than the test.
+    {
+        std::vector<std::thread> workers;
+        workers.reserve(kPointCount);
+        for (size_t index = 0; index < kPointCount; ++index)
+        {
+            workers.emplace_back([&points, &outcomes, index]() {
+                const Point& p = points[index];
+                Outcome& outcome = outcomes[index];
+
+                GridPoint g;
+                g.materialType = p.type;
+                g.roughness = p.roughness;
+                g.transmission = p.transmission;
+                g.viewTilt = p.tilt;
+                const SurfaceInteraction si = make_si(g);
+
+                // How often the sampler produces an event that has a density at all.
+                FixedSeedSampler drawRng(0x2545F491u);
+                int nonDelta = 0;
+                const int drawCount = 200000;
+                for (int i = 0; i < drawCount; ++i)
+                {
+                    const BsdfSampleResult s = bsdf_sample(si, drawRng.next4());
+                    if (s.event_type != BSDF_EVENT_ABSORB && (s.event_type & BSDF_EVENT_SPECULAR) == 0)
+                    {
+                        ++nonDelta;
+                    }
+                }
+                outcome.eventProbability = double(nonDelta) / double(drawCount);
+
+                // The integral of the reported density over the whole sphere, by
+                // uniform sampling. Slow to converge because the lobes are peaked,
+                // hence the loose tolerance -- but "0.24 where it should be 0.96"
+                // is not a tolerance question.
+                FixedSeedSampler intRng(0x27220A95u);
+                double integral = 0.0;
+                const int integralSamples = 4000000;
+                for (int i = 0; i < integralSamples; ++i)
+                {
+                    const float cosTheta = 1.0f - 2.0f * intRng.next();
+                    const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+                    const float phi = 2.0f * float(M_PI_F) * intRng.next();
+                    const float3 wi = make_float3(sinTheta * std::cos(phi), cosTheta, sinTheta * std::sin(phi));
+                    const float pdf = bsdf_eval(si, wi).pdf;
+                    outcome.pdfFinite = outcome.pdfFinite && std::isfinite(pdf);
+                    outcome.pdfNonNegative = outcome.pdfNonNegative && pdf >= 0.0f;
+                    integral += double(pdf);
+                }
+                outcome.integral = integral / double(integralSamples) * 4.0 * double(M_PI_F);
+            });
+        }
+        for (std::thread& worker : workers)
+        {
+            worker.join();
+        }
+    }
+
+    for (size_t index = 0; index < kPointCount; ++index)
+    {
+        const Point& p = points[index];
         CAPTURE(p.type);
         CAPTURE(p.roughness);
         CAPTURE(p.transmission);
         CAPTURE(p.tilt);
 
-        GridPoint g;
-        g.materialType = p.type;
-        g.roughness = p.roughness;
-        g.transmission = p.transmission;
-        g.viewTilt = p.tilt;
-        const SurfaceInteraction si = make_si(g);
-
-        // How often the sampler produces an event that has a density at all.
-        FixedSeedSampler drawRng(0x2545F491u);
-        int nonDelta = 0;
-        const int drawCount = 200000;
-        for (int i = 0; i < drawCount; ++i)
-        {
-            const BsdfSampleResult s = bsdf_sample(si, drawRng.next4());
-            if (s.event_type != BSDF_EVENT_ABSORB && (s.event_type & BSDF_EVENT_SPECULAR) == 0)
-            {
-                ++nonDelta;
-            }
-        }
-        const double eventProbability = double(nonDelta) / double(drawCount);
-
-        // The integral of the reported density over the whole sphere, by uniform
-        // sampling. Slow to converge because the lobes are peaked, hence the
-        // loose tolerance -- but "0.24 where it should be 0.96" is not a
-        // tolerance question.
-        FixedSeedSampler intRng(0x27220A95u);
-        double integral = 0.0;
-        const int integralSamples = 4000000;
-        for (int i = 0; i < integralSamples; ++i)
-        {
-            const float cosTheta = 1.0f - 2.0f * intRng.next();
-            const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
-            const float phi = 2.0f * float(M_PI_F) * intRng.next();
-            const float3 wi = make_float3(sinTheta * std::cos(phi), cosTheta, sinTheta * std::sin(phi));
-            const float pdf = bsdf_eval(si, wi).pdf;
-            REQUIRE(std::isfinite(pdf));
-            REQUIRE(pdf >= 0.0f);
-            integral += double(pdf);
-        }
-        integral = integral / double(integralSamples) * 4.0 * double(M_PI_F);
-
-        CHECK(integral == doctest::Approx(eventProbability).epsilon(0.08));
+        REQUIRE(outcomes[index].pdfFinite);
+        REQUIRE(outcomes[index].pdfNonNegative);
+        CHECK(outcomes[index].integral == doctest::Approx(outcomes[index].eventProbability).epsilon(0.08));
     }
 }
 
