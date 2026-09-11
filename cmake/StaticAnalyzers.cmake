@@ -1,27 +1,27 @@
 # clang-tidy as part of the build.
 #
-# On by default, by explicit choice, and the cost is not small: measured on this
-# tree, a clean build goes from 20s to 112s -- 5.6x, not the "roughly doubles"
-# that gets said about clang-tidy. Incremental builds pay it per changed file.
+# Off by default, and the reason is the cost rather than the value. Measured on
+# this tree: EditorApp.cpp compiles in 7.4 s and takes 61 s with the analysis in
+# front of it, so 88% of what an incremental build costs is clang-tidy re-reading
+# a file whose diagnostics nobody is waiting for. A clean build goes from 20 s to
+# 112 s the same way. That is paid on every edit of the write-build-test loop,
+# which is most of what working on this tree consists of.
 #
-# It is worth it: the run that first turned this on caught three leaked MetalFX
-# descriptors and an out-of-bounds read. Only bugprone-*, clang-analyzer-*,
-# performance-*, concurrency-* and cert-* are errors, so advisory diagnostics
-# still do not stop a build.
+# Nothing is given up by not paying it there, because it is not the gate. The
+# gate is .githooks/pre-commit, which runs clang-tidy over the staged sources --
+# the same checks, on exactly the files being committed, at the one moment the
+# answer has to be right. tools/run_clang_tidy.sh does the whole tree when that
+# is what is wanted. It was worth turning on: the run that first did caught three
+# leaked MetalFX descriptors and an out-of-bounds read. It is still on, one step
+# later.
 #
-# A missing clang-tidy is a warning and not an error, and that is on purpose: the
-# tool is not installed everywhere -- Xcode does not ship it and Homebrew's llvm
-# is keg-only -- and a default-on switch that turns `./build.sh` into a configure
-# failure on a fresh machine would get itself turned off permanently within a
-# day. Where it is present it runs; where it is not, the build says so loudly and
-# carries on.
+#     cmake .. -DSTRELKA_ENABLE_CLANG_TIDY=ON      # analyse every build
 #
-#     cmake .. -DSTRELKA_ENABLE_CLANG_TIDY=OFF     # to skip it deliberately
-#
-# The checks themselves live in .clang-tidy, with two narrower configs for the
-# headers that three different compilers read; see the Conventions section of
-# CLAUDE.md.
-option(STRELKA_ENABLE_CLANG_TIDY "Run clang-tidy as part of the build" ON)
+# Only bugprone-*, clang-analyzer-*, performance-*, concurrency-* and cert-* are
+# errors, so advisory diagnostics do not stop a build either way. The checks
+# themselves live in .clang-tidy, with two narrower configs for the headers that
+# three different compilers read; see the Conventions section of CLAUDE.md.
+option(STRELKA_ENABLE_CLANG_TIDY "Run clang-tidy as part of the build" OFF)
 
 if(STRELKA_ENABLE_CLANG_TIDY)
     # HINTS rather than PATHS: a clang-tidy already on PATH wins, and these are
@@ -32,14 +32,11 @@ if(STRELKA_ENABLE_CLANG_TIDY)
 
     if(NOT STRELKA_CLANG_TIDY)
         message(WARNING
-            "clang-tidy was not found, so this build has NO static analysis.\n"
-            "Installing it is recommended -- it is what guards the tree against the bug,\n"
-            "UB and performance classes that are build errors here:\n"
+            "clang-tidy was asked for and not found, so this build has no static analysis.\n"
             "  macOS:  brew install llvm     (lands in /opt/homebrew/opt/llvm/bin, which\n"
             "                                 this file searches; no PATH change needed)\n"
             "  Linux:  apt install clang-tidy\n"
-            "To build without it deliberately, and without this warning, configure with\n"
-            "-DSTRELKA_ENABLE_CLANG_TIDY=OFF.")
+            "The pre-commit hook needs it too, and will refuse to pass without it.")
     endif()
 endif()
 
