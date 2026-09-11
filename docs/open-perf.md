@@ -58,6 +58,44 @@ Two things measured against that and neither kept:
   launch takes an illegal address rather than failing at build time. The flag
   means keeping the vertex buffer a second time, which is 1.5 GB in this scene.
 
+### Opacity micromaps: the hardware has them, this renderer could not use them
+
+Before writing an any-hit program, the feature that already exists for this:
+`render/pt/opacityMicromaps`, off by default, with `opacity_micromap_policy.h`
+behind it. It is the hardware version of the same idea -- traversal resolves the
+regions of a cutout that are wholly inside or wholly outside, and calls the
+shader only where the answer varies -- and it changes no sampling.
+
+**The card has the engine.** `OPTIX_DEVICE_PROPERTY_RTCORE_VERSION` reads 30 on
+this machine, which is Ada's third-generation RT core; the opacity micromap
+engine arrived with it, and OptiX emulates it in software on anything older.
+The renderer logs the number now, because "is this hardware or emulation" is the
+first question any measurement of this feature has to answer.
+
+**But no pipeline here ever declared it.**
+`OptixPipelineCompileOptions::allowOpacityMicromaps` was never assigned, and the
+struct is zero-initialised, so a pipeline that traverses a structure carrying
+micromaps is not told they exist. Every micromap this renderer has ever built
+was ignored. It is set from the same setting now.
+
+With that fixed, `07_alpha_clip` builds micromaps (level 4, 128 of 512
+microtriangles resolved on the cutout card) and renders to the same mean to six
+digits, with a largest per-pixel difference of 9.1e-4 at 512 spp -- noise, not
+bias, and the expected kind: a microtriangle resolved transparent reports no hit
+at all, so the path does not spend the pass-through counter that seeds the
+stochastic test, and the sequence shifts.
+
+**It does not pay on pine.** 110.4 ms against 106.3 with it off, repeatably --
+4 % for declaring the feature and building the structures, with nothing to show
+for it, because the classifier resolves *nothing* on this asset: 144 meshes,
+every one "opacity micromap resolves nothing, skipped". A foliage card is two
+triangles across a whole needle atlas, so at the level-4 cap a microtriangle's
+uv footprint covers ~8000 texels and the classifier's 4096-texel bound declares
+it unknown without looking. Raising the two caps -- level 4 -> 6, texels
+4096 -> 65536 -- does not change the verdict either: the meshes still resolve
+nothing and the frame is 108.9 ms, still behind the 106.3 of having the feature
+off. Both probes are reverted; the pipeline flag and the RT core log are not.
+
 **What the cutouts cost, and what is left of it.** Compiling the coverage test
 out entirely (`hasCutout` forced false -- wrong image, measured for the bound)
 is 93.3 ms against 106.4: the feature is 13 % of pine's frame. Moving the test

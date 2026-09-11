@@ -687,6 +687,17 @@ void OptiXRender::createContext()
     mShaderReorderSupported = (reorderFlags & OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD) != 0;
     STRELKA_INFO("Shader execution reordering: {}", mShaderReorderSupported ? "supported" : "not available");
 
+    // Which RT core generation this is, because the opacity micromap engine is
+    // one of them and not the others: Ada resolves a micromap in hardware, and
+    // everything before it makes OptiX emulate the same answer in software,
+    // where the micromap is a cost rather than a shortcut.
+    {
+        unsigned int rtcoreVersion = 0;
+        OPTIX_CHECK(optixDeviceContextGetProperty(mState.context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION,
+                                                  &rtcoreVersion, sizeof(rtcoreVersion)));
+        STRELKA_DEBUG("RT core version: {}", rtcoreVersion);
+    }
+
     mState.mParamsBuffer = std::make_unique<OptixBuffer>(sizeof(Params));
     // A failure here is not fatal: render() falls back to the synchronous copy
     // out of mState.params, which is what it did before this buffer existed.
@@ -2159,6 +2170,16 @@ void OptiXRender::createModule()
                                                 OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipelineOptions.numPayloadValues = STRELKA_PAYLOAD_COUNT;
     pipelineOptions.numAttributeValues = 2;
+    // A pipeline has to declare that it may traverse a structure carrying opacity
+    // micromaps; one that does not is not told about the arrays the build inputs
+    // attach, and the whole feature is the build cost with none of the shortcut.
+    // Read from the setting rather than from mOpacityMicromapsEnabled, which the
+    // scene build sets and which is not necessarily resolved when a pipeline is
+    // compiled.
+    pipelineOptions.allowOpacityMicromaps = (getSettings()->contains("render/pt/opacityMicromaps") &&
+                                             getSettings()->getAs<bool>("render/pt/opacityMicromaps"))
+                                                ? 1
+                                                : 0;
     pipelineOptions.exceptionFlags =
         mEnableValidation ?
             (OPTIX_EXCEPTION_FLAG_USER | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW) :
