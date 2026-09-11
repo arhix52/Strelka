@@ -17,6 +17,12 @@ class StrelkaRecipe(ConanFile):
         # would not apply. Vertex and curve uploads also assume packed float3
         # (12 bytes); stay header-only so those defines reach every include.
         "glm/*:header_only": True,
+        # tinyexr's scanline writer compresses one block at a time unless this is
+        # on, and then it fans the blocks out over std::thread. A 4K frame is
+        # 71 MB of deflate, and it was 83% of a StrelkaCLI run whose render took
+        # 0.3 s. The option's name -- and tinyexr's own default comment -- only
+        # mention threaded loading; the save path reads the same macro.
+        "tinyexr/*:with_thread": True,
     }
 
     def requirements(self):
