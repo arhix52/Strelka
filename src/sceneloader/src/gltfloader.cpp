@@ -30,6 +30,12 @@
 
 #include <cctype>
 #include <filesystem>
+#if !defined(_WIN32)
+#    include <fcntl.h>
+#    include <sys/mman.h>
+#    include <sys/stat.h>
+#    include <unistd.h>
+#endif
 #include <utility>
 #include <fstream>
 #include <limits>
@@ -1735,6 +1741,59 @@ void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
 
 } // namespace
 
+namespace
+{
+
+// tinygltf's own ReadWholeFile sizes the destination with vector::resize and
+// then reads over it, so every byte of an external buffer is written twice: once
+// as the zero that resize is required to store, once as the file content. On the
+// pine forest's 2.8 GB .bin that second pass was 18% of the whole load in a CPU
+// profile -- more than the mesh conversion it feeds.
+//
+// Mapping the file and handing the range to vector::assign writes each byte
+// once, into freshly allocated storage that is never zeroed, and lets the page
+// cache supply the data without a read() bounce buffer. The copy itself stays:
+// tinygltf owns the buffer as a std::vector and nothing short of patching it
+// takes that away.
+//
+// Any failure falls back to the stock reader rather than to a load error -- a
+// path that cannot be mapped (a pipe, a filesystem without mmap) is still a
+// path tinygltf can read.
+bool readWholeFileMapped(std::vector<unsigned char>* out, std::string* err, const std::string& path, void* userData)
+{
+#if defined(_WIN32)
+    return tinygltf::ReadWholeFile(out, err, path, userData);
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+    {
+        return tinygltf::ReadWholeFile(out, err, path, userData);
+    }
+    struct stat status = {};
+    if (::fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) || status.st_size <= 0)
+    {
+        ::close(fd);
+        return tinygltf::ReadWholeFile(out, err, path, userData);
+    }
+    const size_t size = static_cast<size_t>(status.st_size);
+    void* mapped = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (mapped == MAP_FAILED)
+    {
+        return tinygltf::ReadWholeFile(out, err, path, userData);
+    }
+    // The copy below is one forward pass, which is exactly what these two say.
+    ::madvise(mapped, size, MADV_SEQUENTIAL);
+    ::madvise(mapped, size, MADV_WILLNEED);
+    const unsigned char* bytes = static_cast<const unsigned char*>(mapped);
+    out->assign(bytes, bytes + size);
+    ::munmap(mapped, size);
+    return true;
+#endif
+}
+
+} // namespace
+
 bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {
     if (modelPath.empty())
@@ -1752,6 +1811,20 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     // positions, normals, indices and uvs -- and the refusal reads as a plain
     // load failure with nothing to act on.
     gltf_ctx.SetMaxExternalFileSize(std::numeric_limits<size_t>::max());
+    // Everything but the read stays on tinygltf's own callbacks; SetFsCallbacks
+    // refuses a partially filled set.
+    tinygltf::FsCallbacks fsCallbacks;
+    fsCallbacks.FileExists = &tinygltf::FileExists;
+    fsCallbacks.ExpandFilePath = &tinygltf::ExpandFilePath;
+    fsCallbacks.ReadWholeFile = &readWholeFileMapped;
+    fsCallbacks.WriteWholeFile = &tinygltf::WriteWholeFile;
+    fsCallbacks.GetFileSizeInBytes = &tinygltf::GetFileSizeInBytes;
+    fsCallbacks.user_data = nullptr;
+    std::string fsErr;
+    if (!gltf_ctx.SetFsCallbacks(fsCallbacks, &fsErr))
+    {
+        STRELKA_WARNING("Falling back to tinygltf's own file reader: {}", fsErr);
+    }
     // Do not let tinygltf decode the images.
     //
     // The only thing this loader ever reads out of model.images is the uri --
