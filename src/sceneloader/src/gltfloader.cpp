@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <thread>
 #include <unordered_map>
 
 #include <strelka/scene/transform.h>
@@ -147,6 +148,55 @@ void countModelGeometry(const tinygltf::Model& model, size_t& vertexCount, size_
 // glTF exposes accessor payloads as byte arrays. Component metadata and stride
 // validation above each view establish the typed interpretation used here.
 // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+namespace
+{
+
+// Spread [0, count) over the machine, or run it here when that would cost more
+// than it saves.
+//
+// A thread per chunk rather than a pool: this is called a handful of times in a
+// scene load -- once per unique mesh primitive -- and the pine forest's are two
+// million vertices each, so the launch is noise against the work and a pool
+// would be machinery with one customer.
+template <typename Fn>
+void parallelFor(size_t count, Fn&& body)
+{
+    // Under this a load is faster on one thread than it is handing the range
+    // out. Measured on the small validation scenes, whose primitives are in the
+    // thousands of vertices and which must not get slower to make a forest
+    // faster.
+    constexpr size_t kSerialBelow = size_t{ 64 } * 1024;
+    const unsigned hardware = std::thread::hardware_concurrency();
+    const size_t threads =
+        count < kSerialBelow ? 1u : std::min<size_t>(hardware == 0u ? 1u : hardware, (count + kSerialBelow - 1u) / kSerialBelow);
+    if (threads <= 1u)
+    {
+        body(size_t{ 0 }, count);
+        return;
+    }
+
+    const size_t chunk = (count + threads - 1u) / threads;
+    std::vector<std::thread> workers;
+    workers.reserve(threads - 1u);
+    for (size_t t = 1u; t < threads; ++t)
+    {
+        const size_t begin = std::min(count, t * chunk);
+        const size_t end = std::min(count, begin + chunk);
+        if (begin == end)
+        {
+            break;
+        }
+        workers.emplace_back([&body, begin, end]() { body(begin, end); });
+    }
+    body(size_t{ 0 }, std::min(count, chunk));
+    for (std::thread& worker : workers)
+    {
+        worker.join();
+    }
+}
+
+} // namespace
+
 void processPrimitive(const tinygltf::Model& model,
                       oka::Scene& scene,
                       const uint32_t parentNodeId,
@@ -320,55 +370,73 @@ void processPrimitive(const tinygltf::Model& model,
     auto& vertices = scene.getVertices();
     auto& indicesOut = scene.getIndices();
     const uint32_t vbOffset = static_cast<uint32_t>(vertices.size());
-    vertices.reserve(vertices.size() + vertexCount);
-    for (size_t v = 0; v < vertexCount; ++v)
-    {
-        oka::Scene::Vertex vertex{};
-        const glm::float3 vPos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
-        const glm::float3 vNorm =
-            glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f));
-        vertex.pos = vPos;
-        vertex.normal = packNormal(glm::normalize(vNorm));
-        vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
-        if (colorData)
-        {
-            glm::float4 c(1.0f);
-            switch (colorComponentType)
-            {
-            case TINYGLTF_COMPONENT_TYPE_FLOAT: {
-                const float* src = static_cast<const float*>(colorData) + v * colorStride;
-                for (int k = 0; k < colorComponents; ++k)
-                    c[k] = src[k];
-                break;
-            }
-            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
-                const uint8_t* src = static_cast<const uint8_t*>(colorData) + v * colorStride;
-                for (int k = 0; k < colorComponents; ++k)
-                    c[k] = static_cast<float>(src[k]) / 255.0f;
-                break;
-            }
-            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
-                const uint16_t* src = static_cast<const uint16_t*>(colorData) + v * colorStride;
-                for (int k = 0; k < colorComponents; ++k)
-                    c[k] = static_cast<float>(src[k]) / 65535.0f;
-                break;
-            }
-            default:
-                break; // leave white
-            }
-            vertex.color = packColor(c);
-        }
-        if (tangentData)
-        {
-            const float* t = &tangentData[v * tangentStride];
-            const glm::float3 tan{ t[0], t[1], t[2] };
-            const float lenSq = glm::dot(tan, tan);
-            vertex.tangent = packTangent(lenSq > 1e-12f ? tan * glm::inversesqrt(lenSq) : glm::float3(0, 0, 1), t[3]);
-        }
-        vertices.push_back(vertex);
+    // Sized once so the conversion below can be handed out by index. resize()
+    // value-initialises the new tail, which is a pass this loop then overwrites
+    // -- and it is still cheaper than doing the conversion on one core: a
+    // primitive here is two million vertices on the pine forest, and the packing
+    // it does per vertex is most of what a scene load spends outside the kernel.
+    vertices.resize(size_t(vbOffset) + vertexCount);
 
-        if (hasJoints)
+    // One vertex, from whatever attributes this primitive turned out to have.
+    // The position and normal come back out because the skin below needs them
+    // unpacked, and packing is lossy.
+    const auto buildVertex = [&](size_t v, glm::float3& outPos, glm::float3& outNorm) -> oka::Scene::Vertex {
+        oka::Scene::Vertex vertex{};
+            const glm::float3 vPos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
+            const glm::float3 vNorm =
+                glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f));
+            vertex.pos = vPos;
+            vertex.normal = packNormal(glm::normalize(vNorm));
+            vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
+            if (colorData)
+            {
+                glm::float4 c(1.0f);
+                switch (colorComponentType)
+                {
+                case TINYGLTF_COMPONENT_TYPE_FLOAT: {
+                    const float* src = static_cast<const float*>(colorData) + v * colorStride;
+                    for (int k = 0; k < colorComponents; ++k)
+                        c[k] = src[k];
+                    break;
+                }
+                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
+                    const uint8_t* src = static_cast<const uint8_t*>(colorData) + v * colorStride;
+                    for (int k = 0; k < colorComponents; ++k)
+                        c[k] = static_cast<float>(src[k]) / 255.0f;
+                    break;
+                }
+                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+                    const uint16_t* src = static_cast<const uint16_t*>(colorData) + v * colorStride;
+                    for (int k = 0; k < colorComponents; ++k)
+                        c[k] = static_cast<float>(src[k]) / 65535.0f;
+                    break;
+                }
+                default:
+                    break; // leave white
+                }
+                vertex.color = packColor(c);
+            }
+            if (tangentData)
+            {
+                const float* t = &tangentData[v * tangentStride];
+                const glm::float3 tan{ t[0], t[1], t[2] };
+                const float lenSq = glm::dot(tan, tan);
+                vertex.tangent = packTangent(lenSq > 1e-12f ? tan * glm::inversesqrt(lenSq) : glm::float3(0, 0, 1), t[3]);
+            }
+        outPos = vPos;
+        outNorm = vNorm;
+        return vertex;
+    };
+
+    if (hasJoints)
+    {
+        // Sequential: the skin is appended in vertex order, and an unsupported
+        // joint component type abandons the primitive from inside the loop.
+        for (size_t v = 0; v < vertexCount; ++v)
         {
+            glm::float3 vPos{ 0.0f };
+            glm::float3 vNorm{ 0.0f };
+            vertices[size_t(vbOffset) + v] = buildVertex(v, vPos, vNorm);
             oka::Scene::vertexSkinData skinData{};
             const tinygltf::Accessor& jointsAccessor = model.accessors[primitive.attributes.find("JOINTS_0")->second];
             switch (jointsAccessor.componentType)
@@ -407,6 +475,17 @@ void processPrimitive(const tinygltf::Model& model,
             skinData.normal = vNorm;
             sb.push_back(skinData);
         }
+    }
+    else
+    {
+        parallelFor(vertexCount, [&](size_t begin, size_t end) {
+            for (size_t v = begin; v < end; ++v)
+            {
+                glm::float3 vPos{ 0.0f };
+                glm::float3 vNorm{ 0.0f };
+                vertices[size_t(vbOffset) + v] = buildVertex(v, vPos, vNorm);
+            }
+        });
     }
     uint32_t indexCount = 0;
     const uint32_t ibOffset = static_cast<uint32_t>(indicesOut.size());
