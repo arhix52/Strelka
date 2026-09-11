@@ -538,6 +538,12 @@ OptiXRender::~OptiXRender()
         mPipelineBuild.wait();
     }
 
+    if (mState.pinnedParams)
+    {
+        cudaFreeHost(mState.pinnedParams);
+        mState.pinnedParams = nullptr;
+    }
+
     // Destroy texture objects and arrays
     destroyTextures();
 
@@ -655,6 +661,14 @@ void OptiXRender::createContext()
     STRELKA_INFO("Shader execution reordering: {}", mShaderReorderSupported ? "supported" : "not available");
 
     mState.mParamsBuffer = std::make_unique<OptixBuffer>(sizeof(Params));
+    // A failure here is not fatal: render() falls back to the synchronous copy
+    // out of mState.params, which is what it did before this buffer existed.
+    if (cudaHostAlloc(reinterpret_cast<void**>(&mState.pinnedParams), sizeof(Params), cudaHostAllocDefault) !=
+        cudaSuccess)
+    {
+        mState.pinnedParams = nullptr;
+        STRELKA_WARNING("Could not page-lock the launch parameters; uploading them synchronously instead");
+    }
 }
 
 // Returns what the structure occupies afterwards -- the compacted size when
@@ -3873,9 +3887,23 @@ void OptiXRender::render(Buffer* output)
         latchCudaError(cudaEventRecord(mFrameStartEvent, nullptr), "record the frame start event");
     }
 
-    if (latchCudaError(cudaMemcpy(optix::devicePtr<void>(mState.mParamsBuffer->getPtr()), &params, sizeof(params),
-                                  cudaMemcpyHostToDevice),
-                       "upload the launch parameters"))
+    // On the launch's own stream, out of page-locked memory, so the host does
+    // not wait for a 300 byte copy to make the round trip to the device and
+    // back. Ordering is unchanged: the launch below runs on the same stream.
+    if (mState.pinnedParams)
+    {
+        *mState.pinnedParams = params;
+        if (latchCudaError(cudaMemcpyAsync(optix::devicePtr<void>(mState.mParamsBuffer->getPtr()),
+                                           mState.pinnedParams, sizeof(Params), cudaMemcpyHostToDevice,
+                                           mState.stream),
+                           "upload the launch parameters"))
+        {
+            return;
+        }
+    }
+    else if (latchCudaError(cudaMemcpy(optix::devicePtr<void>(mState.mParamsBuffer->getPtr()), &params,
+                                       sizeof(params), cudaMemcpyHostToDevice),
+                            "upload the launch parameters"))
     {
         return;
     }

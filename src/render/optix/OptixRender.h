@@ -73,6 +73,18 @@ struct PathTracerState
 
     std::unique_ptr<OptixBuffer> mParamsBuffer;
 
+    /// Page-locked staging for the launch parameters. A copy out of pageable
+    /// memory has to be synchronous -- the driver stages it and waits -- and on
+    /// a 300 byte structure that wait was 14.5% of the editor's CPU time in a
+    /// profile. From pinned memory the same copy rides the launch's own stream
+    /// and the host never blocks.
+    ///
+    /// One buffer is enough because every render() is followed by
+    /// syncFrameAndLatchErrors() before the next one starts, in the editor's
+    /// triggerRenderIfIdle() as well as in renderSync(). Null when the
+    /// allocation failed, and then the synchronous copy is used instead.
+    Params* pinnedParams = nullptr;
+
     OptixShaderBindingTable sbt = {};
 };
 
