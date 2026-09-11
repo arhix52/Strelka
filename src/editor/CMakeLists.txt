@@ -96,4 +96,11 @@ if(APPLE)
     # to the executable directory.
     install(TARGETS StrelkaEditor RUNTIME DESTINATION .)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini DESTINATION .)
+else()
+    # bin/ and share/strelka, which is where a Linux package puts a program and
+    # the things that are not one. resolveResourcePath() looks in
+    # ../share/strelka relative to the executable for exactly this layout.
+    install(TARGETS StrelkaEditor RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/strelka)
 endif()

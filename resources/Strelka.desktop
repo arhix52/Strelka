@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Strelka
+GenericName=Path Tracer
+Comment=GPU path tracer
+Exec=StrelkaEditor %f
+Icon=Strelka
+Terminal=false
+Categories=Graphics;3DGraphics;
+MimeType=model/gltf+json;model/gltf-binary;
+StartupWMClass=Strelka

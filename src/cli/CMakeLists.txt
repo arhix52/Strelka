@@ -44,4 +44,6 @@ target_link_libraries(StrelkaCLI
 if(APPLE)
     add_dependencies(StrelkaCLI strelka_shaders)
     install(TARGETS StrelkaCLI RUNTIME DESTINATION .)
+else()
+    install(TARGETS StrelkaCLI RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()

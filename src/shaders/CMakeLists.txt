@@ -187,6 +187,14 @@ if(WIN32 OR LINUX)
     endforeach()
     add_custom_target(copy_optixir ALL DEPENDS ${copied_optixir_files})
     add_dependencies(copy_optixir strelka_shaders)
+
+    # The renderer loads these by name at startup, so an installed binary without
+    # them is a binary that cannot draw. Same relative path as in the build tree;
+    # resolveResourcePath() finds it under share/strelka once the executable is
+    # in bin/.
+    if(NOT APPLE)
+        install(FILES ${copied_optixir_files} DESTINATION ${CMAKE_INSTALL_DATADIR}/strelka/optix)
+    endif()
 endif()
 
 if(APPLE)

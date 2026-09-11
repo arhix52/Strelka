@@ -14,6 +14,8 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES 75)
 endif()
 
+include(GNUInstallDirs)
+
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 include(${CMAKE_SOURCE_DIR}/cmake/CompilerWarnings.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/Ccache.cmake)
@@ -121,7 +123,11 @@ add_custom_target(strelka_materialx_libraries ALL
         ${CMAKE_SOURCE_DIR}/third_party/materialx/libraries ${MATERIALX_RUNTIME_LIBRARIES}
     COMMENT "Copying the MaterialX data library"
     VERBATIM)
-install(DIRECTORY ${MATERIALX_RUNTIME_LIBRARIES} DESTINATION materialx)
+if(APPLE)
+    install(DIRECTORY ${MATERIALX_RUNTIME_LIBRARIES} DESTINATION materialx)
+else()
+    install(DIRECTORY ${MATERIALX_RUNTIME_LIBRARIES} DESTINATION ${CMAKE_INSTALL_DATADIR}/strelka/materialx)
+endif()
 
 # Core libraries (always built)
 add_subdirectory(src/foundation)
@@ -154,6 +160,34 @@ endif()
 
 # Vendored sources are not ours to analyze; see cmake/StaticAnalyzers.cmake.
 strelka_skip_clang_tidy_on_vendored_targets()
+
+# Desktop integration, on the platforms that have a freedesktop one.
+#
+# Two files and no script. A .desktop entry is what gives the window a name and
+# an icon: GlfwDisplay::init() sets the Wayland app_id and the X11 WM_CLASS to
+# "Strelka", and StartupWMClass below is what a compositor matches that against.
+# Without the pair it shows the string it has and a placeholder, which is the
+# "unknown" entry in the dock.
+#
+# Exec is the bare program name, as in every distribution's own package, which
+# means the entry launches whatever bin/ on PATH provides. Writing an absolute
+# path instead needs the prefix at configure time, and `cmake --install --prefix`
+# chooses it at install time -- the first version of this file did that and
+# produced an Exec pointing into MaterialX's staging directory, because a
+# subproject had overwritten CMAKE_INSTALL_FULL_BINDIR by then. A prefix whose
+# bin/ is not on PATH gets an entry that does not launch; that is the same deal
+# every package on the system makes.
+#
+# The icons are checked in at each size hicolor is indexed by rather than resized
+# here: those directory names are exact pixel sizes, a build that resizes needs an
+# image tool present, and a package that is byte-identical from any machine is
+# worth more than the 2 MB.
+if(UNIX AND NOT APPLE AND STRELKA_BUILD_EDITOR)
+    install(FILES ${CMAKE_SOURCE_DIR}/resources/Strelka.desktop
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/icons/hicolor
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
+endif()
 
 # macOS package layout: binaries and metallibs share the install prefix root so
 # resolveResourcePath("metal/shaders/...") keeps working without path changes.

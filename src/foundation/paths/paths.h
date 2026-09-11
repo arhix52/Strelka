@@ -63,8 +63,17 @@ inline const std::filesystem::path& getExecutableDir()
 
 /// Resolve a build-tree-relative asset path (e.g. "metal/shaders/pathtrace.metallib").
 ///
-/// Prefers the executable directory; falls back to the working directory so that
-/// existing "run from the build root" workflows keep working.
+/// Three candidates, in the order they are cheapest to be right about:
+///
+///  1. Next to the executable. This is the build tree, and the macOS package,
+///     where the binaries and their assets share one directory.
+///  2. ../share/strelka, relative to the executable. This is an installed tree
+///     on Linux, where the binary is in bin/ and anything that is not a program
+///     belongs under share/ -- which is what every packaging convention and
+///     every distribution's policy expects, and what lets one prefix hold
+///     several applications.
+///  3. The path as given, relative to the working directory, so that "run it
+///     from the build root" keeps working.
 inline std::string resolveResourcePath(const std::string& relative)
 {
     std::error_code ec;
@@ -72,6 +81,11 @@ inline std::string resolveResourcePath(const std::string& relative)
     if (std::filesystem::exists(fromExe, ec))
     {
         return fromExe.string();
+    }
+    const std::filesystem::path fromShare = getExecutableDir().parent_path() / "share" / "strelka" / relative;
+    if (std::filesystem::exists(fromShare, ec))
+    {
+        return fromShare.string();
     }
     return relative;
 }
