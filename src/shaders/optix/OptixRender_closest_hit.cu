@@ -61,7 +61,12 @@ static __device__ bool samplerBlueNoiseEnabled()
 // behind it to schedule.
 static __forceinline__ __device__ bool isOpenPBRMaterial(const MaterialParams& m)
 {
-    return params.openpbrParams != nullptr && m.material_type == MATERIAL_TYPE_OPENPBR;
+    // params.hasOpenPBR is bound into the pipeline, so a scene with no OpenPBR
+    // material compiles a module without the lobe stack, without OpenPBRParams
+    // (272 B) and without OpenPBR_PreparedBsdf (720 B) -- none of which the
+    // pointer test could remove, because a pointer is read at runtime. Same
+    // argument as Metal's kFcOpenPBR.
+    return params.hasOpenPBR && params.openpbrParams != nullptr && m.material_type == MATERIAL_TYPE_OPENPBR;
 }
 
 /// Everything the free-flight decision needs about the medium behind a material.
@@ -909,10 +914,17 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
 /// `openpbrPrepared` is null for every material the standard model shades, and
 /// the vertex's prepared OpenPBR lobe stack otherwise. The whole difference this
 /// makes is which BSDF the light connection is weighed against.
+/// `throughputAtVertex` and `mediumAtVertex` are passed by value rather than read
+/// from PerRayData for one reason: the caller commits the bounce before calling
+/// this, so that nothing the bounce decided is alive across the shadow ray. Both
+/// are states this vertex arrived with, and the bounce has already replaced them.
 static __device__ float3 estimateDirectLighting(PerRayData* prd,
                                                 const SurfaceInteraction& si,
                                                 float curveRadius,
                                                 const OpenPBR_PreparedBsdf* openpbrPrepared,
+                                                const PbrPrepared& pbrPrepared,
+                                                float3 throughputAtVertex,
+                                                uint32_t mediumAtVertex,
                                                 bool& outResponsive)
 {
     outResponsive = false;
@@ -961,7 +973,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
 
         const BsdfEvalResult evalData = (openpbrPrepared != nullptr)
                                             ? openpbr_bsdf_eval(*openpbrPrepared, si, conn.toLight)
-                                            : bsdf_eval(si, conn.toLight);
+                                            : bsdf_eval(si, conn.toLight, pbrPrepared);
         if (isnan(conn.radiance) || isnan(conn.pdf) || isnan(evalData.bsdf) || isnan(evalData.pdf))
         {
             // ERROR, terminate tracing
@@ -1007,7 +1019,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
     // line here is the arithmetic this code had.
     const float W = (weightSum / (float)candidates) / bestTarget;
     outResponsive = bestConn.isResponsive;
-    const float3 weight = prd->throughput * bestF * W;
+    const float3 weight = throughputAtVertex * bestF * W;
     if (weight.x == 0.0f && weight.y == 0.0f && weight.z == 0.0f)
     {
         return make_float3(0.0f);
@@ -1032,7 +1044,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
     float3 survived = make_float3(transmittance);
     if (params.hasBoundedMedium)
     {
-        survived *= mediumTransmittance(origin, visibility.direction, visibility.maxDistance, prd->medium);
+        survived *= mediumTransmittance(origin, visibility.direction, visibility.maxDistance, mediumAtVertex);
     }
     return clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
 }
@@ -1999,6 +2011,305 @@ extern "C" __global__ void __miss__ms()
     prd->depth = params.max_depth;
 }
 
+/// What the bounce decided, held until next-event estimation has used the state
+/// it replaces.
+struct NextBounce
+{
+    /// Multiplies the throughput -- applied after the estimate, which is owed
+    /// the throughput this vertex arrived with.
+    float3 weight;
+    float3 mediumAlbedo;
+    uint32_t medium;
+    uint32_t mediumStep;
+    /// False when the path stops here. The estimate still runs: the direct
+    /// lighting at this vertex does not depend on where the path went next.
+    bool alive;
+};
+
+/// The BSDF sample and the whole of the next segment, as a value rather than as
+/// writes into PerRayData.
+///
+/// Split out of __closesthit__radiance so that next-event estimation can run
+/// *after* it while still seeing the state of this vertex. The order matters for
+/// one reason and it is not sampling: `si` is 268 bytes and the shadow ray is a
+/// traversal, so every field of it read after that ray is charged to the
+/// continuation stack of every path in the scene. Running the estimate last
+/// leaves nothing but this struct and PerRayData alive across the ray --
+/// kids_room measured 672 -> 288 bytes of continuation stack, and local-memory
+/// traffic is what that number buys (docs/open-perf.md).
+///
+/// Sampling is unaffected by the move. random<Dim>() is a pure function of
+/// (sampleIdx, dimension, seed, depth) and does not advance the sampler, so
+/// drawing the BSDF dimensions before the light ones changes no draw. And the
+/// estimate is still decided by the material rather than by the event that came
+/// back -- `didNee` is computed by the caller before either half runs, which is
+/// the property neeRunsAtVertex() exists to keep.
+static __forceinline__ __device__ NextBounce sampleNextBounce(PerRayData* prd,
+                                                              SurfaceInteraction& si,
+                                                              const MaterialParams& matParams,
+                                                              const OpenPBRParams& openpbrMat,
+                                                              const OpenPBR_PreparedBsdf& openpbrPrepared,
+                                                              const PbrPrepared& pbrPrepared,
+                                                              bool isOpenPBR,
+                                                              bool isFibre,
+                                                              float curveRadius,
+                                                              int32_t matId,
+                                                              bool entering,
+                                                              bool didNee)
+{
+    NextBounce out;
+    out.weight = make_float3(1.0f);
+    out.mediumAlbedo = prd->mediumAlbedo;
+    out.medium = prd->medium;
+    out.mediumStep = prd->mediumStep;
+    out.alive = true;
+
+    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
+    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
+    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
+    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
+
+    float4 xi = make_float4(z1, z2, z3, z4);
+    const uint32_t lobeWord = randomBits<SampleDimension::eBSDF2>(prd->sampler) >> 9u;
+    const uint32_t fresnelWord = randomBits<SampleDimension::eBSDF3>(prd->sampler) >> 9u;
+    // openpbr_sample takes three uniforms; xi.w is the one standard_pbr spends
+    // choosing a lobe and OpenPBR does not need.
+    BsdfSampleResult sample_data = isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) :
+                                                bsdf_sample(si, xi, lobeWord, fresnelWord, pbrPrepared);
+
+    if (sample_data.event_type == BSDF_EVENT_ABSORB)
+    {
+        if (prd->depth == 0)
+        {
+            prd->setFirstEventType(EventType::eAbsorb);
+        }
+        // Stop on absorb. Whatever next-event estimation delivers below stays:
+        // it is this vertex's direct lighting and does not depend on where the
+        // path went next.
+        out.alive = false;
+        return out;
+    }
+    prd->specularBounce = ((sample_data.event_type & BSDF_EVENT_SPECULAR) != 0);
+
+    if (prd->depth == 0)
+    {
+        if (sample_data.event_type & BSDF_EVENT_DIFFUSE)
+        {
+            prd->setFirstEventType(EventType::eDiffuse);
+        }
+        if (sample_data.event_type & BSDF_EVENT_GLOSSY)
+        {
+            prd->setFirstEventType(EventType::eSpecular);
+        }
+    }
+
+    // setup next path segment
+    // Face normal oriented toward the incoming ray (wo)
+    float3 faceNg = orientedFaceNormal(si.geometry_normal, si.wo);
+    // Update IOR stack on transmission.
+    //
+    // A fibre's transmission lobes do not put the path inside anything: the
+    // strand is crossed within the one event, so there is no medium to enter and
+    // no entry to match with an exit. Pushing here left every transmitted hair
+    // path one level deeper than it came in, and a groom is thousands of hairs
+    // deep.
+    // Colour the diffuse-transmission lobe applies on the way into a subsurface
+    // medium, divided back out below. The walk supplies the colour itself, once
+    // per scattering event, so leaving the lobe's copy in charges the first event
+    // twice: a sphere comes out at albedo times its correct reflectance, which
+    // for a deep-red medium is about a third of the light it should return.
+    // Cycles divides the same factor out at the same place.
+    float3 sssEntryTint = make_float3(1.0f);
+    // A subsurface entry continues along the refracted direction, not the lobe's cosine draw.
+    bool sssRefractedEntry = false;
+    if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
+    {
+        // OpenPBR enters on a textured subsurface weight and *any* transmission
+        // event, not on diffuse transmission alone: its subsurface lobe is a
+        // dielectric interface, so the event that crosses it can be glossy. And
+        // si.subsurface is a glTF field an OpenPBR material never fills, so
+        // testing it would mean no OpenPBR interior was ever entered. Same pair
+        // of conditions as wavefront.metal.
+        const bool entersMedium = isOpenPBR ? (openpbrMat.subsurface_weight > 0.0f &&
+                                               openpbrMat.geometry_thin_walled == 0u)
+                                            : (si.subsurface > 0.0f);
+        const uint32_t entryEvent = isOpenPBR ? (sample_data.event_type & BSDF_EVENT_TRANSMISSION)
+                                              : (sample_data.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION);
+        const bool startsSubsurfaceWalk = params.hasSubsurface && entersMedium && entryEvent != 0u;
+
+        // A thin-walled surface has no interior either, so crossing it does not
+        // put the path inside anything. Pushing the stack anyway left a ray that
+        // had gone through the front of a bubble believing it was inside glass,
+        // so the far side read as an exit from a dense medium -- and every
+        // grazing angle there is past the critical angle.
+        //
+        // An OpenPBR walk is excluded for a related reason and a different one:
+        // it leaves through exitMedium(), which is not a transmission event and
+        // so has no matching pop. Its entry event may be specular, so unlike the
+        // glTF path -- whose diffuse-transmission entry the stack has always been
+        // pushed for -- it would otherwise reach the push. The glTF branch is
+        // left exactly as it was; only the new case is carved out.
+        if (!si.thin_walled && !(isOpenPBR && startsSubsurfaceWalk))
+        {
+            if (entering)
+            {
+                // Report nested-dielectric stack overflow here; the matching pop reports unmatched exits.
+                if (params.iorStats != nullptr && ior_stack_full(prd->iorStack))
+                {
+                    atomicAdd(&params.iorStats[IOR_STAT_OVERFLOW], 1u);
+                }
+                ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, (unsigned int)matId);
+            }
+            else
+            {
+                if (params.iorStats != nullptr &&
+                    !ior_stack_can_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId))
+                {
+                    atomicAdd(&params.iorStats[IOR_STAT_UNMATCHED], 1u);
+                }
+                ior_stack_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
+            }
+        }
+        prd->origin = offset_ray(si.position, -faceNg);
+
+        // Entering a subsurface medium. On the glTF path the lobe that got here
+        // is the diffuse transmission one, which on its own puts the light
+        // straight out the far side; what this adds is that it random-walks on
+        // the way. From here the path is inside, and the next closest hit samples
+        // a free flight instead of shading whatever it reaches.
+        //
+        if (startsSubsurfaceWalk)
+        {
+            out.medium = static_cast<uint32_t>(matId) + 1u;
+            out.mediumStep = 0u;
+
+            // The walk's albedo, resolved here because this is the last place a
+            // texture exists: inside the medium there is no surface to sample.
+            float3 walkAlbedo;
+            if (isOpenPBR)
+            {
+                // MaterialX exports in the test scenes carry marble veining in
+                // base_color and a constant subsurface tint. Fold the former into
+                // the latter before OpenPBR maps it to single-scattering albedo;
+                // a separately mapped subsurface colour stays intact.
+                OpenPBRParams walkMat = openpbrMat;
+                if (openpbrBaseMapDetailsSubsurface(walkMat))
+                {
+                    const float3 base = openpbr_color_to_float3(walkMat.base_color);
+                    const float3 subsurface = openpbr_color_to_float3(walkMat.subsurface_color) * base;
+                    walkMat.subsurface_color = OpenPBRColor{ subsurface.x, subsurface.y, subsurface.z };
+                }
+                walkAlbedo = openpbr_interior_volume(walkMat).albedo;
+            }
+            else
+            {
+                // Scaled by how far this point's albedo departs from the one the
+                // material's scatter colour was derived from, so a flat material
+                // takes the ratio 1 and is unchanged, and marble carries its
+                // veining in.
+                walkAlbedo = matParams.diffuse_transmission_color;
+                const float3 reference = matParams.subsurface_reference;
+                if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
+                {
+                    walkAlbedo *= si.albedo / reference;
+                }
+            }
+            out.mediumAlbedo = saturate(walkAlbedo);
+            // Only the glTF path divides by an entry tint. Its
+            // diffuse-transmission lobe already carries the scatter colour in
+            // bsdf_over_pdf and the walk applies that colour again through the
+            // medium's albedo, so one of the two has to come back out. OpenPBR
+            // does not double it -- Adobe's subsurface lobe weight and the
+            // single-scattering albedo its volume derives are already the split
+            // -- and dividing anyway would use si.diffuse_transmission_color, a
+            // glTF field no OpenPBR material fills. Clamped to 1e-4 that is not a
+            // small darkening but a factor of ten thousand.
+            if (!isOpenPBR)
+            {
+                sssEntryTint = fmaxf(si.diffuse_transmission_color, make_float3(1e-4f));
+            }
+
+            // Enter on the refraction, not on the lobe's cosine draw. The lobe
+            // still decides whether the medium is entered and still supplies the
+            // weight; only the direction changes, and it is the direction that
+            // sets how far a path travels through the body. Same note as in
+            // wavefront.metal.
+            sssRefractedEntry = true;
+        }
+    }
+    else
+    {
+        prd->origin = offset_ray(si.position, faceNg);
+    }
+    prd->dir = sssRefractedEntry ?
+                   subsurface_entry_direction(
+                       si.wo, (dot(si.shading_normal, si.wo) > 0.0f) ? si.shading_normal : -si.shading_normal,
+                       random<SampleDimension::eSssChannel>(prd->sampler),
+                       random<SampleDimension::eSssDistance>(prd->sampler)) :
+                   sample_data.wi;
+
+    // The same rejection Cycles makes in subsurface_bounce(): a refracted entry
+    // on the viewer's side of the geometric normal never entered anything. See
+    // the note at the matching site in wavefront.metal.
+    if (sssRefractedEntry && dot(faceNg, prd->dir) >= 0.0f)
+    {
+        // Stopped the way an absorbed sample is: whatever next-event estimation
+        // delivers at this vertex stays, and nothing is carried onward.
+        out.alive = false;
+        return out;
+    }
+
+    if (isFibre)
+    {
+        // Both branches above assume a surface with an inside and an outside. A
+        // strand has neither: the bounce leaves from wherever the crossing the
+        // lobe has already accounted for comes out. Without this the ray hits the
+        // far wall and buys a second whole-fibre event -- and a third, which is
+        // what made an isolated strand's cross-section climb with depth instead
+        // of going flat.
+        prd->origin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, normalize(prd->dir));
+    }
+    // What the next vertex is allowed to weight its light hit against.
+    //
+    // Next-event estimation here only ever proposed directions on the side of the
+    // shading normal that `estimateDirectLighting` accepts -- above it on a front
+    // face, and nothing at all through a back one. So a bounce that leaves in any
+    // other direction is a direction the light-sampling strategy could not have
+    // produced, and the balance heuristic must not deduct a share for it: the
+    // deduction is real and the delivery never happens. Recording `didNee` before
+    // the direction was known charged rough transmission for an estimate that had
+    // already rejected the whole transmitted hemisphere, which is why the frosted
+    // end of `22_thin_walled` was dark while its smooth control -- a specular
+    // event, and already exempt through `specularBounce` -- was not.
+    //
+    // A fibre is the exception: its connections reach the far side of the strand,
+    // so withholding the weight there would count the light twice. This is the
+    // same expression Metal's `wavefrontShade` applies at the same point.
+    //
+    // Against the shaded frame, for the reason given at the proposal above. An
+    // opaque back hit used to absorb, so it had no bounce to weight at all;
+    // now that it has one, passing the raw front_face would withhold the weight
+    // from a direction next-event estimation did offer, and the light would land
+    // about twice.
+    const ShadedFrame bounceFrame =
+        shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
+    prd->neeDone = neePairsWithBounce(didNee, neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission),
+                                      bounceFrame.frontFace,
+                                      bounceFrame.normalSign * dot(si.shading_normal, prd->dir));
+    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
+    prd->misDistance = 0.0f;
+    out.weight = sample_data.bsdf_over_pdf / sssEntryTint;
+    // What the next hit's cache-eligibility test asks about: the lobe this
+    // vertex is sending the ray out of. A specular event is recorded as zero
+    // roughness whatever the material says, because that is what the test means
+    // by a lobe that still carries an image.
+    if (params.sharcCapacity != 0u)
+    {
+        params.sharcPath[launchPixelIndex(params)].launchRoughness = prd->specularBounce ? 0.0f : si.roughness;
+    }
+    return out;
+}
+
 extern "C" __global__ void __closesthit__radiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -2032,8 +2343,13 @@ extern "C" __global__ void __closesthit__radiance()
     // rays offset into the strand, its far-side connections were rejected as
     // back-facing, and its transmitted bounces re-entered the fibre they had just
     // crossed.
-    const bool isCubicCurve = (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE);
-    const bool isCurveHit = isCubicCurve || (primType == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR);
+    //
+    // Both are false outright in a scene with no curve geometry: params.hasCurves
+    // is bound into the pipeline, so the two vertex fetches below and the whole
+    // fibre path further down are not in the module at all. Metal spells the same
+    // constant kFcCurves.
+    const bool isCubicCurve = params.hasCurves && (primType == OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE);
+    const bool isCurveHit = isCubicCurve || (params.hasCurves && primType == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR);
     if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE)
     {
         surfaceHit = fillTriangleGeomData(hit_data);
@@ -2042,7 +2358,7 @@ extern "C" __global__ void __closesthit__radiance()
     {
         surfaceHit = fillCubicCurveGeomData(hit_data);
     }
-    else if (primType == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR)
+    else if (params.hasCurves && primType == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR)
     {
         surfaceHit = fillLinearCurveGeomData(hit_data);
     }
@@ -2071,7 +2387,12 @@ extern "C" __global__ void __closesthit__radiance()
     // Only meaningful while insideMedium; scatterInMedium() needs the mean cosine
     // and the source of it differs between the two material models.
     float mediumAnisotropy = 0.0f;
-    if (prd->medium != 0u)
+    // params.hasSubsurface is bound, and nothing can set prd->medium in a
+    // pipeline compiled without it: the two sites that do -- the bounded-volume
+    // toggle and the subsurface entry below -- are gated on the same constant.
+    // So the free-flight draw, the walk and the exit are all out of the module
+    // in a scene with no medium of either kind. Metal: kFcSubsurface.
+    if (params.hasSubsurface && prd->medium != 0u)
     {
         const MaterialParams& mm = params.materials[prd->medium - 1u];
         insideMedium = true;
@@ -2171,7 +2492,7 @@ extern "C" __global__ void __closesthit__radiance()
     // carries on with the same direction and throughput -- unshaded, and without
     // spending a bounce, because a volume the light passes through twice would
     // otherwise cost two of them.
-    if ((matParams.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+    if (params.hasSubsurface && (matParams.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
     {
         // Bounded by the same counter the cutout pass-through uses, and for the
         // same reason: neither advances `depth`, so neither has a natural end. A
@@ -2352,8 +2673,11 @@ extern "C" __global__ void __closesthit__radiance()
     // the path moves -- not the throughput, not `specularBounce`, not
     // `lastBsdfPdf` -- so a light or an environment seen through a cutout is
     // still weighted against the bounce that actually produced the direction.
-    const float opacity = resolveOpacity(matParams, textures, si.uv);
-    if (opacity < 1.0f && prd->passthrough < PATH_PASSTHROUGH_MAX)
+    // params.hasCutout is bound, so a scene whose materials are all opaque does
+    // not carry the test -- nor the opacity texture fetch inside it, which is a
+    // dependent load on every shaded vertex. Metal spells it kFcAlpha.
+    const float opacity = params.hasCutout ? resolveOpacity(matParams, textures, si.uv) : 1.0f;
+    if (params.hasCutout && opacity < 1.0f && prd->passthrough < PATH_PASSTHROUGH_MAX)
     {
         if (opacitySample(prd->sampler, launchPixelIndex(params), prd->passthrough) >= opacity)
         {
@@ -2412,6 +2736,14 @@ extern "C" __global__ void __closesthit__radiance()
     {
         openpbrPrepared = openpbr_prepare_at(openpbrMat, si, prd->throughput);
     }
+
+    // The glTF model's equivalent, and it exists for the same reason: the lobe
+    // weights, the shaded frame and the categorical lattice were rebuilt by
+    // bsdf_has_smooth_lobe, by every bsdf_eval a connection makes and by
+    // bsdf_sample, three times or more at one vertex over inputs that cannot
+    // change between them. Zeroed for a material with no glTF lobe stack -- hair
+    // and the standalone lobes read none of it.
+    const PbrPrepared pbrPrepared = pbr_prepare_for(si);
 
     // --- Radiance cache ------------------------------------------------------
     // Read only beyond the configured depth and never after a specular arrival or a prior voxel visit.
@@ -2539,12 +2871,41 @@ extern "C" __global__ void __closesthit__radiance()
     // inconsistency directly, which is the only reason the switch exists.
     const bool didNee = neeRunsAtVertex(
         params.estimatorMode == 0, params.scene.numLights > 0 || params.scene.numEmissiveMeshes > 0 || params.hasEnvMap,
-        isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si));
+        isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si, pbrPrepared));
+    // The bounce is sampled first and the estimate runs after it, so that `si`
+    // is dead by the time the shadow ray traverses; sampleNextBounce() carries
+    // the reason and the measurement. Nothing about the estimate itself moved --
+    // it is still decided by `didNee` above, and still uses the throughput and
+    // the medium this vertex arrived with, both of which the bounce leaves for
+    // the commit below.
+    const NextBounce bounce = sampleNextBounce(prd, si, matParams, openpbrMat, openpbrPrepared, pbrPrepared,
+                                               isOpenPBR, isFibre, curveRadius, matId, entering, didNee);
+
+    // Committed before the estimate rather than after it, with the two values the
+    // estimate still needs taken by value first, so that nothing the bounce
+    // decided is alive across the shadow ray. The reported continuation stack
+    // does not move for this -- it is the rounded maximum, and 288 bytes covers
+    // both -- but the bytes actually spilled around the ray do: kids_room local
+    // loads 25.14 -> 22.14 GB per launch, stores 25.38 -> 22.93, DRAM 9.16 ->
+    // 7.47. It buys no time at that point (135.4 -> 135.0 ms); see
+    // docs/open-perf.md for where the launch stands instead.
+    //
+    // `alive` is the exception -- zeroing the throughput for a path that stops
+    // has to wait until the estimate has been added, which is what the tail
+    // below does.
+    const float3 throughputAtVertex = prd->throughput;
+    const uint32_t mediumAtVertex = prd->medium;
+    prd->throughput *= bounce.weight;
+    prd->medium = bounce.medium;
+    prd->mediumStep = bounce.mediumStep;
+    prd->mediumAlbedo = bounce.mediumAlbedo;
+
     if (didNee)
     {
         bool responsiveLight = false;
         const float3 direct = estimateDirectLighting(prd, si, curveRadius,
-                                                     isOpenPBR ? &openpbrPrepared : nullptr, responsiveLight);
+                                                     isOpenPBR ? &openpbrPrepared : nullptr, pbrPrepared,
+                                                     throughputAtVertex, mediumAtVertex, responsiveLight);
         prd->radiance += direct;
         // Responsive lighting: remember how much of what this path gathers comes
         // from a light on the fast clock, so the deposit at the end of the path
@@ -2575,247 +2936,9 @@ extern "C" __global__ void __closesthit__radiance()
         }
     }
 
-    const float z1 = random<SampleDimension::eBSDF0>(prd->sampler);
-    const float z2 = random<SampleDimension::eBSDF1>(prd->sampler);
-    const float z3 = random<SampleDimension::eBSDF2>(prd->sampler);
-    const float z4 = random<SampleDimension::eBSDF3>(prd->sampler);
-
-    float4 xi = make_float4(z1, z2, z3, z4);
-    const uint32_t lobeWord = randomBits<SampleDimension::eBSDF2>(prd->sampler) >> 9u;
-    const uint32_t fresnelWord = randomBits<SampleDimension::eBSDF3>(prd->sampler) >> 9u;
-    // openpbr_sample takes three uniforms; xi.w is the one standard_pbr spends
-    // choosing a lobe and OpenPBR does not need.
-    BsdfSampleResult sample_data = isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) :
-                                                bsdf_sample(si, xi, lobeWord, fresnelWord);
-
-    if (sample_data.event_type == BSDF_EVENT_ABSORB)
+    if (!bounce.alive)
     {
-        if (prd->depth == 0)
-        {
-            prd->setFirstEventType(EventType::eAbsorb);
-        }
-        // stop on absorb. Whatever next-event estimation delivered above stays:
-        // it is this vertex's direct lighting and does not depend on where the
-        // path went next.
         prd->throughput = make_float3(0.0f);
-        return;
-    }
-    prd->specularBounce = ((sample_data.event_type & BSDF_EVENT_SPECULAR) != 0);
-
-    if (prd->depth == 0)
-    {
-        if (sample_data.event_type & BSDF_EVENT_DIFFUSE)
-        {
-            prd->setFirstEventType(EventType::eDiffuse);
-        }
-        if (sample_data.event_type & BSDF_EVENT_GLOSSY)
-        {
-            prd->setFirstEventType(EventType::eSpecular);
-        }
     }
 
-    // setup next path segment
-    // Face normal oriented toward the incoming ray (wo)
-    float3 faceNg = orientedFaceNormal(si.geometry_normal, si.wo);
-    // Update IOR stack on transmission.
-    //
-    // A fibre's transmission lobes do not put the path inside anything: the
-    // strand is crossed within the one event, so there is no medium to enter and
-    // no entry to match with an exit. Pushing here left every transmitted hair
-    // path one level deeper than it came in, and a groom is thousands of hairs
-    // deep.
-    // Colour the diffuse-transmission lobe applies on the way into a subsurface
-    // medium, divided back out below. The walk supplies the colour itself, once
-    // per scattering event, so leaving the lobe's copy in charges the first event
-    // twice: a sphere comes out at albedo times its correct reflectance, which
-    // for a deep-red medium is about a third of the light it should return.
-    // Cycles divides the same factor out at the same place.
-    float3 sssEntryTint = make_float3(1.0f);
-    // A subsurface entry continues along the refracted direction, not the lobe's cosine draw.
-    bool sssRefractedEntry = false;
-    if ((sample_data.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
-    {
-        // OpenPBR enters on a textured subsurface weight and *any* transmission
-        // event, not on diffuse transmission alone: its subsurface lobe is a
-        // dielectric interface, so the event that crosses it can be glossy. And
-        // si.subsurface is a glTF field an OpenPBR material never fills, so
-        // testing it would mean no OpenPBR interior was ever entered. Same pair
-        // of conditions as wavefront.metal.
-        const bool entersMedium = isOpenPBR ? (openpbrMat.subsurface_weight > 0.0f &&
-                                               openpbrMat.geometry_thin_walled == 0u)
-                                            : (si.subsurface > 0.0f);
-        const uint32_t entryEvent = isOpenPBR ? (sample_data.event_type & BSDF_EVENT_TRANSMISSION)
-                                              : (sample_data.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION);
-        const bool startsSubsurfaceWalk = entersMedium && entryEvent != 0u;
-
-        // A thin-walled surface has no interior either, so crossing it does not
-        // put the path inside anything. Pushing the stack anyway left a ray that
-        // had gone through the front of a bubble believing it was inside glass,
-        // so the far side read as an exit from a dense medium -- and every
-        // grazing angle there is past the critical angle.
-        //
-        // An OpenPBR walk is excluded for a related reason and a different one:
-        // it leaves through exitMedium(), which is not a transmission event and
-        // so has no matching pop. Its entry event may be specular, so unlike the
-        // glTF path -- whose diffuse-transmission entry the stack has always been
-        // pushed for -- it would otherwise reach the push. The glTF branch is
-        // left exactly as it was; only the new case is carved out.
-        if (!si.thin_walled && !(isOpenPBR && startsSubsurfaceWalk))
-        {
-            if (entering)
-            {
-                // Report nested-dielectric stack overflow here; the matching pop reports unmatched exits.
-                if (params.iorStats != nullptr && ior_stack_full(prd->iorStack))
-                {
-                    atomicAdd(&params.iorStats[IOR_STAT_OVERFLOW], 1u);
-                }
-                ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, (unsigned int)matId);
-            }
-            else
-            {
-                if (params.iorStats != nullptr &&
-                    !ior_stack_can_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId))
-                {
-                    atomicAdd(&params.iorStats[IOR_STAT_UNMATCHED], 1u);
-                }
-                ior_stack_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
-            }
-        }
-        prd->origin = offset_ray(si.position, -faceNg);
-
-        // Entering a subsurface medium. On the glTF path the lobe that got here
-        // is the diffuse transmission one, which on its own puts the light
-        // straight out the far side; what this adds is that it random-walks on
-        // the way. From here the path is inside, and the next closest hit samples
-        // a free flight instead of shading whatever it reaches.
-        //
-        if (startsSubsurfaceWalk)
-        {
-            prd->medium = static_cast<uint32_t>(matId) + 1u;
-            prd->mediumStep = 0u;
-
-            // The walk's albedo, resolved here because this is the last place a
-            // texture exists: inside the medium there is no surface to sample.
-            float3 walkAlbedo;
-            if (isOpenPBR)
-            {
-                // MaterialX exports in the test scenes carry marble veining in
-                // base_color and a constant subsurface tint. Fold the former into
-                // the latter before OpenPBR maps it to single-scattering albedo;
-                // a separately mapped subsurface colour stays intact.
-                OpenPBRParams walkMat = openpbrMat;
-                if (openpbrBaseMapDetailsSubsurface(walkMat))
-                {
-                    const float3 base = openpbr_color_to_float3(walkMat.base_color);
-                    const float3 subsurface = openpbr_color_to_float3(walkMat.subsurface_color) * base;
-                    walkMat.subsurface_color = OpenPBRColor{ subsurface.x, subsurface.y, subsurface.z };
-                }
-                walkAlbedo = openpbr_interior_volume(walkMat).albedo;
-            }
-            else
-            {
-                // Scaled by how far this point's albedo departs from the one the
-                // material's scatter colour was derived from, so a flat material
-                // takes the ratio 1 and is unchanged, and marble carries its
-                // veining in.
-                walkAlbedo = matParams.diffuse_transmission_color;
-                const float3 reference = matParams.subsurface_reference;
-                if (reference.x > 1e-4f && reference.y > 1e-4f && reference.z > 1e-4f)
-                {
-                    walkAlbedo *= si.albedo / reference;
-                }
-            }
-            prd->mediumAlbedo = saturate(walkAlbedo);
-            // Only the glTF path divides by an entry tint. Its
-            // diffuse-transmission lobe already carries the scatter colour in
-            // bsdf_over_pdf and the walk applies that colour again through the
-            // medium's albedo, so one of the two has to come back out. OpenPBR
-            // does not double it -- Adobe's subsurface lobe weight and the
-            // single-scattering albedo its volume derives are already the split
-            // -- and dividing anyway would use si.diffuse_transmission_color, a
-            // glTF field no OpenPBR material fills. Clamped to 1e-4 that is not a
-            // small darkening but a factor of ten thousand.
-            if (!isOpenPBR)
-            {
-                sssEntryTint = fmaxf(si.diffuse_transmission_color, make_float3(1e-4f));
-            }
-
-            // Enter on the refraction, not on the lobe's cosine draw. The lobe
-            // still decides whether the medium is entered and still supplies the
-            // weight; only the direction changes, and it is the direction that
-            // sets how far a path travels through the body. Same note as in
-            // wavefront.metal.
-            sssRefractedEntry = true;
-        }
-    }
-    else
-    {
-        prd->origin = offset_ray(si.position, faceNg);
-    }
-    prd->dir = sssRefractedEntry ?
-                   subsurface_entry_direction(
-                       si.wo, (dot(si.shading_normal, si.wo) > 0.0f) ? si.shading_normal : -si.shading_normal,
-                       random<SampleDimension::eSssChannel>(prd->sampler),
-                       random<SampleDimension::eSssDistance>(prd->sampler)) :
-                   sample_data.wi;
-
-    // The same rejection Cycles makes in subsurface_bounce(): a refracted entry
-    // on the viewer's side of the geometric normal never entered anything. See
-    // the note at the matching site in wavefront.metal.
-    if (sssRefractedEntry && dot(faceNg, prd->dir) >= 0.0f)
-    {
-        // Stopped the way an absorbed sample is: whatever next-event estimation
-        // delivered at this vertex stays, and nothing is carried onward.
-        prd->throughput = make_float3(0.0f);
-        return;
-    }
-
-    if (isFibre)
-    {
-        // Both branches above assume a surface with an inside and an outside. A
-        // strand has neither: the bounce leaves from wherever the crossing the
-        // lobe has already accounted for comes out. Without this the ray hits the
-        // far wall and buys a second whole-fibre event -- and a third, which is
-        // what made an isolated strand's cross-section climb with depth instead
-        // of going flat.
-        prd->origin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, normalize(prd->dir));
-    }
-    // What the next vertex is allowed to weight its light hit against.
-    //
-    // Next-event estimation here only ever proposed directions on the side of the
-    // shading normal that `estimateDirectLighting` accepts -- above it on a front
-    // face, and nothing at all through a back one. So a bounce that leaves in any
-    // other direction is a direction the light-sampling strategy could not have
-    // produced, and the balance heuristic must not deduct a share for it: the
-    // deduction is real and the delivery never happens. Recording `didNee` before
-    // the direction was known charged rough transmission for an estimate that had
-    // already rejected the whole transmitted hemisphere, which is why the frosted
-    // end of `22_thin_walled` was dark while its smooth control -- a specular
-    // event, and already exempt through `specularBounce` -- was not.
-    //
-    // A fibre is the exception: its connections reach the far side of the strand,
-    // so withholding the weight there would count the light twice. This is the
-    // same expression Metal's `wavefrontShade` applies at the same point.
-    //
-    // Against the shaded frame, for the reason given at the proposal above. An
-    // opaque back hit used to absorb, so it had no bounce to weight at all;
-    // now that it has one, passing the raw front_face would withhold the weight
-    // from a direction next-event estimation did offer, and the light would land
-    // about twice.
-    const ShadedFrame bounceFrame =
-        shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
-    prd->neeDone = neePairsWithBounce(didNee, neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission),
-                                      bounceFrame.frontFace,
-                                      bounceFrame.normalSign * dot(si.shading_normal, prd->dir));
-    prd->lastBsdfPdf = (prd->specularBounce) ? 1.0f : sample_data.pdf;
-    prd->misDistance = 0.0f;
-    prd->throughput *= sample_data.bsdf_over_pdf / sssEntryTint;
-    // What the next hit's cache-eligibility test asks about: the lobe this
-    // vertex is sending the ray out of. A specular event is recorded as zero
-    // roughness whatever the material says, because that is what the test means
-    // by a lobe that still carries an image.
-    if (params.sharcCapacity != 0u)
-    {
-        params.sharcPath[launchPixelIndex(params)].launchRoughness = prd->specularBounce ? 0.0f : si.roughness;
-    }
 }

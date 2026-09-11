@@ -206,8 +206,17 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si, const MaterialParams& params,
 //   xi.z         -- lobe selection  (standard_pbr)
 //   xi.w         -- Fresnel coin-flip (dielectric, transmission)
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult bsdf_sample(
-    const THREAD_REF SurfaceInteraction& si, float4 xi, unsigned int lobeWord, unsigned int fresnelWord)
+// The `prep` overloads take the per-vertex preparation of the glTF lobe stack
+// (pbr_prepare, standard_pbr.h) so that a vertex builds it once and spends it on
+// bsdf_has_smooth_lobe, bsdf_eval and bsdf_sample. Every other material model
+// ignores it -- their state is small enough that there is nothing to cache --
+// and the overloads without it prepare on the spot, which is what a caller that
+// does one thing per vertex should keep doing.
+DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si,
+                                         float4 xi,
+                                         unsigned int lobeWord,
+                                         unsigned int fresnelWord,
+                                         const THREAD_REF PbrPrepared& prep)
 {
     switch (si.material_type)
     {
@@ -225,8 +234,14 @@ DEVICE_FUNC BsdfSampleResult bsdf_sample(
 
     case MATERIAL_TYPE_STANDARD_PBR:
     default:
-        return standard_pbr_sample(si, xi.x, xi.y, lobeWord, fresnelWord);
+        return standard_pbr_sample(si, xi.x, xi.y, lobeWord, fresnelWord, prep);
     }
+}
+
+DEVICE_FUNC BsdfSampleResult bsdf_sample(
+    const THREAD_REF SurfaceInteraction& si, float4 xi, unsigned int lobeWord, unsigned int fresnelWord)
+{
+    return bsdf_sample(si, xi, lobeWord, fresnelWord, pbr_prepare_for(si));
 }
 
 DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si, float4 xi)
@@ -237,7 +252,8 @@ DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si
 // ---------------------------------------------------------------------------
 // bsdf_eval -- Evaluate f(wo, wi) and return the sampling PDF
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si, float3 wi)
+DEVICE_FUNC BsdfEvalResult
+bsdf_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THREAD_REF PbrPrepared& prep)
 {
     switch (si.material_type)
     {
@@ -255,8 +271,13 @@ DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si, fl
 
     case MATERIAL_TYPE_STANDARD_PBR:
     default:
-        return standard_pbr_eval(si, wi);
+        return standard_pbr_eval(si, wi, prep);
     }
+}
+
+DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si, float3 wi)
+{
+    return bsdf_eval(si, wi, pbr_prepare_for(si));
 }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +300,7 @@ DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si, fl
 // therefore admitted when either its own alpha or the thin-walled one is above
 // the delta threshold.
 // ---------------------------------------------------------------------------
-DEVICE_FUNC bool bsdf_has_smooth_lobe(const THREAD_REF SurfaceInteraction& si)
+DEVICE_FUNC bool bsdf_has_smooth_lobe(const THREAD_REF SurfaceInteraction& si, const THREAD_REF PbrPrepared& prep)
 {
     const float alpha = alpha_from_roughness(si.roughness);
 
@@ -312,12 +333,11 @@ DEVICE_FUNC bool bsdf_has_smooth_lobe(const THREAD_REF SurfaceInteraction& si)
         break;
     }
 
-    const PbrLobeWeights w = pbr_lobe_weights(si);
-    const float alphaCoat = alpha_from_roughness(si.clearcoat_roughness);
+    const PbrLobeWeights w = prep.w;
+    const float alphaCoat = prep.alpha_cc;
     const float alphaThin = thin_glass_transmission_alpha(alpha, fmaxf(si.ior / fmaxf(si.exterior_ior, 1e-4f), 1.0f));
-    float alphaX = 0.0f;
-    float alphaY = 0.0f;
-    anisotropic_alpha(si.roughness, si.anisotropy, alphaX, alphaY);
+    const float alphaX = prep.ax;
+    const float alphaY = prep.ay;
     const bool roughBaseSpecular = !anisotropic_ggx_is_delta(alphaX, alphaY);
     const bool roughTransmissionBase = alpha >= BSDF_DELTA_ALPHA;
     const bool entering = dot(si.shading_normal, si.wo) > 0.0f;
@@ -332,6 +352,11 @@ DEVICE_FUNC bool bsdf_has_smooth_lobe(const THREAD_REF SurfaceInteraction& si)
 
     return (w.diffuse > 0.0f) || (w.diffuse_transmission > 0.0f) || (w.specular > 0.0f && roughBaseSpecular) ||
            (w.transmission > 0.0f && roughTransmission) || (w.clearcoat > 0.0f && alphaCoat >= BSDF_DELTA_ALPHA);
+}
+
+DEVICE_FUNC bool bsdf_has_smooth_lobe(const THREAD_REF SurfaceInteraction& si)
+{
+    return bsdf_has_smooth_lobe(si, pbr_prepare_for(si));
 }
 
 // ---------------------------------------------------------------------------

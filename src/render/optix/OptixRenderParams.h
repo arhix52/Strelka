@@ -398,6 +398,31 @@ struct Params
     /// traversal a shadow ray needs to accumulate optical depth across those
     /// boundaries, which is pure cost in the scenes that have none.
     bool hasBoundedMedium;
+    /// Whether any material in the scene enters a medium at all -- a subsurface
+    /// walk or a bounded volume. Gates the free-flight draw, the walk and the
+    /// exit, which is the whole medium model; the same predicate Metal binds as
+    /// WavefrontFeatures::kSubsurface, and bounded media are inside it there for
+    /// the same reason: both compile into one free-flight path.
+    bool hasSubsurface;
+
+    // --- What the scene contains -----------------------------------------
+    //
+    // Scene-wide facts, bound into the pipeline as constants so the code they
+    // gate is not in the module at all. Ports of Metal's kFcCurves / kFcAlpha /
+    // kFcOpenPBR, which is where the argument for each of them was made: a
+    // branch on a scene-level fact costs every ray in every scene, and what it
+    // keeps alive costs more than the branch.
+    /// Whether the scene has curve geometry. Gates the two curve vertex fetches
+    /// and the whole fibre path in the closest hit.
+    bool hasCurves;
+    /// Whether any material is MASK or BLEND. Gates the stochastic coverage test
+    /// -- and with it an opacity texture fetch -- on every shaded vertex.
+    bool hasCutout;
+    /// Whether `openpbrParams` is non-null, as a bound value rather than a
+    /// pointer test: a runtime null check keeps the entire Adobe lobe stack, its
+    /// 272-byte parameter block and its 720-byte prepared BSDF live in a scene
+    /// that has no OpenPBR material.
+    bool hasOpenPBR;
 
     // --- Atmosphere ------------------------------------------------------
     //

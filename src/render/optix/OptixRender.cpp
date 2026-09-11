@@ -668,7 +668,11 @@ void OptiXRender::createContext()
     else
     {
         options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
-        options.logCallbackLevel = 2; // error
+        // 2 is error. Raise it to 4 to get OptiX's COMPILE FEEDBACK lines, which
+        // are the only place the pipeline's register count per program is
+        // reported; validation mode also does that but compiles at optLevel 0,
+        // so the counts it prints are not the ones the frame runs.
+        options.logCallbackLevel = envUint("STRELKA_OPTIX_LOG_LEVEL", 2);
     }
     // Zero means take the current context.
     OPTIX_CHECK(optixDeviceContextCreate(cuCtx, &options, &mState.context));
@@ -1772,6 +1776,61 @@ bool OptiXRender::sceneHasBoundedMedium() const
     return false;
 }
 
+bool OptiXRender::sceneHasSubsurface() const
+{
+    if (!mScene)
+    {
+        return false;
+    }
+    for (const auto& material : mScene->getMaterials())
+    {
+        const auto& p = material.params;
+        // Both kinds of medium compile into the same free-flight path, so a fog
+        // gizmo turns this on as surely as a marble does -- the same pairing
+        // MetalMaterials makes for kSubsurface.
+        if (p.subsurface > 0.0f || (p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+        {
+            return true;
+        }
+        if (p.material_type == MATERIAL_TYPE_OPENPBR)
+        {
+            // The map matters as much as the constant: the Open Chess Set leaves
+            // subsurface_weight at zero and drives it from a texture, so judging
+            // on the value alone compiles a pipeline that cannot walk the medium
+            // its own textures ask for.
+            const bool weightIsMapped =
+                (material.openpbr.texture_mask & (1u << OPENPBR_TEX_SUBSURFACE_WEIGHT)) != 0u;
+            if ((material.openpbr.subsurface_weight > 0.0f || weightIsMapped) &&
+                material.openpbr.geometry_thin_walled == 0u)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool OptiXRender::sceneHasCurves() const
+{
+    return mScene && !mScene->getCurves().empty();
+}
+
+bool OptiXRender::sceneHasCutout() const
+{
+    if (!mScene)
+    {
+        return false;
+    }
+    for (const auto& material : mScene->getMaterials())
+    {
+        if (material.params.alpha_mode != ALPHA_MODE_OPAQUE)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void OptiXRender::uploadInstancesToDevice(const std::vector<OptixInstance>& optixInstances)
 {
     const size_t instancesSize = sizeof(OptixInstance) * optixInstances.size();
@@ -2080,6 +2139,8 @@ void OptiXRender::createModule()
         STRELKA_BOUND_VALUE(misHeuristic),       STRELKA_BOUND_VALUE(subsurfaceIterations),
         STRELKA_BOUND_VALUE(risCandidates),      STRELKA_BOUND_VALUE(denoiseDepthMode),
         STRELKA_BOUND_VALUE(hasBoundedMedium),   STRELKA_BOUND_VALUE(hasFog),
+        STRELKA_BOUND_VALUE(hasSubsurface),      STRELKA_BOUND_VALUE(hasCurves),
+        STRELKA_BOUND_VALUE(hasCutout),          STRELKA_BOUND_VALUE(hasOpenPBR),
         STRELKA_BOUND_VALUE(hasBlueNoise),
         STRELKA_BOUND_VALUE(enableMotionBlur),   STRELKA_BOUND_VALUE(writeAov),
         STRELKA_BOUND_VALUE(writeSplitAov),      STRELKA_BOUND_VALUE(guidePrimaryHit),
@@ -2352,6 +2413,10 @@ OptiXRender::PipelineSpec OptiXRender::specFor(const Params& params) const
     spec.risCandidates = params.risCandidates;
     spec.denoiseDepthMode = params.denoiseDepthMode;
     spec.hasBoundedMedium = params.hasBoundedMedium;
+    spec.hasSubsurface = params.hasSubsurface;
+    spec.hasCurves = params.hasCurves;
+    spec.hasCutout = params.hasCutout;
+    spec.hasOpenPBR = params.hasOpenPBR;
     spec.hasFog = params.hasFog;
     spec.hasBlueNoise = params.hasBlueNoise;
     spec.enableMotionBlur = params.enableMotionBlur;
@@ -2442,10 +2507,12 @@ void OptiXRender::ensurePipelineSpecialization(const Params& params)
         // cost a second, and a scene or a setting that makes it happen every
         // frame would otherwise read as "the renderer became slow".
         STRELKA_INFO(
-            "ACTION pipeline_specialize reason={} took_ms={} sharc={} medium={} fog={} motion={} aov={} debug={}",
+            "ACTION pipeline_specialize reason={} took_ms={} sharc={} medium={} fog={} motion={} aov={} debug={} "
+            "sss={} curves={} cutout={} openpbr={}",
             mPipelineBuildWasFirst ? "first_build" : "spec_changed", ms, mPipelineSpec.sharcCapacity != 0u,
             mPipelineSpec.hasBoundedMedium, mPipelineSpec.hasFog, mPipelineSpec.enableMotionBlur,
-            mPipelineSpec.writeAov, mPipelineSpec.debug);
+            mPipelineSpec.writeAov, mPipelineSpec.debug, mPipelineSpec.hasSubsurface, mPipelineSpec.hasCurves,
+            mPipelineSpec.hasCutout, mPipelineSpec.hasOpenPBR);
     }
 
     if (mPipelineSpecValid && wanted == mPipelineSpec)
@@ -3693,6 +3760,15 @@ void OptiXRender::render(Buffer* output)
             ? std::min(settings.getAs<uint32_t>("render/pt/subsurfaceIterations"), 256u)
             : 64u;
     params.hasBoundedMedium = sceneHasBoundedMedium();
+    // The scene-content bound values. Walks of the material table, so they are
+    // taken here rather than per launch -- the pipeline only recompiles when one
+    // of them changes, and the walk is what tells specFor() that it did.
+    params.hasSubsurface = sceneHasSubsurface();
+    params.hasCurves = sceneHasCurves();
+    params.hasCutout = sceneHasCutout();
+    // publishOpenPBRParams() has already decided this for the whole launch: it
+    // either wrote an OpenPBR array or left the pointer null.
+    params.hasOpenPBR = params.openpbrParams != nullptr;
 
     // The atmosphere, from the same place and with the same on/off test Metal
     // uses (MetalFrameUniforms.mm), so a scene with an `atmosphere` sidecar

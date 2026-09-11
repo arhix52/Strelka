@@ -199,6 +199,11 @@ private:
         uint32_t risCandidates = 1;
         uint32_t denoiseDepthMode = 0;
         bool hasBoundedMedium = false;
+        bool hasSubsurface = false;
+        /// Scene contents, see Params for what each one gates.
+        bool hasCurves = false;
+        bool hasCutout = false;
+        bool hasOpenPBR = false;
         bool hasFog = false;
         bool enableMotionBlur = false;
         bool writeAov = false;
@@ -756,6 +761,14 @@ public:
     /// medium. Gates the second traversal every shadow ray would otherwise take
     /// to accumulate optical depth across those boundaries.
     bool sceneHasBoundedMedium() const;
+    /// The three scene-content bound values, computed from the same material
+    /// table and the same tests MetalMaterials applies for its function
+    /// constants. Conservative in the same direction: anything that might need
+    /// the feature turns it on, because a scene that needs a path the pipeline
+    /// does not contain renders wrong rather than slowly.
+    bool sceneHasSubsurface() const;
+    bool sceneHasCurves() const;
+    bool sceneHasCutout() const;
     void uploadInstancesToDevice(const std::vector<OptixInstance>& optixInstances);
     void createModule();
     void createProgramGroups();

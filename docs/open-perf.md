@@ -6,6 +6,356 @@ already been ruled out, so a reader starting cold can act without repeating the
 elimination. What is closed is here too, because the *why* is what the next
 person needs and it is the same why either way.
 
+## The profile after the traffic work, 2026-09-11
+
+`--set full` on the render launch, kids_room, one launch of 16 samples at
+1280x720 depth 4. Run as root, and with `-k optixLaunch`: that is the name the
+render launch carries, and the accel builds are hundreds of launches ahead of it.
+
+| | |
+|---|---|
+| duration | 135.2 ms |
+| SM throughput | 9.2 % |
+| memory throughput / DRAM | 32.3 % / **5.7 %** |
+| L1 hit / L2 hit | 45.7 % / 98.2 % |
+| IPC (of 4) | 0.39 |
+| active warps / scheduler | 3.98 |
+| **eligible warps / scheduler** | **0.11** |
+| cycles with no eligible warp | 90.1 % |
+| **active lanes of 32** | **13.8** |
+| registers / occupancy | 255 / 33.1 % |
+
+Warp stall, cycles per issued instruction (40.11 total):
+
+| | |
+|---|---|
+| `no_instruction` | **32.79** |
+| `long_scoreboard` | 3.40 |
+| `wait` | 1.66 |
+| `selected` | 1.00 |
+| `branch_resolving` | 0.40 |
+| everything else, each | < 0.25 |
+
+Nothing is waiting on memory any more: DRAM is at 5.7 %, L2 hits 98 %, and
+`long_scoreboard` is 3.4 cycles against 16.8 in the September profile. **The
+launch is issue-starved: 82 % of its stall is `no_instruction`.**
+
+### `imc_miss` does not mean what this file used the last time
+
+An earlier entry ruled out instruction fetch on the grounds that `imc_miss` was
+zero. That reasoning is wrong: IMC is the *immediate constant* cache, not the
+instruction cache, so `imc_miss` says nothing about instruction fetch. It is
+0.16 cycles here and it was never the metric to read. `no_instruction` is the
+one, and it is the whole frame.
+
+### Where the samples are, per program
+
+PC samples over the same launch, 15.09 million of them, grouped by the OptiX
+program they landed in (the report's source page, aggregated by kernel name):
+
+| program | share | `no_instruction` |
+|---|---|---|
+| `__closesthit__radiance` | **60.3 %** | 89.4 % |
+| `__intersection__light` | **25.3 %** | 91.7 % |
+| `__raygen__rg` | 7.9 % | 85.0 % |
+| `__closesthit__analytic_light` | 2.5 % | 93.0 % |
+| everything else, summed | 4.0 % | -- |
+
+Every program is ~90 % `no_instruction`, which is what a 189 560-instruction
+module with a reordered warp jumping between programs looks like. The two
+levers this leaves are the size of the code on the hot path and the 13.8 lanes.
+
+### A quarter of the frame is the analytic-light intersector
+
+`__intersection__light` is a custom-primitive program, and analytic lights are
+in the same structure as the geometry -- so **every ray runs it, shadow rays
+included**: `RAY_MASK_SHADOW` carries `GEOMETRY_MASK_LIGHT` and
+`GEOMETRY_MASK_LIGHT_HIDDEN` on purpose, so that an emitter stops a shadow ray
+the way geometry does. Metal's `ShaderTypes.h` has the identical mask, so this
+is a shared decision rather than an OptiX detail.
+
+Measured what it costs, by taking the two light bits out of the shadow mask:
+kids_room 90.6 -> **75.6** ms per launch, best of three, 16 samples at 1280x720
+depth 4. The ladder does not move a digit on any of its 33 rows -- it has no
+scene where one emitter stands between a surface and another emitter -- but
+kids_room does: 15.1 % of its pixels change by more than 1e-3 and the image
+gains 0.23 % of its mean.
+
+**The reference says the cheaper answer is the right one.**
+`tools/feature_tests/light_occlusion_probe.py` builds the smallest scene that can
+tell -- a grey floor, a big rect light above it, a small rect light hung directly
+between the two -- and renders it in Cycles. Across the floor under the blocker,
+Cycles reads 0.311 / 0.385 / 0.464 / 0.518 / **0.540** and Strelka read 0.316 /
+0.363 / 0.355 / 0.301 / **0.254**: Cycles draws no silhouette there and Strelka
+drew one. So `RAY_MASK_SHADOW` is the geometry bits alone on both backends now,
+and the same probe reads 0.316 / 0.394 / 0.464 / 0.513 / 0.535 against the
+reference.
+
+Mesh emitters are unchanged -- they are triangles, they keep the geometry bit,
+and Cycles blocks with them too.
+
+| ms per launch, 16 samples, best of three | before | after | |
+|---|---|---|---|
+| kids_room | 90.6 | **76.1** | -16% |
+| iso_bathroom | 47.7 | **41.7** | -13% |
+| pine_scene | 113.8 | **109.5** | -4% |
+
+The ladder moves one row and it moves toward Cycles: `19_env_and_light` 0.064 /
+0.986 -> 0.063 / **0.992**. The other 32 are identical to the digit, which is
+also why the ladder could not have found this on its own -- no row has one
+emitter standing between a surface and another.
+
+PC samples after, same launch: 15.09 M -> 12.22 M, with
+`__closesthit__radiance` 60.3 -> 68.7 % of them and `__intersection__light`
+25.3 -> **15.1 %**. Secondary and camera rays still test the light surfaces,
+which is what the MIS estimate needs them for.
+
+The probe found a second thing, unrelated to this and not yet chased: the
+blocker is visible to the camera in Strelka at its full radiance (3.248) where
+Cycles shows the wall behind it (0.105). That is a camera-visibility question
+about a rect light seen from a grazing angle, not a shadow question -- it
+predates this change, since nothing below the primary mask moved.
+
+## Scene-content bound values, 2026-09-11
+
+The OptiX pipeline compiled four scene-level facts as runtime tests that Metal
+has compiled as function constants since the wavefront landed: whether the scene
+has an OpenPBR material, curve geometry, a cutout material, or a medium of
+either kind. `PipelineSpec` gained `hasOpenPBR` / `hasCurves` / `hasCutout` /
+`hasSubsurface`, each bound the same way the existing eighteen are, and the
+closest hit gates on them (`kFcOpenPBR`, `kFcCurves`, `kFcAlpha`,
+`kFcSubsurface` are the Metal spellings of the same four).
+
+OpenPBR is the one that mattered, and it could not have been folded before: the
+test was `params.openpbrParams != nullptr`, a pointer read at runtime, so a
+module compiled for a scene with no OpenPBR material still carried the whole
+Adobe lobe stack plus the two locals it needs -- `OpenPBRParams` is 272 bytes,
+`OpenPBR_PreparedBsdf` is 720, and the prepared BSDF is built before next-event
+estimation and read after it, so it crosses the shadow traversal and is charged
+to the continuation stack.
+
+Measured on the continuation-stack figure the renderer already logs at debug
+level, plus OptiX's own pipeline statistics -- which needed a way to raise the
+context log callback past errors, so `STRELKA_OPTIX_LOG_LEVEL` is now a knob
+(4 prints the statistics; validation mode also prints them but compiles at
+optLevel 0, so its numbers are not the ones the frame runs).
+
+| | before | after |
+|---|---|---|
+| continuation stack, kids_room and iso_bathroom | 2272 B | **672 B** |
+| instructions in entry functions, kids_room | 222 168 | 189 562 |
+| continuation stack, an all-OpenPBR scene | -- | 2080 B |
+
+So ~1600 of the 2272 bytes were OpenPBR, in scenes that have none of it; the
+remaining three constants are worth the rest. The last row is the control: with
+`material_model = "openpbr"` the same pipeline still compiles the lobe stack and
+pays for it, which is what says the drop is specialisation and not deletion.
+
+1280x720, `depth` 4, 16 samples per launch, best of three, ms per launch:
+
+| | before | after | |
+|---|---|---|---|
+| kids_room | 132.2 | 124.5 | -5.8% |
+| iso_bathroom | 70.6 | 64.7 | -8.4% |
+| pine_scene | 151.6 | 138.4 | -8.7% |
+
+The ladder is unchanged at 64 spp across all 33 rows, including the four that
+grade the gated paths: `07_alpha_clip` 1.012, `08_alpha_blend` 1.007,
+`18_bounded_volume` 1.003, `25_subsurface` 1.003, `28_hair` 1.011.
+
+### What the counters say, and what 255 registers is not
+
+Nsight Compute needs root on this box (`ERR_NVGPUCTRPERM`); run as root, with
+`-k optixLaunch` -- the render launch is reported under that name, and without
+the filter the profiler lands on `optixAccelBuild`, of which kids_room issues
+hundreds. kids_room, one launch of 16 samples at 1280x720, depth 4:
+
+| | before | after |
+|---|---|---|
+| registers / thread | 255 | 255 |
+| achieved occupancy | 33.16 % | 33.16 % |
+| local loads | 36.51 GB | **29.04 GB** |
+| local stores | 41.32 GB | **29.59 GB** |
+| DRAM | 32.28 GB | **16.98 GB** |
+| launch | 187.28 ms | **177.81 ms** |
+
+So the whole of this is local-memory traffic and DRAM. Neither the register
+count nor the occupancy moved, and **`launch__registers_per_thread` = 255 is not
+a measurement of our shader**:
+
+- `debug = 1` -- which shades the primary hit and returns, with the bound value
+  compiling the rest of the closest hit away -- also reports 255.
+- `STRELKA_OPTIX_MAX_REGISTERS=96` also reports 255, while achieved occupancy
+  goes 33.16 % -> **41.42 %** and local stores go 29.6 -> 34.3 GB.
+
+255 is the envelope OptiX compiles its launch kernel with; what actually varies
+is occupancy and what spills. Reading the 255 in the profile below as "our
+shading needs 255 registers, and that is why occupancy is 32 %" is the wrong
+chain -- it would be 255 for a kernel that shades nothing. Occupancy is the
+number to watch, and the register ceiling is still the only direct lever on it.
+
+That ceiling is now roughly free rather than a loss: at 96, and best of three at
+16 samples per launch, kids_room 123.6 against 124.5 ms, iso_bathroom 64.4
+against 64.7, pine_scene 134.3 against 138.4. Still a diagnostic -- the
+differences are inside the run-to-run spread and chess_set was the scene that
+lost 25 % to it -- but the sign is no longer against it.
+
+### The estimate runs last now, and `si` dies before the shadow ray
+
+The 672 bytes above were not the surface's own state being carried between
+bounces -- they were state carried across a *traversal*. Compiling next-event
+estimation out (`estimator_mode = 1`) took the continuation stack from 672 to
+**160** bytes, which is PerRayData and nothing else: everything above that is
+live only because `__closesthit__radiance` read `si` again after the shadow ray
+returned.
+
+It read it for one reason: the BSDF sample and the whole of the next segment sat
+below the estimate. Both halves need `si`, but only one of them needs it after a
+ray. `sampleNextBounce()` now runs first and returns its decisions as a value --
+the throughput factor, the medium it entered, whether the path stops -- and the
+estimate runs after it, with the committing writes after that. So the estimate
+still sees the throughput and the medium of the vertex it is estimating, and
+`si` is dead by the time the ray goes out.
+
+Two properties keep this from changing any image. `random<Dim>()` is a pure
+function of (sampleIdx, dimension, seed, depth) and does not advance the
+sampler, so drawing the BSDF dimensions before the light ones changes no draw.
+And the estimate was never gated on the event that came back -- `didNee` is
+decided by the material, above both halves -- which is the property
+`neeRunsAtVertex()` was introduced to keep, and the reason this reordering is
+available at all. The ladder is identical to the digit on all 33 rows, and an
+all-OpenPBR Cornell box renders to the same mean it did before.
+
+kids_room, one launch of 16 samples at 1280x720, depth 4, through both changes:
+
+| | baseline | + bound values | + estimate last |
+|---|---|---|---|
+| continuation stack | 2272 B | 672 B | **288 B** |
+| local loads | 36.51 GB | 29.04 GB | **25.14 GB** |
+| local stores | 41.32 GB | 29.59 GB | **25.38 GB** |
+| DRAM | 32.28 GB | 16.98 GB | **9.16 GB** |
+| registers / occupancy | 255 / 33.16 % | 255 / 33.16 % | 255 / 33.11 % |
+
+ms per launch, 16 samples, best of three, the renderer's own timer:
+
+| | baseline | + bound values | + estimate last | |
+|---|---|---|---|---|
+| kids_room | 132.2 | 124.5 | **94.4** | -29% |
+| iso_bathroom | 70.6 | 64.7 | **47.7** | -32% |
+| pine_scene | 151.6 | 138.4 | **113.8** | -25% |
+
+Occupancy did not move through any of it. The whole of a third off the frame is
+local-memory traffic and the DRAM behind it, which is worth stating plainly
+because the counters name the opposite culprit: 255 registers and 33% occupancy
+look like the limiter and were not.
+
+### Where the remaining local traffic is, and why the next cut bought nothing
+
+Split by ablation, kids_room, one launch of 16 samples at 1280x720 depth 4.
+`estimator_mode = 1` removes next-event estimation and with it every shadow ray:
+local loads 25.14 -> 14.26 GB, stores 25.38 -> 17.47. So a little under half the
+traffic is the shadow ray and the state that crosses it, and the rest is the
+path loop -- PerRayData is 136 bytes in local memory, reached through the
+payload pointer by both programs, and every field touch is an LDL or an STL.
+
+The continuation stack is 288 bytes now, of which the raygen chain is 160
+(`estimator_mode = 1` measures it directly) and the shading program's frame
+across the shadow ray is the other 128.
+
+Committing the bounce *before* the estimate rather than after -- passing the
+throughput and the medium the vertex arrived with by value, so that nothing the
+bounce decided rides the shadow ray -- cuts the spill again: loads 25.14 ->
+22.14 GB, stores 25.38 -> 22.93, DRAM 9.16 -> 7.47. **And it is worth no time at
+all**: 135.4 -> 135.0 ms under the profiler, and the renderer's own timer cannot
+separate it from run-to-run spread.
+
+That is the useful negative result. 7.47 GB over a 135 ms launch is 55 GB/s,
+which is nothing for this card, and the local traffic that is left lands in L1
+and L2 rather than DRAM. The launch stopped being traffic-bound somewhere
+between the first cut and this one, so the next byte of continuation stack is
+not worth chasing for its own sake -- it needs a new profile first.
+
+### Two things tried against the new limiter, and what they measured
+
+**Specialising `__intersection__light` on the shapes the scene has.** A bit per
+LightType in `Params`, bound into the pipeline, so a scene of point lights
+compiles no rectangle or disc test. It works -- 189 560 -> 187 698 instructions
+in the entry functions -- and it is worth **nothing**: kids_room 76.1 -> 75.5,
+iso_bathroom 41.7 -> 45.0, pine_scene 109.5 -> 111.1, all inside the spread.
+Reverted. The program is 15 % of the samples because every ray runs it, not
+because it is large, and 1 % of the module is not what those samples are waiting
+for.
+
+**How much the glTF lobe stack is worth at all.** Compiling the sheen,
+clearcoat, iridescence and transmission lobes out of `standard_pbr.h` outright
+-- wrong images, measured for the bound only -- takes kids_room 76.1 -> 67.7 ms,
+**-11 %**, while removing only 2 % of the module (189 560 -> 185 449
+instructions). So the cost is the instructions the vertex *executes*, not the
+ones the module carries, and per-scene specialisation can only claim the part a
+scene does not use. kids_room uses all four (22 sheen materials, 10
+transmission, 2 iridescence, 2 clearcoat), iso_bathroom all four, and
+pine_scene none of sheen, clearcoat or iridescence -- so a `lobeMask` bound
+value would pay on pine and very little on the rooms.
+
+The more promising reading of the same measurement: `pbr_lobe_weights()` and the
+combined-pdf machinery run in `bsdf_has_smooth_lobe`, in `bsdf_sample`, in
+`bsdf_eval` and in `bsdf_pdf` -- three or four times per vertex over identical
+inputs. OpenPBR already prepares its lobe stack once per vertex
+(`openpbr_prepare_at`); the glTF model does not, and that is the same 11 % of
+executed instructions seen from the side where the image stays correct.
+
+### Preparing the glTF lobe stack once per vertex
+
+`standard_pbr_sample()` and `standard_pbr_eval()` opened with the same twenty
+lines: flip the frame for an opaque back hit, take NdotV, build the tangent
+frame, split the roughness into ax/ay, weigh the five lobes, apportion them onto
+the 23-bit categorical lattice, and compute F0. A vertex ran that prologue in
+`bsdf_has_smooth_lobe()` before next-event estimation, in `bsdf_eval()` for the
+connection, in `bsdf_sample()` for the bounce -- and once more inside
+`pbr_finish_continuous_sample()`, which evaluated through the plain entry point
+and so prepared the vertex a second time inside the draw it was finishing. Four
+times, over inputs that cannot change between them.
+
+`pbr_prepare()` now returns that state as a `PbrPrepared`, and the closest hit
+builds one per vertex beside the `openpbr_prepare_at()` it has always built.
+The old entry points remain and prepare on the spot, so Metal and the tests are
+where they were; `pbr_prepare_for()` returns a zeroed struct for a material with
+no glTF lobe stack, so a hair vertex does not pay for a cache it cannot read.
+
+It is a cache and the images say so: all 33 ladder rows are identical to the
+digit, and `unit_tests` passes.
+
+| | before | after |
+|---|---|---|
+| kids_room, ms per launch (best of five) | 76.1 | **70.8** |
+| iso_bathroom | 41.7 | **39.7** |
+| pine_scene | 109.5 | 109.2 |
+| instructions executed, kids_room launch | 15.85 G | **13.30 G** |
+| `no_instruction`, cycles per issued instruction | 32.79 | **27.56** |
+| active lanes of 32 | 13.80 | **15.20** |
+| duration under the profiler | 135.2 ms | **103.4 ms** |
+
+The last four columns carry the light-mask change above as well -- they are both
+in this build -- but the ms rows are the two measured separately.
+
+Still open, in the order they look worth doing:
+
+- **Metal prepares nothing.** `wavefront.metal` calls the entry points that
+  prepare on the spot, so the same four preparations per vertex are still there.
+  The behaviour is identical either way, which is why this is a performance item
+  and not a parity one.
+- **An OpenPBR pipeline is still 1760 bytes of continuation stack** against 288
+  for the glTF one, and the reordering only took 320 of it. `OpenPBRParams` is
+  272 bytes and `OpenPBR_PreparedBsdf` is 720; which of them is still crossing a
+  ray, and why, has not been established.
+- **`allOpenPBR`**, Metal's `kFcAllOpenPBR`: a scene where every material is
+  OpenPBR compiles the glTF lobe stack for nothing. Metal additionally requires
+  no curves, because hair keeps its own BSDF.
+- **`SurfaceInteraction` is 268 bytes.** It no longer crosses the shadow ray,
+  but it is still built in full at every vertex; the sheen, iridescence,
+  clearcoat, subsurface and diffuse-transmission fields -- about 84 bytes -- are
+  read only by lobes most scenes do not have.
+
 ## The sampler, 2026-09-08
 
 The profile below put `random.h:278` -- `X ^= sb_matrix[lowestSetBit(bits)][dim]`

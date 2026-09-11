@@ -731,13 +731,121 @@ DEVICE_FUNC bool pbr_finish_delta_transmission(const THREAD_REF SurfaceInteracti
 // marginal value and density that the light-sampling side evaluates. This is
 // intentionally not used for delta events: their `pdf` field is discrete mass,
 // whereas standard_pbr_eval() returns only a solid-angle density.
+struct PbrPrepared;
+// ---------------------------------------------------------------------------
+// Prepare once per vertex
+//
+// sample() and eval() open with the same twenty-odd lines: flip the frame for an
+// opaque back hit, take NdotV, derive the tangent frame, split the roughness
+// into ax/ay, weigh the five lobes and apportion them onto the 23-bit
+// categorical lattice. A vertex ran that prologue three times or more --
+// bsdf_has_smooth_lobe() before next-event estimation, bsdf_eval() for the
+// connection, bsdf_sample() for the bounce -- over inputs that cannot have
+// changed between them.
+//
+// OpenPBR has had openpbr_prepare_at() for exactly this reason; this is the same
+// thing for the glTF model. The struct is a cache and nothing else: every field
+// is what the code that used to compute it computed, which is why the old entry
+// points are still here and simply prepare first.
+// ---------------------------------------------------------------------------
+struct PbrPrepared
+{
+    /// The normal actually shaded with -- flipped when an opaque surface is hit
+    /// from behind, which is the one decision both halves have to agree on.
+    float3 N;
+    float3 T;
+    float3 B;
+    float3 F0;
+    PbrLobeWeights w;
+    PbrLobeProbabilities p;
+    float NdotV;
+    float alpha;
+    float alpha_cc;
+    float ax;
+    float ay;
+    /// NdotV <= 0: a ray on its way out of a dielectric. Only the transmission
+    /// lobes describe such a hit.
+    bool exiting;
+};
+
+DEVICE_FUNC PbrPrepared pbr_prepare(const THREAD_REF SurfaceInteraction& si)
+{
+    PbrPrepared prep;
+
+    prep.N = si.shading_normal;
+    const float3 V = si.wo;
+    // An opaque surface hit from behind is the same surface seen from the front,
+    // and is shaded as such rather than absorbed. See shading_frame.h; both
+    // sample() and eval() used to make this call and had to agree about it.
+    if (opaqueBackHitFlipsFrame(si.front_face, dot(prep.N, V), si.transmission, si.diffuse_transmission))
+    {
+        prep.N = -prep.N;
+    }
+    prep.NdotV = dot(prep.N, V);
+    // A ray leaving a dielectric hits the far wall from behind, so the shading
+    // normal points away from it. That is not a degenerate hit -- it is how light
+    // gets out of a medium.
+    prep.exiting = prep.NdotV <= 0.0f;
+
+    prep.alpha = alpha_from_roughness(si.roughness);
+    prep.alpha_cc = alpha_from_roughness(si.clearcoat_roughness);
+
+    // Anisotropy is defined relative to the surface's own tangent frame, so the
+    // arbitrary azimuthal basis build_onb() derives from N alone will not do:
+    // rotate the mesh's UV tangent and the highlight has to rotate with it.
+    // Gram-Schmidt against N rather than si.bitangent, which already carries the
+    // TANGENT.w handedness and would flip the lobe with it.
+    {
+        const float3 Tp = si.tangent - prep.N * dot(prep.N, si.tangent);
+        if (dot(Tp, Tp) > 1e-8f)
+        {
+            prep.T = safe_normalize(Tp);
+            prep.B = cross(prep.N, prep.T);
+        }
+        else
+        {
+            build_onb(prep.N, prep.T, prep.B);
+        }
+    }
+    // ax == ay when anisotropy is 0, and every *_aniso routine degenerates to
+    // its isotropic form there, so isotropic materials are unchanged.
+    anisotropic_alpha(si.roughness, si.anisotropy, prep.ax, prep.ay);
+
+    // F0 for the specular lobe (mix between dielectric F0 and base colour for metals)
+    prep.F0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
+    prep.w = pbr_lobe_weights(si);
+    prep.p = pbr_lobe_probabilities(prep.w, prep.exiting);
+    return prep;
+}
+
+/// The preparation, or a zeroed one for a material that has no glTF lobe stack.
+///
+/// A hair or a pure dielectric vertex reads none of these fields, and building
+/// them for it would be the cost this cache exists to remove, charged to the
+/// materials that cannot use it.
+DEVICE_FUNC PbrPrepared pbr_prepare_for(const THREAD_REF SurfaceInteraction& si)
+{
+    if (si.material_type != MATERIAL_TYPE_STANDARD_PBR)
+    {
+        PbrPrepared none = {};
+        return none;
+    }
+    return pbr_prepare(si);
+}
+
 DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi);
+DEVICE_FUNC BsdfEvalResult
+standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THREAD_REF PbrPrepared& prep);
 
 DEVICE_FUNC bool pbr_finish_continuous_sample(const THREAD_REF SurfaceInteraction& si,
                                               float absoluteCosine,
-                                              THREAD_REF BsdfSampleResult& result)
+                                              THREAD_REF BsdfSampleResult& result,
+                                              const THREAD_REF PbrPrepared& prep)
 {
-    const BsdfEvalResult evaluated = standard_pbr_eval(si, result.wi);
+    // The same preparation the sample was drawn from. Evaluating through the
+    // plain entry point here would prepare the vertex a second time inside every
+    // continuous draw, which is most of them.
+    const BsdfEvalResult evaluated = standard_pbr_eval(si, result.wi, prep);
     if (!(evaluated.pdf > 0.0f))
     {
         return false;
@@ -755,36 +863,29 @@ DEVICE_FUNC bool pbr_finish_continuous_sample(const THREAD_REF SurfaceInteractio
 // fresnelWord: 23-bit categorical word for dielectric reflect/refract choice
 // ---------------------------------------------------------------------------
 DEVICE_FUNC BsdfSampleResult
-standard_pbr_sample(
-    const THREAD_REF SurfaceInteraction& si, float u1, float u2, unsigned int lobeWord, unsigned int fresnelWord)
+standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
+                    float u1,
+                    float u2,
+                    unsigned int lobeWord,
+                    unsigned int fresnelWord,
+                    const THREAD_REF PbrPrepared& prep)
 {
     BsdfSampleResult result;
     result.bsdf_over_pdf = make_float3(0.0f);
     result.pdf = 0.0f;
     result.event_type = BSDF_EVENT_ABSORB;
 
-    const PbrLobeWeights w = pbr_lobe_weights(si);
-
-    float3 N = si.shading_normal;
+    // Named locals rather than prep.x at every use: what follows is the body
+    // that computed these, unchanged, and renaming inside it is the kind of edit
+    // that silently swaps two cosines.
+    const PbrLobeWeights w = prep.w;
+    const float3 N = prep.N;
     const float3 V = si.wo;
-    // An opaque surface hit from behind is the same surface seen from the front,
-    // and is shaded as such rather than absorbed. See shading_frame.h -- the
-    // identical call in standard_pbr_eval() is what keeps the two describing one
-    // BRDF.
-    if (opaqueBackHitFlipsFrame(si.front_face, dot(N, V), si.transmission, si.diffuse_transmission))
-    {
-        N = -N;
-    }
-    const float NdotV = dot(N, V);
-    // A ray leaving a dielectric hits the far wall from behind, so the shading
-    // normal points away from it. That is not a degenerate hit -- it is how
-    // light gets out of a medium -- and rejecting it meant a closed
-    // transmissive volume absorbed everything that entered it.
-    //
-    // Only the transmission lobe can describe such a hit (it flips the normal
+    const float NdotV = prep.NdotV;
+    // Only the transmission lobe can describe an exit hit (it flips the normal
     // into Nf and picks eta by direction), so the reflection lobes are skipped
     // rather than evaluated against a back-facing normal.
-    const bool exiting = NdotV <= 0.0f;
+    const bool exiting = prep.exiting;
     // On an exit hit the reflective base/coat lobes do not apply, but diffuse
     // and interface transmission can both cross the surface. Renormalize those
     // two compatible proposals rather than assigning the whole discrete choice
@@ -793,38 +894,17 @@ standard_pbr_sample(
     const float exit_transmission_total = w.diffuse_transmission + w.transmission;
     if (exiting && !(exit_transmission_total > 0.0f))
         return result;
-    const PbrLobeProbabilities probabilities = pbr_lobe_probabilities(w, exiting);
+    const PbrLobeProbabilities probabilities = prep.p;
     const float p_trans_eff = probabilities.transmission;
 
-    const float alpha = alpha_from_roughness(si.roughness);
-    const float alpha_cc = alpha_from_roughness(si.clearcoat_roughness);
-
-    // Anisotropy is defined relative to the surface's own tangent frame, so the
-    // arbitrary azimuthal basis build_onb() derives from N alone will not do:
-    // rotate the mesh's UV tangent and the highlight has to rotate with it.
-    // Gram-Schmidt against N rather than si.bitangent, which already carries the
-    // TANGENT.w handedness and would flip the lobe with it.
-    float3 T, B;
-    {
-        const float3 Tp = si.tangent - N * dot(N, si.tangent);
-        if (dot(Tp, Tp) > 1e-8f)
-        {
-            T = safe_normalize(Tp);
-            B = cross(N, T);
-        }
-        else
-        {
-            build_onb(N, T, B);
-        }
-    }
-    // ax == ay when anisotropy is 0, and every *_aniso routine degenerates to
-    // its isotropic form there, so isotropic materials are unchanged.
-    float ax, ay;
-    anisotropic_alpha(si.roughness, si.anisotropy, ax, ay);
+    const float alpha = prep.alpha;
+    const float alpha_cc = prep.alpha_cc;
+    const float3 T = prep.T;
+    const float3 B = prep.B;
+    const float ax = prep.ax;
+    const float ay = prep.ay;
     const bool baseSpecularDelta = anisotropic_ggx_is_delta(ax, ay);
-
-    // F0 for the specular lobe (mix between dielectric F0 and base color for metals)
-    const float3 F0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
+    const float3 F0 = prep.F0;
 
     // -----------------------------------------------------------------------
     // Lobe selection
@@ -847,7 +927,7 @@ standard_pbr_sample(
         if (NdotL <= 0.0f)
             return result;
 
-        if (!pbr_finish_continuous_sample(si, NdotL, result))
+        if (!pbr_finish_continuous_sample(si, NdotL, result, prep))
             return result;
         result.event_type = BSDF_EVENT_DIFFUSE_REFLECTION;
     }
@@ -872,7 +952,7 @@ standard_pbr_sample(
         // Diffuse and rough specular transmission overlap on this hemisphere.
         // The selected component does not own the direction: finish the sample
         // with their full marginal f and solid-angle density.
-        if (!pbr_finish_continuous_sample(si, NdotL_t, result))
+        if (!pbr_finish_continuous_sample(si, NdotL_t, result, prep))
             return result;
         result.event_type = BSDF_EVENT_DIFFUSE_TRANSMISSION;
     }
@@ -898,7 +978,7 @@ standard_pbr_sample(
         if (NdotL <= 0.0f)
             return result;
 
-        if (!pbr_finish_continuous_sample(si, NdotL, result))
+        if (!pbr_finish_continuous_sample(si, NdotL, result, prep))
             return result;
         result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
     }
@@ -957,7 +1037,7 @@ standard_pbr_sample(
                 if (NdotL <= 0.0f)
                     return result;
 
-                if (!pbr_finish_continuous_sample(si, NdotL, result))
+                if (!pbr_finish_continuous_sample(si, NdotL, result, prep))
                     return result;
                 result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
                 return result;
@@ -991,7 +1071,7 @@ standard_pbr_sample(
                 const float NdotL_r = dot(Nf, wi_r);
                 if (NdotL_r <= 0.0f)
                     return result;
-                if (!pbr_finish_continuous_sample(si, fabsf(dot(Nf, result.wi)), result))
+                if (!pbr_finish_continuous_sample(si, fabsf(dot(Nf, result.wi)), result, prep))
                     return result;
                 result.event_type = BSDF_EVENT_GLOSSY_TRANSMISSION;
             }
@@ -1037,7 +1117,7 @@ standard_pbr_sample(
                 // Rough: the same shared evaluation the reflection lobes and
                 // eval() use, so this direction has one density rather than the
                 // transmission lobe's own share reported as the whole of it.
-                if (!pbr_finish_continuous_sample(si, NdotL, result))
+                if (!pbr_finish_continuous_sample(si, NdotL, result, prep))
                     return result;
                 result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
             }
@@ -1068,7 +1148,7 @@ standard_pbr_sample(
                 else
                 {
                     const float NdotL = dot(Nf, result.wi);
-                    if (!pbr_finish_continuous_sample(si, NdotL, result))
+                    if (!pbr_finish_continuous_sample(si, NdotL, result, prep))
                         return result;
                     result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
                 }
@@ -1087,7 +1167,7 @@ standard_pbr_sample(
             }
             else
             {
-                if (!pbr_finish_continuous_sample(si, -signedNdotL, result))
+                if (!pbr_finish_continuous_sample(si, -signedNdotL, result, prep))
                     return result;
                 result.event_type = BSDF_EVENT_GLOSSY_TRANSMISSION;
             }
@@ -1115,12 +1195,18 @@ standard_pbr_sample(
         if (NdotL <= 0.0f)
             return result;
 
-        if (!pbr_finish_continuous_sample(si, NdotL, result))
+        if (!pbr_finish_continuous_sample(si, NdotL, result, prep))
             return result;
         result.event_type = BSDF_EVENT_GLOSSY_REFLECTION;
     }
 
     return result;
+}
+
+DEVICE_FUNC BsdfSampleResult standard_pbr_sample(
+    const THREAD_REF SurfaceInteraction& si, float u1, float u2, unsigned int lobeWord, unsigned int fresnelWord)
+{
+    return standard_pbr_sample(si, u1, u2, lobeWord, fresnelWord, pbr_prepare(si));
 }
 
 DEVICE_FUNC BsdfSampleResult
@@ -1133,21 +1219,18 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2,
 // ---------------------------------------------------------------------------
 // Evaluate
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi)
+DEVICE_FUNC BsdfEvalResult
+standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THREAD_REF PbrPrepared& prep)
 {
     BsdfEvalResult result;
     result.bsdf = make_float3(0.0f);
     result.pdf = 0.0f;
 
-    float3 N = si.shading_normal;
+    // The same frame sample() shades in, taken from the same preparation rather
+    // than derived a second time -- which is also what guarantees the two cannot
+    // drift apart and have MIS blend two different BRDFs.
+    const float3 N = prep.N;
     const float3 V = si.wo;
-    // Same flip as standard_pbr_sample(), from the same predicate, before either
-    // cosine is taken -- so NdotV and NdotL are both measured against the frame
-    // that was actually shaded.
-    if (opaqueBackHitFlipsFrame(si.front_face, dot(N, V), si.transmission, si.diffuse_transmission))
-    {
-        N = -N;
-    }
 
     // Cycles' opening test in bump_shadowing_term, which applies to evaluation
     // whatever the lobe: when the normal the map asked for and the one that was
@@ -1168,45 +1251,34 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
         }
     }
 
-    const float NdotV = dot(N, V);
+    const float NdotV = prep.NdotV;
     const float NdotL = dot(N, wi);
 
-    const bool exiting = NdotV <= 0.0f;
+    const bool exiting = prep.exiting;
 
-    const float alpha = alpha_from_roughness(si.roughness);
-    const float alpha_cc = alpha_from_roughness(si.clearcoat_roughness);
+    const float alpha = prep.alpha;
+    const float alpha_cc = prep.alpha_cc;
 
-    // Same tangent frame and axis split as standard_pbr_sample(). They must be
-    // derived identically or eval and sample describe two different BRDFs and
-    // MIS blends them.
-    float3 T, B;
-    {
-        const float3 Tp = si.tangent - N * dot(N, si.tangent);
-        if (dot(Tp, Tp) > 1e-8f)
-        {
-            T = safe_normalize(Tp);
-            B = cross(N, T);
-        }
-        else
-        {
-            build_onb(N, T, B);
-        }
-    }
-    float ax, ay;
-    anisotropic_alpha(si.roughness, si.anisotropy, ax, ay);
+    // Same tangent frame and axis split as standard_pbr_sample(), now by
+    // construction: one preparation feeds both, so eval and sample cannot
+    // describe two different BRDFs for MIS to blend.
+    const float3 T = prep.T;
+    const float3 B = prep.B;
+    const float ax = prep.ax;
+    const float ay = prep.ay;
 
-    const PbrLobeWeights w = pbr_lobe_weights(si);
+    const PbrLobeWeights w = prep.w;
     const float exit_transmission_total = w.diffuse_transmission + w.transmission;
     if (exiting && !(exit_transmission_total > 0.0f))
         return result;
     // Same conditional selection PMFs as sample(): on an exit hit the two
     // transmission proposals are renormalized after incompatible reflection
     // lobes are removed.
-    const PbrLobeProbabilities probabilities = pbr_lobe_probabilities(w, exiting);
+    const PbrLobeProbabilities probabilities = prep.p;
     const float p_diffuse_tr_eff = probabilities.diffuseTransmission;
     const float p_trans_eff = probabilities.transmission;
 
-    const float3 F0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
+    const float3 F0 = prep.F0;
 
     // Reflection means wi and wo are on the SAME side of the surface. Testing
     // NdotL alone only worked while NdotV was guaranteed positive; on an exit
@@ -1371,6 +1443,17 @@ DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction
 // ---------------------------------------------------------------------------
 // PDF only
 // ---------------------------------------------------------------------------
+DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi)
+{
+    return standard_pbr_eval(si, wi, pbr_prepare(si));
+}
+
+DEVICE_FUNC float standard_pbr_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi, const THREAD_REF PbrPrepared& prep)
+{
+    const BsdfEvalResult r = standard_pbr_eval(si, wi, prep);
+    return r.pdf;
+}
+
 DEVICE_FUNC float standard_pbr_pdf(const THREAD_REF SurfaceInteraction& si, float3 wi)
 {
     const BsdfEvalResult r = standard_pbr_eval(si, wi);
