@@ -16,6 +16,7 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 include(${CMAKE_SOURCE_DIR}/cmake/CompilerWarnings.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/Ccache.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/StaticAnalyzers.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/GitVersion.cmake)
 configure_file(${CMAKE_SOURCE_DIR}/cmake/strelka_version.h.in
