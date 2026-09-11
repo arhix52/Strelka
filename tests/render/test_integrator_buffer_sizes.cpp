@@ -27,6 +27,8 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     sz.iorStack = 16;
     sz.radiance = 16;
     sz.guideRay = 32;
+    sz.surfaceGeometry = 24;
+    sz.baseLightConnection = 60;
     sz.shadowRay = 40;
     sz.aovSample = 80;
     sz.restirReservoir = 40;
@@ -44,6 +46,8 @@ TEST_CASE("wavefrontBufferLayout scales with pixel count")
     CHECK(a.iorStackBytes == (size_t)a.pixels * 16);
     CHECK(a.radianceBytes == (size_t)a.pixels * 16);
     CHECK(a.guideRayBytes == (size_t)a.pixels * 32);
+    CHECK(a.surfaceGeometryBytes == (size_t)a.pixels * 24);
+    CHECK(a.baseLightConnectionBytes == (size_t)a.pixels * 60);
     CHECK(a.guideQueueBytes == (size_t)a.pixels * sizeof(uint32_t));
     CHECK(a.pathQueueBytes == (size_t)a.pixels * sizeof(uint32_t));
     CHECK(a.controlBytes == (size_t)kWavefrontControlUints * sizeof(uint32_t));
@@ -93,6 +97,8 @@ TEST_CASE("preview presets make wavefront memory growth explicit")
     sz.iorStack = 52;
     sz.radiance = 16;
     sz.guideRay = 32;
+    sz.surfaceGeometry = 24;
+    sz.baseLightConnection = 60;
     sz.shadowRay = 48;
     sz.aovSample = 64;
 
@@ -102,6 +108,8 @@ TEST_CASE("preview presets make wavefront memory growth explicit")
     CHECK(preview.pixels == 518400);
     CHECK(fullHd.pixels == 4 * preview.pixels);
     CHECK(fullHd.pathStateBytes == 4 * preview.pathStateBytes);
+    CHECK(fullHd.surfaceGeometryBytes == 4 * preview.surfaceGeometryBytes);
+    CHECK(fullHd.baseLightConnectionBytes == 4 * preview.baseLightConnectionBytes);
     CHECK(fullHd.mediumPathStateBytes == 4 * preview.mediumPathStateBytes);
     CHECK(fullHd.sharcUpdateStateBytes == 4 * preview.sharcUpdateStateBytes);
     CHECK(fullHd.pathStateBytes + fullHd.mediumPathStateBytes + fullHd.sharcUpdateStateBytes ==

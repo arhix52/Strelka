@@ -32,8 +32,10 @@ struct WavefrontVariant
     MTL::ComputePipelineState* extendStatic = nullptr;
     MTL::ComputePipelineState* sssWalkMotion = nullptr;
     MTL::ComputePipelineState* sssWalkStatic = nullptr;
+    MTL::ComputePipelineState* connectBase = nullptr;
     MTL::ComputePipelineState* shadeBase = nullptr;
     MTL::ComputePipelineState* shadeLayer = nullptr;
+    MTL::ComputePipelineState* shadeTranslucent = nullptr;
     MTL::ComputePipelineState* shade = nullptr;
     MTL::ComputePipelineState* restirSpatialFinal = nullptr;
     MTL::ComputePipelineState* miss = nullptr;
@@ -131,7 +133,12 @@ public:
     void release();
 
     void buildPipelines();
-    void ensureBuffers(uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale, bool restirEnabled, bool restirBasic);
+    void ensureBuffers(uint32_t width,
+                       uint32_t height,
+                       uint32_t sharcUpdateDownscale,
+                       bool restirEnabled,
+                       bool restirBasic,
+                       bool splitBaseNee);
     const WavefrontVariant* variantFor(uint32_t features);
 
     // Returns the encoder to keep using: in profiling mode each stage gets its
@@ -161,7 +168,9 @@ public:
     void resetStageProfilingMetal4();
 
     void createStageTimestampBuffer();
+    void createStageTimestampHeapMetal4();
     void reportStageTimings();
+    void reportStageTimingsMetal4();
     void reportStageFailureMetal4();
     void reportIorStackStats();
     void reportSharcStats();
@@ -213,6 +222,14 @@ public:
     {
         return mGuideRayBuffer ? mGuideRayBuffer->gpuAddress() : 0ull;
     }
+    uint64_t surfaceGeometryAddress() const
+    {
+        return mSurfaceGeometryBuffer ? mSurfaceGeometryBuffer->gpuAddress() : 0ull;
+    }
+    uint64_t baseLightConnectionAddress() const
+    {
+        return mBaseLightConnectionBuffer ? mBaseLightConnectionBuffer->gpuAddress() : 0ull;
+    }
     uint64_t guideQueueAddress() const
     {
         return mGuideQueueBuffer ? mGuideQueueBuffer->gpuAddress() : 0ull;
@@ -262,6 +279,8 @@ public:
     }
 
 private:
+    void reportStageTimestampValues(const uint64_t* timestamps, size_t count, double nanosecondsPerTick);
+
     MTL::Device* mDevice = nullptr;
     Metal4Context* mMetal4 = nullptr;
 
@@ -297,6 +316,8 @@ private:
     MTL::Buffer* mIorStackBuffer = nullptr;
     MTL::Buffer* mRadianceBuffer = nullptr;
     MTL::Buffer* mGuideRayBuffer = nullptr;
+    MTL::Buffer* mSurfaceGeometryBuffer = nullptr;
+    MTL::Buffer* mBaseLightConnectionBuffer = nullptr;
     MTL::Buffer* mGuideQueueBuffer = nullptr;
     MTL::Buffer* mPathQueueBuffer[2] = { nullptr, nullptr };
     MTL::Buffer* mSssQueueBuffer = nullptr;
@@ -312,17 +333,22 @@ private:
     MTL::Buffer* mRestirSurfaceDataBuffer[2] = { nullptr, nullptr };
 
     MTL::CounterSampleBuffer* mStageTimestampBuffer = nullptr;
+    MTL4::CounterHeap* mStageTimestampHeap4 = nullptr;
     MTL::Buffer* mStageStatsBuffer = nullptr;
     MTL::Buffer* mIorStatsBuffer = nullptr;
     MTL::Buffer* mRenderWorkCounterBuffer = nullptr;
     bool mReportedIorStats = false;
     uint64_t mLastSharcActivity = 0;
+    MTL::Timestamp mStageCpuTimestampStart = 0;
+    MTL::Timestamp mStageGpuTimestampStart = 0;
     std::vector<uint8_t> mStageKinds;
+    std::vector<int32_t> mStageBounces;
     std::map<std::string, uint64_t> mRenderWorkDispatches;
     uint32_t mCapacity = 0;
     uint32_t mSharcUpdateDownscale = 0;
     bool mRestirAllocated = false;
     bool mRestirBasicAllocated = false;
+    bool mSplitBaseNeeAllocated = false;
     bool mResidencyDirty = true;
 };
 

@@ -426,13 +426,13 @@ static __inline__ float rangeWindow(device const UniformLight& l, float dist)
 // emission out with a Mix Shader. pad1 carries that cutoff distance (0 = none),
 // and only area lights read it -- punctual lights use pad1 as the KHR range in
 // rangeWindow() above, so scaling them here as well would apply two windows.
-static __inline__ float areaFalloff(device const UniformLight& l, float dist)
+static __inline__ float areaFalloff(device const UniformLight& l, float dist, int lightType)
 {
     if (l.pad1 <= 0.0f)
     {
         return 1.0f;
     }
-    if (l.type != LIGHT_TYPE_RECT && l.type != LIGHT_TYPE_DISC && l.type != LIGHT_TYPE_SPHERE)
+    if (lightType != LIGHT_TYPE_RECT && lightType != LIGHT_TYPE_DISC && lightType != LIGHT_TYPE_SPHERE)
     {
         return 1.0f;
     }
@@ -442,23 +442,36 @@ static __inline__ float areaFalloff(device const UniformLight& l, float dist)
     return 1.0f - s;
 }
 
+static __inline__ float areaFalloff(device const UniformLight& l, float dist)
+{
+    return areaFalloff(l, dist, l.type);
+}
+
 /// Unpack one light into the scalars lightSolidAnglePdf() needs.
 ///
 /// `radius` is only read for punctual types; every area light carries its local
 /// world-area density in `d.areaPdf`.
-static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l, thread const LightSampleData& d)
+static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l,
+                                                   thread const LightSampleData& d,
+                                                   int lightType)
 {
-    LightPdfQuery q = makeLightPdfQuery(l.type);
+    LightPdfQuery q = makeLightPdfQuery(lightType);
     q.distToLight = d.distToLight;
     q.cosAtLight = -dot(d.L, d.normal);
     q.areaPdf = d.areaPdf;
     q.halfAngle = l.halfAngle;
     q.solidAngle = d.solidAngle;
-    if (lightIsPunctual(l.type))
+    if (lightIsPunctual(lightType))
     {
         q.radius = l.points[0].x;
     }
     return q;
+}
+
+
+static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l, thread const LightSampleData& d)
+{
+    return buildLightPdfQuery(l, d, l.type);
 }
 
 /// The light-sampling density for a direction that arrived at `lightHitPoint`

@@ -22,6 +22,19 @@ TEST_CASE("packWavefrontFeatures sets each independent flag")
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kLights));
 
     in = {};
+    in.hasEmissiveMeshLights = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kEmissiveMeshLights));
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kLights));
+
+    in = {};
+    in.allAnalyticLightsRect = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAllAnalyticLightsRect));
+
+    in = {};
+    in.uniformRectLightSampling = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kUniformRectLightSampling));
+
+    in = {};
     in.hasAlphaMaterials = true;
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAlpha));
 

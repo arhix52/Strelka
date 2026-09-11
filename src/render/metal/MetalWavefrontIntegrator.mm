@@ -13,9 +13,11 @@
 #include <string>
 
 #include <log.h>
+#include <env.h>
 #include <paths.h>
 
 #include <simd/simd.h>
+#include <mach/mach_time.h>
 
 #include "ShaderTypes.h"
 #include <strelka/material/ior_stack.h>
@@ -57,6 +59,8 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mIorStackBuffer);
     safeRelease(mRadianceBuffer);
     safeRelease(mGuideRayBuffer);
+    safeRelease(mSurfaceGeometryBuffer);
+    safeRelease(mBaseLightConnectionBuffer);
     safeRelease(mGuideQueueBuffer);
     safeRelease(mPathQueueBuffer[0]);
     safeRelease(mPathQueueBuffer[1]);
@@ -81,8 +85,10 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.extendStatic);
         safeRelease(kv.second.sssWalkMotion);
         safeRelease(kv.second.sssWalkStatic);
+        safeRelease(kv.second.connectBase);
         safeRelease(kv.second.shadeBase);
         safeRelease(kv.second.shadeLayer);
+        safeRelease(kv.second.shadeTranslucent);
         safeRelease(kv.second.shade);
         safeRelease(kv.second.restirSpatialFinal);
         safeRelease(kv.second.miss);
@@ -116,15 +122,18 @@ void MetalWavefrontIntegrator::release()
     safeRelease(mSharcClearPSO4);
     safeRelease(mSharcResolvePSO4);
     safeRelease(mStageTimestampBuffer);
+    safeRelease(mStageTimestampHeap4);
     safeRelease(mStageStatsBuffer);
     safeRelease(mIorStatsBuffer);
     safeRelease(mRenderWorkCounterBuffer);
     mCapacity = 0;
     mSharcUpdateDownscale = 0;
+    mSplitBaseNeeAllocated = false;
     mResidencyDirty = true;
     mReportedIorStats = false;
     mLastSharcActivity = 0;
     mStageKinds.clear();
+    mStageBounces.clear();
     mRenderWorkDispatches.clear();
 }
 
@@ -140,6 +149,8 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     add(mIorStackBuffer);
     add(mRadianceBuffer);
     add(mGuideRayBuffer);
+    add(mSurfaceGeometryBuffer);
+    add(mBaseLightConnectionBuffer);
     add(mGuideQueueBuffer);
     add(mPathQueueBuffer[0]);
     add(mPathQueueBuffer[1]);
@@ -176,10 +187,11 @@ size_t MetalWavefrontIntegrator::queueBytes() const
     auto bufBytes = [](MTL::Buffer* b) { return b ? b->length() : 0; };
     return bufBytes(mPathStateBuffer) + bufBytes(mMediumPathStateBuffer) + bufBytes(mSharcUpdateStateBuffer) +
            bufBytes(mPathRayBuffer) + bufBytes(mHitBuffer) + bufBytes(mIorStackBuffer) + bufBytes(mRadianceBuffer) +
-           bufBytes(mGuideRayBuffer) + bufBytes(mGuideQueueBuffer) + bufBytes(mPathQueueBuffer[0]) +
-           bufBytes(mPathQueueBuffer[1]) + bufBytes(mSssQueueBuffer) + bufBytes(mSssControlBuffer) +
-           bufBytes(mControlBuffer) + bufBytes(mTraversalDispatchBuffer) + bufBytes(mShadowRayBuffer) +
-           bufBytes(mHitQueueBuffer) + bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer) +
+           bufBytes(mGuideRayBuffer) + bufBytes(mSurfaceGeometryBuffer) + bufBytes(mBaseLightConnectionBuffer) +
+           bufBytes(mGuideQueueBuffer) + bufBytes(mPathQueueBuffer[0]) + bufBytes(mPathQueueBuffer[1]) +
+           bufBytes(mSssQueueBuffer) + bufBytes(mSssControlBuffer) + bufBytes(mControlBuffer) +
+           bufBytes(mTraversalDispatchBuffer) + bufBytes(mShadowRayBuffer) + bufBytes(mHitQueueBuffer) +
+           bufBytes(mMissQueueBuffer) + bufBytes(mAovBuffer) + bufBytes(mStageStatsBuffer) +
            bufBytes(mRestirReservoirBuffer[0]) + bufBytes(mRestirReservoirBuffer[1]) +
            bufBytes(mRestirSurfaceHistoryBuffer[0]) + bufBytes(mRestirSurfaceHistoryBuffer[1]) +
            bufBytes(mRestirSurfaceDataBuffer[0]) + bufBytes(mRestirSurfaceDataBuffer[1]) +
@@ -203,7 +215,13 @@ enum StageKind : uint8_t
     kStageGenerate = 0,
     kStagePrepare,
     kStageExtend,
+    kStageSssWalk,
+    kStageConnect,
     kStageShade,
+    kStageShadeBase,
+    kStageShadeLayer,
+    kStageShadeTranslucent,
+    kStageShadeTail,
     kStageRestirSpatial,
     kStagePrepareShadow,
     kStageShadow,
@@ -213,8 +231,22 @@ enum StageKind : uint8_t
     kStageSort,
     kStageCount
 };
-const char* const kStageNames[kStageCount] = { "generate",   "prepare", "extend", "shade", "restirSpatialFinal",
-                                               "prepShadow", "shadow",  "miss",   "guide", "resolve",
+const char* const kStageNames[kStageCount] = { "generate",
+                                               "prepare",
+                                               "extend",
+                                               "sssWalk",
+                                               "connect",
+                                               "shade",
+                                               "shadeBase",
+                                               "shadeLayer",
+                                               "shadeTranslucent",
+                                               "shadeTail",
+                                               "restirSpatialFinal",
+                                               "prepShadow",
+                                               "shadow",
+                                               "miss",
+                                               "guide",
+                                               "resolve",
                                                "sort" };
 } // namespace
 
@@ -266,11 +298,31 @@ void MetalWavefrontIntegrator::createStageTimestampBuffer()
     }
 }
 
+void MetalWavefrontIntegrator::createStageTimestampHeapMetal4()
+{
+    if (mStageTimestampHeap4)
+    {
+        return;
+    }
+
+    MTL4::CounterHeapDescriptor* desc = MTL4::CounterHeapDescriptor::alloc()->init();
+    desc->setType(MTL4::CounterHeapTypeTimestamp);
+    desc->setCount(static_cast<NS::UInteger>(2) * kMaxStageSamples);
+    NS::Error* err = nullptr;
+    mStageTimestampHeap4 = mDevice->newCounterHeap(desc, &err);
+    desc->release();
+    if (!mStageTimestampHeap4)
+    {
+        STRELKA_WARNING("Metal 4 stage profiling unavailable: {}",
+                        err && err->localizedDescription() ? err->localizedDescription()->utf8String() : "unknown error");
+    }
+}
+
 void MetalWavefrontIntegrator::reportStageFailureMetal4()
 {
     if (!mStageStatsBuffer || mStageKinds.empty())
     {
-        STRELKA_ERROR("Metal 4 stage diagnosis unavailable; reproduce with STRELKA_STAGES=1");
+        STRELKA_ERROR("Metal 4 stage diagnosis unavailable; reproduce with STRELKA_STAGES=1 STRELKA_STAGE_BREADCRUMBS=1");
         return;
     }
 
@@ -285,16 +337,21 @@ void MetalWavefrontIntegrator::reportStageFailureMetal4()
                   enteredStage, mStageKinds.size());
     if (!failure.postIntegrator && failure.suspectedStage >= 0 && mStageStatsBuffer)
     {
-        int32_t bounce = -1;
-        for (int32_t i = 0; i <= failure.suspectedStage; ++i)
+        const size_t suspectedIndex = static_cast<size_t>(failure.suspectedStage);
+        int32_t bounce =
+            failure.suspectedStage >= 0 && suspectedIndex < mStageBounces.size() ? mStageBounces[suspectedIndex] : -1;
+        if (mStageBounces.empty())
         {
-            if (mStageKinds[i] == kStageGenerate)
+            for (int32_t i = 0; i <= failure.suspectedStage; ++i)
             {
-                bounce = -1;
-            }
-            else if (mStageKinds[i] == kStageExtend)
-            {
-                ++bounce;
+                if (mStageKinds[i] == kStageGenerate)
+                {
+                    bounce = -1;
+                }
+                else if (mStageKinds[i] == kStageExtend)
+                {
+                    ++bounce;
+                }
             }
         }
         // -1 means no extend stage ran since the last generate, so there is no
@@ -309,7 +366,7 @@ void MetalWavefrontIntegrator::reportStageFailureMetal4()
             const uint32_t lanes = std::min(active, kWavefrontStageDiagnosticLanes);
             for (uint32_t lane = 0; lane < lanes; ++lane)
             {
-                const uint32_t* d = stats + static_cast<size_t>(base) + 1u +
+                const uint32_t* d = stats + static_cast<size_t>(base) + 2u +
                                     static_cast<size_t>(lane) * kWavefrontStageDiagnosticLaneUints;
                 const uint32_t medium = d[1];
                 STRELKA_ERROR(
@@ -336,10 +393,59 @@ void MetalWavefrontIntegrator::reportStageTimings()
     {
         return;
     }
-    const MTL::CounterResultTimestamp* ts = static_cast<const MTL::CounterResultTimestamp*>(data->bytes());
+    const auto* ts = static_cast<const MTL::CounterResultTimestamp*>(data->bytes());
+    std::vector<uint64_t> timestamps(n);
+    for (NS::UInteger i = 0; i < n; ++i)
+    {
+        timestamps[i] = ts[i].timestamp;
+    }
+    reportStageTimestampValues(timestamps.data(), timestamps.size(), 1.0);
+}
+
+void MetalWavefrontIntegrator::reportStageTimingsMetal4()
+{
+    if (!mStageTimestampHeap4 || mStageKinds.empty())
+    {
+        return;
+    }
+    const NS::UInteger n = 2 * mStageKinds.size();
+    const NS::Data* data = mStageTimestampHeap4->resolveCounterRange(NS::Range::Make(0, n));
+    if (!data || data->length() < n * sizeof(MTL4::TimestampHeapEntry))
+    {
+        return;
+    }
+    const auto* entries = static_cast<const MTL4::TimestampHeapEntry*>(data->bytes());
+    std::vector<uint64_t> timestamps(n);
+    for (NS::UInteger i = 0; i < n; ++i)
+    {
+        timestamps[i] = entries[i].timestamp;
+    }
+    MTL::Timestamp cpuEnd = 0;
+    MTL::Timestamp gpuEnd = 0;
+    mDevice->sampleTimestamps(&cpuEnd, &gpuEnd);
+    if (cpuEnd <= mStageCpuTimestampStart || gpuEnd <= mStageGpuTimestampStart)
+    {
+        return;
+    }
+    mach_timebase_info_data_t timebase{};
+    mach_timebase_info(&timebase);
+    const double cpuNanoseconds = static_cast<double>(cpuEnd - mStageCpuTimestampStart) * timebase.numer / timebase.denom;
+    const double nanosecondsPerGpuTick = cpuNanoseconds / static_cast<double>(gpuEnd - mStageGpuTimestampStart);
+    reportStageTimestampValues(timestamps.data(), timestamps.size(), nanosecondsPerGpuTick);
+}
+
+void MetalWavefrontIntegrator::reportStageTimestampValues(const uint64_t* timestamps,
+                                                          size_t count,
+                                                          double nanosecondsPerTick)
+{
+    if (!timestamps || count < 2 * mStageKinds.size())
+    {
+        return;
+    }
 
     double totals[kStageCount] = {};
     uint32_t counts[kStageCount] = {};
+    double primaryExtendMs = 0.0;
     // Per-bounce durations of the three traversal-heavy stages. The cost of a
     // bounce says more than the total does: bounce 0 is a coherent primary pass
     // and the later ones are not, which is what decides whether sorting rays is
@@ -347,17 +453,23 @@ void MetalWavefrontIntegrator::reportStageTimings()
     std::string perBounce[kStageCount];
     for (NS::UInteger i = 0; i < mStageKinds.size(); ++i)
     {
-        const MTL::CounterResultTimestamp& a = ts[2 * i];
-        const MTL::CounterResultTimestamp& b = ts[2 * i + 1];
-        if (a.timestamp == MTL::CounterErrorValue || b.timestamp == MTL::CounterErrorValue || b.timestamp <= a.timestamp)
+        const uint64_t a = timestamps[2 * i];
+        const uint64_t b = timestamps[2 * i + 1];
+        if (a == MTL::CounterErrorValue || b == MTL::CounterErrorValue || b <= a)
         {
             continue;
         }
         const uint8_t kind = mStageKinds[i];
-        const double ms = static_cast<double>(b.timestamp - a.timestamp) / 1e6; // ns -> ms
+        const double ms = static_cast<double>(b - a) * nanosecondsPerTick / 1e6;
         totals[kind] += ms;
         ++counts[kind];
-        if (kind == kStageExtend || kind == kStageShade || kind == kStageShadow)
+        if (kind == kStageExtend && i < mStageBounces.size() && mStageBounces[i] == 0)
+        {
+            primaryExtendMs += ms;
+        }
+        if (kind == kStageExtend || kind == kStageSssWalk || kind == kStageConnect || kind == kStageShade ||
+            kind == kStageShadeBase || kind == kStageShadeLayer || kind == kStageShadeTranslucent ||
+            kind == kStageShadeTail || kind == kStageShadow)
         {
             perBounce[kind] += fmt::format("{:.2f} ", ms);
         }
@@ -379,10 +491,21 @@ void MetalWavefrontIntegrator::reportStageTimings()
                             sum > 0.0 ? 100.0 * totals[k] / sum : 0.0, counts[k]);
     }
     STRELKA_INFO("STAGES total {:.2f}ms  {}", sum, line);
-    STRELKA_INFO("STAGES per bounce: extend [{}] shade [{}] shadow [{}]", perBounce[kStageExtend],
-                 perBounce[kStageShade], perBounce[kStageShadow]);
+    if (totals[kStageExtend] > 0.0)
+    {
+        STRELKA_INFO("STAGES primary extend {:.2f}ms ({:.1f}% of extend)", primaryExtendMs,
+                     100.0 * primaryExtendMs / totals[kStageExtend]);
+    }
+    STRELKA_INFO(
+        "STAGES per dispatch: extend [{}] sss [{}] connect [{}] base [{}] layer [{}] translucent [{}] tail [{}] "
+        "shade [{}] shadow [{}]",
+        perBounce[kStageExtend], perBounce[kStageSssWalk], perBounce[kStageConnect], perBounce[kStageShadeBase],
+        perBounce[kStageShadeLayer], perBounce[kStageShadeTranslucent], perBounce[kStageShadeTail],
+        perBounce[kStageShade], perBounce[kStageShadow]);
 
-    if (mStageStatsBuffer)
+    // The legacy path copies queue counters into this fixed layout. Metal 4
+    // uses the same buffer for breadcrumbs and per-lane hang diagnostics.
+    if (mStageStatsBuffer && mStageTimestampBuffer)
     {
         const uint32_t* stats = static_cast<const uint32_t*>(mStageStatsBuffer->contents());
         std::string paths, shadows;
@@ -392,6 +515,27 @@ void MetalWavefrontIntegrator::reportStageTimings()
             shadows += fmt::format("{:.0f}k ", stats[64 + i] / 1000.0);
         }
         STRELKA_INFO("STAGES rays per bounce: paths [{}] shadow [{}]", paths, shadows);
+    }
+    else if (mStageStatsBuffer && mStageTimestampHeap4)
+    {
+        const uint32_t* stats = static_cast<const uint32_t*>(mStageStatsBuffer->contents());
+        std::string sssOccupancy;
+        for (uint32_t bounce = 0; bounce < kWavefrontStageDiagnosticBounces; ++bounce)
+        {
+            const int32_t bounceIndex = static_cast<int32_t>(bounce);
+            const bool measured = std::ranges::any_of(
+                mStageBounces, [bounceIndex](int32_t stageBounce) { return stageBounce == bounceIndex; });
+            if (!measured)
+            {
+                continue;
+            }
+            const uint32_t base = kWavefrontStageDiagnosticBase + bounce * kWavefrontStageDiagnosticStride;
+            const uint32_t active = stats[base];
+            const uint32_t sss = stats[base + kWavefrontStageDiagnosticSssCountOffset];
+            sssOccupancy += fmt::format(
+                "{}/{}({:.1f}%) ", sss, active, active != 0u ? 100.0 * static_cast<double>(sss) / active : 0.0);
+        }
+        STRELKA_INFO("STAGES SSS paths/active per bounce: [{}]", sssOccupancy);
     }
 }
 
@@ -458,6 +602,12 @@ void MetalWavefrontIntegrator::reportSharcStats()
 void MetalWavefrontIntegrator::resetStageProfilingMetal4()
 {
     mStageKinds.clear();
+    mStageBounces.clear();
+    if (mStageTimestampHeap4)
+    {
+        mStageTimestampHeap4->invalidateCounterRange(NS::Range::Make(0, static_cast<NS::UInteger>(2) * kMaxStageSamples));
+        mDevice->sampleTimestamps(&mStageCpuTimestampStart, &mStageGpuTimestampStart);
+    }
     if (mStageStatsBuffer)
     {
         auto* stats = static_cast<uint32_t*>(mStageStatsBuffer->contents());
@@ -587,7 +737,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
     const NS::UInteger kShadeBaseArgsOffset = 80 * sizeof(uint32_t);
     const NS::UInteger kShadeLayerArgsOffset = 84 * sizeof(uint32_t);
-    const NS::UInteger kShadeTailArgsOffset = 88 * sizeof(uint32_t);
+    const NS::UInteger kShadeTranslucentArgsOffset = 88 * sizeof(uint32_t);
+    const NS::UInteger kShadeTailArgsOffset = 92 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
     const NS::UInteger kGuideArgsOffset = 25 * sizeof(uint32_t);
@@ -632,12 +783,29 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         table->setAddress(buffer ? buffer->gpuAddress() + offset : 0, index);
     };
 
-    // Precise MTL4 timestamps are not passive validation. Apple documents that
-    // they can affect runtime performance, and on this workload hundreds of
-    // them turn an otherwise stable frame into a watchdog reset. Record only
-    // the stage being entered with a one-thread dispatch instead. The barrier
-    // after it makes the breadcrumb visible before the diagnosed stage starts.
-    const bool diagnose = frame.profileStages && mStageBreadcrumbPSO4 && mStageStatsBuffer;
+    const uint32_t s = chunk.sampleIndex;
+    const uint32_t accumulatedSample = uniforms ? uniforms->subframeIndex + s : s;
+    const uint32_t profileStart = envUint("STRELKA_STAGE_PROFILE_START", 0u);
+    const uint32_t profileCount = envUint("STRELKA_STAGE_PROFILE_COUNT", 4u);
+    const bool profileThisSample =
+        frame.profileStages && accumulatedSample >= profileStart && accumulatedSample - profileStart < profileCount;
+
+    // Breadcrumbs identify a failed stage; precise timestamps measure
+    // successful runs. Limit the default window because hundreds of precise
+    // boundaries on every sample of a long SSS render eventually trip the GPU
+    // watchdog. STRELKA_STAGE_PROFILE_START/COUNT select another window.
+    const bool diagnose = profileThisSample && envUint("STRELKA_STAGE_BREADCRUMBS", 0u) != 0u && mStageBreadcrumbPSO4 &&
+                          mStageStatsBuffer;
+    // Keep the two modes mutually exclusive. A breadcrumb is a one-thread
+    // dispatch plus a barrier; combining hundreds of them with precise
+    // timestamp boundaries can trip the GPU watchdog in long SSS frames.
+    const bool timeStages = profileThisSample && !diagnose && mStageTimestampHeap4;
+    auto shouldTimeStage = [](uint8_t kind) {
+        // Precise timestamps force prior GPU work to finish and can split an
+        // encoder. Keep them around the costly stages; timing every one-thread
+        // prepare dispatch made repeated SSS profiles trip the watchdog.
+        return kind != kStagePrepare && kind != kStagePrepareShadow;
+    };
     auto writeBreadcrumb = [&](uint32_t stageIndex) {
         enc->setComputePipelineState(mStageBreadcrumbPSO4);
         bind(mStageStatsBuffer, kWavefrontStageBreadcrumbOffset * sizeof(uint32_t), 0);
@@ -645,14 +813,33 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
         barrier();
     };
-    auto mark = [&](uint8_t kind) {
-        if (!diagnose || mStageKinds.size() + 1 >= kMaxStageSamples)
+    constexpr uint32_t kInvalidStageSample = std::numeric_limits<uint32_t>::max();
+    auto beginStage = [&](uint8_t kind, uint32_t bounce = std::numeric_limits<uint32_t>::max()) -> uint32_t {
+        if ((!diagnose && !timeStages) || mStageKinds.size() >= kMaxStageSamples)
         {
-            return;
+            return kInvalidStageSample;
         }
         const uint32_t stageIndex = static_cast<uint32_t>(mStageKinds.size());
         mStageKinds.push_back(kind);
-        writeBreadcrumb(stageIndex);
+        mStageBounces.push_back(
+            bounce <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ? static_cast<int32_t>(bounce) : -1);
+        if (diagnose)
+        {
+            writeBreadcrumb(stageIndex);
+        }
+        if (timeStages && shouldTimeStage(kind))
+        {
+            enc->writeTimestamp(
+                MTL4::TimestampGranularityPrecise, mStageTimestampHeap4, static_cast<NS::UInteger>(2) * stageIndex);
+        }
+        return stageIndex;
+    };
+    auto endStage = [&](uint32_t stageIndex) {
+        if (timeStages && stageIndex != kInvalidStageSample && shouldTimeStage(mStageKinds[stageIndex]))
+        {
+            enc->writeTimestamp(MTL4::TimestampGranularityPrecise, mStageTimestampHeap4,
+                                static_cast<NS::UInteger>(2) * stageIndex + 1u);
+        }
     };
     auto auditDispatch = [&](const char* label, uint64_t count = 1u) {
         if (frame.auditRenderWork)
@@ -661,15 +848,16 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         }
     };
 
-    const uint32_t s = chunk.sampleIndex;
     const MTL::GPUAddress sampleIdx = ring.push(s);
-    const MTL::GPUAddress diagnosticsEnabled = ring.push(diagnose ? 1u : 0u);
+    // A few queue counters and four diagnostic lanes are cheap enough to
+    // collect with stage profiling. Breadcrumb dispatches remain opt-in.
+    const MTL::GPUAddress stageCountersEnabled = ring.push(profileThisSample ? 1u : 0u);
     const MTL::GPUAddress diagnosticsMediumEnabled =
         ring.push((features & WavefrontFeatures::kSubsurface) != 0u ? 1u : 0u);
     if (chunk.generate)
     {
         auditDispatch("wavefrontGenerate");
-        mark(kStageGenerate);
+        const uint32_t stage = beginStage(kStageGenerate);
         enc->setComputePipelineState(variant->generate);
         bind(uniformBuffer, 0, 0);
         bind(mPathStateBuffer, 0, 1);
@@ -685,6 +873,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(mMediumPathStateBuffer, 0, 11);
         enc->dispatchThreadgroups(fullGrid, tg);
         barrier();
+        endStage(stage);
     }
 
     for (uint32_t bounce = chunk.bounceBegin; bounce < chunk.bounceEnd; ++bounce)
@@ -706,6 +895,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             if (beginExtend)
             {
                 auditDispatch("wavefrontPrepare");
+                const uint32_t stage = beginStage(kStagePrepare, bounce);
                 enc->setComputePipelineState(mPreparePSO4);
                 bind(mControlBuffer, 0, 0);
                 table->setAddress(srcIdx, 1);
@@ -715,7 +905,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(mPathStateBuffer, 0, 5);
                 bind(mPathRayBuffer, 0, 6);
                 bind(mPathQueueBuffer[src], 0, 7);
-                table->setAddress(diagnosticsEnabled, 8);
+                table->setAddress(stageCountersEnabled, 8);
                 bind(mTraversalDispatchBuffer, 0, 9);
                 table->setAddress(traversalBatchThreadsAddress, 10);
                 table->setAddress(traversalBatchCountAddress, 11);
@@ -725,9 +915,10 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 bind(mHitQueueBuffer, 0, 15);
                 enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
                 barrier();
-                mark(kStageExtend);
+                endStage(stage);
             }
 
+            const uint32_t extendStage = beginStage(kStageExtend, bounce);
             enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
             bind(uniformBuffer, 0, 0);
             bind(scene.instanceBuffer, 0, 1);
@@ -752,6 +943,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.geometryEntryBuffer, 0, 18);
             table->setResource(
                 (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+            bind(scene.vertexBuffer, 0, 20);
+            bind(scene.prevVertexBuffer, 0, 21);
+            bind(scene.indexBuffer, 0, 22);
             const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete ? 0u : chunk.traversalBatchBegin;
             const uint32_t batchEnd = chunk.phase == WavefrontChunkPhase::Complete ?
                                           traversalBatchCount :
@@ -796,6 +990,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     bind(scene.geometryEntryBuffer, 0, 18);
                     table->setResource(
                         (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+                    bind(scene.vertexBuffer, 0, 20);
+                    bind(scene.prevVertexBuffer, 0, 21);
+                    bind(scene.indexBuffer, 0, 22);
                 }
                 auditDispatch(useMotion ? "wavefrontExtend" : "wavefrontExtendStatic");
                 table->setAddress(ring.push(batch * traversalBatchThreads), 16);
@@ -807,14 +1004,19 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 }
             }
             barrier();
+            endStage(extendStage);
         }
 
         if (fusedSss && finishBounce)
         {
+            const uint32_t stage = beginStage(kStageSssWalk, bounce);
             auditDispatch("wavefrontPrepareSss");
             enc->setComputePipelineState(mPrepareSssPSO4);
             bind(mSssControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
+            bind(mStageStatsBuffer, 0, 2);
+            table->setAddress(bounceIdx, 3);
+            table->setAddress(stageCountersEnabled, 4);
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
 
@@ -844,19 +1046,22 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.geometryEntryBuffer, 0, 19);
             enc->dispatchThreadgroups(mSssControlBuffer->gpuAddress() + 2u * sizeof(uint32_t), tg);
             barrier();
+            endStage(stage);
         }
 
         if (finishBounce)
         {
             auditDispatch("wavefrontPrepareHitMiss");
+            const uint32_t prepareStage = beginStage(kStagePrepare, bounce);
             enc->setComputePipelineState(mPrepareHitMissPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
             bind(mHitQueueBuffer, 0, 2);
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
+            endStage(prepareStage);
 
-            mark(kStageMiss);
+            const uint32_t missStage = beginStage(kStageMiss, bounce);
             auditDispatch("wavefrontMiss");
             enc->setComputePipelineState(variant->miss);
             bind(uniformBuffer, 0, 0);
@@ -892,75 +1097,108 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             {
                 barrier();
             }
+            endStage(missStage);
 
-            mark(kStageShade);
+            if (variant->connectBase)
+            {
+                auditDispatch("wavefrontConnectBase");
+                const uint32_t connectStage = beginStage(kStageConnect, bounce);
+                enc->setComputePipelineState(variant->connectBase);
+                bind(uniformBuffer, 0, 0);
+                bind(scene.instanceBuffer, 0, 1);
+                bind(scene.iesBuffer, 0, 2);
+                bind(scene.lightBuffer, 0, 3);
+                bind(scene.materialBuffer, 0, 4);
+                bind(mPathStateBuffer, 0, 5);
+                bind(mPathRayBuffer, 0, 6);
+                bind(mHitBuffer, 0, 7);
+                table->setAddress(sampleIdx, 8);
+                bind(mHitQueueBuffer, 0, 9);
+                bind(mControlBuffer, 0, 10);
+                bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 11);
+                bind(scene.vertexBuffer, 0, 12);
+                bind(scene.prevVertexBuffer, 0, 13);
+                bind(scene.indexBuffer, 0, 14);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+                }
+                enc->dispatchThreadgroups(control + kShadeBaseArgsOffset, tg);
+                barrier();
+                endStage(connectStage);
+            }
             auditDispatch("wavefrontShade");
-            enc->setComputePipelineState(variant->shade);
-            bind(uniformBuffer, 0, 0);
-            bind(scene.instanceBuffer, 0, 1);
-            bind(scene.iesBuffer, 0, 2);
-            bind(scene.lightBuffer, 0, 3);
-            bind(scene.materialBuffer, 0, 4);
-            bind(mPathStateBuffer, 0, 5);
-            bind(mHitBuffer, 0, 6);
-            bind(mRadianceBuffer, 0, 7);
-            bind(mIorStackBuffer, 0, 8);
-            bind(scene.geometryEntryBuffer, 0, 9);
-            bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 10);
-            bind(scene.vertexBuffer, 0, 11);
-            bind(scene.prevVertexBuffer, 0, 12);
-            bind(scene.indexBuffer, 0, 13);
-            table->setAddress(sampleIdx, 14);
-            bind(mHitQueueBuffer, 0, 15);
-            bind(mPathQueueBuffer[dst], 0, 16);
-            bind(mControlBuffer, dst * sizeof(uint32_t), 17);
-            bind(mControlBuffer, 0, 18);
-            bind(mShadowRayBuffer, 0, 19);
-            bind(mControlBuffer, kShadowCounterOffset, 20);
-            bind(mPathRayBuffer, 0, 21);
-            bind(mAovBuffer, 0, 22);
-            bind(sharcUpdate ? scene.sharcAccumulationBuffer :
-                               (scene.prevFrameVertexBuffer ? scene.prevFrameVertexBuffer : scene.vertexBuffer),
-                 0, 23);
-            bind(sharcUpdate ? scene.sharcResolvedBuffer :
-                               (scene.prevFrameInstanceBuffer ? scene.prevFrameInstanceBuffer : scene.instanceBuffer),
-                 0, 24);
-            if (restirDiagnostic)
-            {
+            auto bindShadeResources = [&]() {
+                bind(uniformBuffer, 0, 0);
+                bind(scene.instanceBuffer, 0, 1);
+                bind(scene.iesBuffer, 0, 2);
+                bind(scene.lightBuffer, 0, 3);
+                bind(scene.materialBuffer, 0, 4);
+                bind(mPathStateBuffer, 0, 5);
+                bind(mHitBuffer, 0, 6);
+                bind(mRadianceBuffer, 0, 7);
+                bind(mIorStackBuffer, 0, 8);
+                bind(scene.geometryEntryBuffer, 0, 9);
+                bind(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 10);
+                bind(scene.vertexBuffer, 0, 11);
+                bind(scene.prevVertexBuffer, 0, 12);
+                bind(scene.indexBuffer, 0, 13);
+                table->setAddress(sampleIdx, 14);
+                bind(mHitQueueBuffer, 0, 15);
+                bind(mPathQueueBuffer[dst], 0, 16);
+                bind(mControlBuffer, dst * sizeof(uint32_t), 17);
+                bind(mControlBuffer, 0, 18);
+                bind(mShadowRayBuffer, 0, 19);
+                bind(mControlBuffer, kShadowCounterOffset, 20);
+                bind(mPathRayBuffer, 0, 21);
+                bind(mAovBuffer, 0, 22);
+                bind(sharcUpdate ? scene.sharcAccumulationBuffer :
+                                   (scene.prevFrameVertexBuffer ? scene.prevFrameVertexBuffer : scene.vertexBuffer),
+                     0, 23);
+                bind(sharcUpdate ? scene.sharcResolvedBuffer :
+                                   (scene.prevFrameInstanceBuffer ? scene.prevFrameInstanceBuffer : scene.instanceBuffer),
+                     0, 24);
                 table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 25);
-                table->setResource(variant->restirShadeDiagnosticTable->gpuResourceID(), 26);
-            }
-            else
-            {
-                table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 25);
-                table->setResource(variant->extendTableStatic->gpuResourceID(), 26);
-            }
-            bind(scene.curveSegmentBuffer, 0, 27);
-            bind(mIorStatsBuffer, 0, 28);
-            bind(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
-            bind(mMediumPathStateBuffer, 0, 30);
-            if (scene.environment && scene.environment->state().mapTexture)
-            {
-                table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
-            }
+                table->setResource(restirDiagnostic ? variant->restirShadeDiagnosticTable->gpuResourceID() :
+                                                      variant->extendTableStatic->gpuResourceID(),
+                                   26);
+                bind(scene.curveSegmentBuffer, 0, 27);
+                bind(mIorStatsBuffer, 0, 28);
+                bind(sharcUpdate ? mSharcUpdateStateBuffer : scene.sharcResolvedBuffer, 0, 29);
+                bind(mMediumPathStateBuffer, 0, 30);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    table->setTexture(scene.environment->state().mapTexture->gpuResourceID(), 0);
+                }
+            };
+            bindShadeResources();
+            auto dispatchShadeStage = [&](uint8_t kind, MTL::ComputePipelineState* pso, NS::UInteger argsOffset) {
+                const uint32_t stage = beginStage(kind, bounce);
+                if (diagnose)
+                {
+                    // The breadcrumb kernel shares and overwrites the argument table.
+                    bindShadeResources();
+                }
+                enc->setComputePipelineState(pso);
+                enc->dispatchThreadgroups(control + argsOffset, tg);
+                endStage(stage);
+            };
             if (variant->shadeBase)
             {
-                enc->setComputePipelineState(variant->shadeBase);
-                enc->dispatchThreadgroups(control + kShadeBaseArgsOffset, tg);
-                enc->setComputePipelineState(variant->shadeLayer);
-                enc->dispatchThreadgroups(control + kShadeLayerArgsOffset, tg);
-                enc->setComputePipelineState(variant->shade);
-                enc->dispatchThreadgroups(control + kShadeTailArgsOffset, tg);
+                dispatchShadeStage(kStageShadeBase, variant->shadeBase, kShadeBaseArgsOffset);
+                dispatchShadeStage(kStageShadeLayer, variant->shadeLayer, kShadeLayerArgsOffset);
+                dispatchShadeStage(kStageShadeTranslucent, variant->shadeTranslucent, kShadeTranslucentArgsOffset);
+                dispatchShadeStage(kStageShadeTail, variant->shade, kShadeTailArgsOffset);
             }
             else
             {
-                enc->dispatchThreadgroups(control + kHitArgsOffset, tg);
+                dispatchShadeStage(kStageShade, variant->shade, kHitArgsOffset);
             }
             barrier();
 
             if (uniforms->restirDIEnabled != 0u && bounce == 0u && !sharcUpdate)
             {
-                mark(kStageRestirSpatial);
+                const uint32_t stage = beginStage(kStageRestirSpatial, bounce);
                 auditDispatch("wavefrontRestirSpatialFinal");
                 enc->setComputePipelineState(variant->restirSpatialFinal);
                 bind(uniformBuffer, 0, 0);
@@ -997,9 +1235,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 }
                 enc->dispatchThreadgroups(control + kRestirArgsOffset, tg);
                 barrier();
+                endStage(stage);
             }
 
             auditDispatch("wavefrontPrepareShadow");
+            const uint32_t prepareShadowStage = beginStage(kStagePrepareShadow, bounce);
             enc->setComputePipelineState(mPrepareShadowPSO4);
             bind(mControlBuffer, 0, 0);
             table->setAddress(groupSize, 1);
@@ -1009,8 +1249,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setAddress(ring.push(shadowBatchCount), 5);
             enc->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
             barrier();
+            endStage(prepareShadowStage);
 
-            mark(kStageShadow);
+            const uint32_t shadowStage = beginStage(kStageShadow, bounce);
             enc->setComputePipelineState(useMotion ? variant->shadowMotion : variant->shadowStatic);
             bind(uniformBuffer, 0, 0);
             table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 1);
@@ -1041,6 +1282,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                 }
             }
             barrier();
+            endStage(shadowStage);
         }
     }
 
@@ -1051,7 +1293,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
     if (uniforms->writeAov && variant->guideMotion && variant->guideStatic)
     {
-        mark(kStageGuide);
+        const uint32_t stage = beginStage(kStageGuide);
         enc->setComputePipelineState(useMotion ? variant->guideMotion : variant->guideStatic);
         bind(uniformBuffer, 0, 0);
         bind(scene.instanceBuffer, 0, 1);
@@ -1069,9 +1311,10 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         table->setResource((useMotion ? variant->guideTableMotion : variant->guideTableStatic)->gpuResourceID(), 13);
         enc->dispatchThreadgroups(control + kGuideArgsOffset, tg);
         barrier();
+        endStage(stage);
     }
 
-    mark(kStageResolve);
+    const uint32_t resolveStage = beginStage(kStageResolve);
     auditDispatch("wavefrontResolve");
     enc->setComputePipelineState(mResolvePSO4);
     bind(uniformBuffer, 0, 0);
@@ -1108,6 +1351,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         table->setTexture(scene.guideDenoiseStrength->gpuResourceID(), 9);
         enc->dispatchThreadgroups(MTL::Size((width + 7) / 8, (height + 7) / 8, 1), MTL::Size(8, 8, 1));
     }
+    endStage(resolveStage);
 
     if (diagnose)
     {
@@ -1266,6 +1510,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         // wavefrontShade reaches this through Uniforms::guideRays because all
         // explicit buffer slots are occupied.
         e->useResource(mGuideRayBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+        e->useResource(mSurfaceGeometryBuffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirReservoirBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirReservoirBuffer[1], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
         e->useResource(mRestirSurfaceHistoryBuffer[0], MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
@@ -1291,7 +1536,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const NS::UInteger kHitCounterOffset = 11 * sizeof(uint32_t);
     const NS::UInteger kShadeBaseArgsOffset = 80 * sizeof(uint32_t);
     const NS::UInteger kShadeLayerArgsOffset = 84 * sizeof(uint32_t);
-    const NS::UInteger kShadeTailArgsOffset = 88 * sizeof(uint32_t);
+    const NS::UInteger kShadeTranslucentArgsOffset = 88 * sizeof(uint32_t);
+    const NS::UInteger kShadeTailArgsOffset = 92 * sizeof(uint32_t);
     const NS::UInteger kMissArgsOffset = 18 * sizeof(uint32_t);
     const NS::UInteger kMissCounterOffset = 16 * sizeof(uint32_t);
     const NS::UInteger kGuideArgsOffset = 25 * sizeof(uint32_t);
@@ -1314,6 +1560,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     // counters only at encoder boundaries. That costs encoder overhead, so it is
     // a measurement mode and not something to leave on.
     mStageKinds.clear();
+    mStageBounces.clear();
     const bool profile = frame.profileStages && mStageTimestampBuffer != nullptr;
     const uint32_t diagnosticsEnabled = profile ? 1u : 0u;
     const uint32_t diagnosticsMediumEnabled = (features & WavefrontFeatures::kSubsurface) != 0u ? 1u : 0u;
@@ -1429,6 +1676,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 useMotion ? variant->extendTableMotion : variant->extendTableStatic;
             enc->setIntersectionFunctionTable(extendTable, 19);
             enc->useResource(extendTable, MTL::ResourceUsageRead);
+            enc->setBuffer(scene.vertexBuffer, 0, 20);
+            enc->setBuffer(scene.prevVertexBuffer, 0, 21);
+            enc->setBuffer(scene.indexBuffer, 0, 22);
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -1438,6 +1688,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->setComputePipelineState(mPrepareSssPSO);
                 enc->setBuffer(mSssControlBuffer, 0, 0);
                 enc->setBytes(&kThreadsPerGroup, sizeof(kThreadsPerGroup), 1);
+                enc->setBuffer(mStageStatsBuffer, 0, 2);
+                enc->setBytes(&bounce, sizeof(bounce), 3);
+                enc->setBytes(&diagnosticsEnabled, sizeof(diagnosticsEnabled), 4);
                 enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
                 enc->memoryBarrier(MTL::BarrierScopeBuffers);
 
@@ -1504,6 +1757,33 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             }
 
             stamp(kStageShade);
+            if (variant->connectBase)
+            {
+                enc->pushDebugGroup(NS::String::string("connect base", NS::UTF8StringEncoding));
+                enc->setComputePipelineState(variant->connectBase);
+                enc->setBuffer(uniformBuffer, 0, 0);
+                enc->setBuffer(scene.instanceBuffer, 0, 1);
+                enc->setBuffer(scene.iesBuffer, 0, 2);
+                enc->setBuffer(scene.lightBuffer, 0, 3);
+                enc->setBuffer(scene.materialBuffer, 0, 4);
+                enc->setBuffer(mPathStateBuffer, 0, 5);
+                enc->setBuffer(mPathRayBuffer, 0, 6);
+                enc->setBuffer(mHitBuffer, 0, 7);
+                enc->setBytes(&s, sizeof(uint32_t), 8);
+                enc->setBuffer(mHitQueueBuffer, 0, 9);
+                enc->setBuffer(mControlBuffer, 0, 10);
+                enc->setBuffer(scene.environment ? scene.environment->state().aliasBuffer : nullptr, 0, 11);
+                enc->setBuffer(scene.vertexBuffer, 0, 12);
+                enc->setBuffer(scene.prevVertexBuffer, 0, 13);
+                enc->setBuffer(scene.indexBuffer, 0, 14);
+                if (scene.environment && scene.environment->state().mapTexture)
+                {
+                    enc->setTexture(scene.environment->state().mapTexture, 0);
+                }
+                enc->dispatchThreadgroups(mControlBuffer, kShadeBaseArgsOffset, tg);
+                enc->memoryBarrier(MTL::BarrierScopeBuffers);
+                enc->popDebugGroup();
+            }
             enc->pushDebugGroup(NS::String::string("shade", NS::UTF8StringEncoding));
             enc->setComputePipelineState(variant->shade);
             enc->setBuffer(uniformBuffer, 0, 0);
@@ -1558,6 +1838,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->dispatchThreadgroups(mControlBuffer, kShadeBaseArgsOffset, tg);
                 enc->setComputePipelineState(variant->shadeLayer);
                 enc->dispatchThreadgroups(mControlBuffer, kShadeLayerArgsOffset, tg);
+                enc->setComputePipelineState(variant->shadeTranslucent);
+                enc->dispatchThreadgroups(mControlBuffer, kShadeTranslucentArgsOffset, tg);
                 enc->setComputePipelineState(variant->shade);
                 enc->dispatchThreadgroups(mControlBuffer, kShadeTailArgsOffset, tg);
             }
@@ -1769,20 +2051,24 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)21);
     values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)22);
     values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)23);
-    const bool shadeTailDisabled = false;
-    values->setConstantValue(&shadeTailDisabled, MTL::DataTypeBool, (NS::UInteger)24);
-    const bool shadeLayerDisabled = false;
-    values->setConstantValue(&shadeLayerDisabled, MTL::DataTypeBool, (NS::UInteger)25);
-    const bool shadeBaseDisabled = false;
-    values->setConstantValue(&shadeBaseDisabled, MTL::DataTypeBool, (NS::UInteger)26);
+    const uint32_t shadeProbe = envUint("STRELKA_SHADE_PROBE", 0u);
+    values->setConstantValue(&shadeProbe, MTL::DataTypeUInt, (NS::UInteger)24);
+    const bool emissiveMeshLights = (features & WavefrontFeatures::kEmissiveMeshLights) != 0;
+    values->setConstantValue(&emissiveMeshLights, MTL::DataTypeBool, (NS::UInteger)25);
+    const bool allAnalyticLightsRect = (features & WavefrontFeatures::kAllAnalyticLightsRect) != 0;
+    values->setConstantValue(&allAnalyticLightsRect, MTL::DataTypeBool, (NS::UInteger)26);
+    const bool uniformRectLightSampling = (features & WavefrontFeatures::kUniformRectLightSampling) != 0;
+    values->setConstantValue(&uniformRectLightSampling, MTL::DataTypeBool, (NS::UInteger)27);
+    const bool splitBaseNee = (features & WavefrontFeatures::kSplitBaseNee) != 0;
+    values->setConstantValue(&splitBaseNee, MTL::DataTypeBool, (NS::UInteger)28);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
     NS::Error* err = nullptr;
-    auto make = [&](const char* name) -> MTL::ComputePipelineState* {
+    auto make = [&](const char* name, const char* label = nullptr) -> MTL::ComputePipelineState* {
         if (useMetal4)
         {
-            return mMetal4->newComputePipelineState(mLibrary, name, values);
+            return mMetal4->newComputePipelineState(mLibrary, name, values, label);
         }
         MTL::Function* fn = mLibrary->newFunction(NS::String::string(name, NS::UTF8StringEncoding), values, &err);
         if (!fn)
@@ -1791,7 +2077,15 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
                           err ? err->localizedDescription()->utf8String() : "unknown error");
             return nullptr;
         }
-        MTL::ComputePipelineState* pso = mDevice->newComputePipelineState(fn, &err);
+        auto* descriptor = MTL::ComputePipelineDescriptor::alloc()->init();
+        descriptor->setComputeFunction(fn);
+        if (label)
+        {
+            descriptor->setLabel(NS::String::string(label, NS::UTF8StringEncoding));
+        }
+        MTL::ComputePipelineState* pso =
+            mDevice->newComputePipelineState(descriptor, MTL::PipelineOptionNone, nullptr, &err);
+        descriptor->release();
         if (!pso)
         {
             STRELKA_FATAL("wavefront: {} -> {}", name, err ? err->localizedDescription()->utf8String() : "unknown error");
@@ -1887,22 +2181,29 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     }
     else if (openpbr)
     {
-        const bool shadeTailEnabled = true;
-        values->setConstantValue(&shadeTailEnabled, MTL::DataTypeBool, (NS::UInteger)24);
-        v.shade = make("wavefrontShade");
-        values->setConstantValue(&shadeTailDisabled, MTL::DataTypeBool, (NS::UInteger)24);
+        v.shade = make("wavefrontShadeTail", "wavefrontShadeTail");
+        // Plain one-candidate NEE can propose a light before material shading.
+        // ReSTIR retains its coupled candidate/evaluation loop in shade.
+        if (splitBaseNee)
+        {
+            v.connectBase = make("wavefrontConnectBase", "wavefrontConnectBase");
+        }
         const bool disabled = false;
+        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)20);
+        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)23);
+        // Bucket 2 contains unlayered water/glass/SSS only. Dispersion is
+        // excluded by the host classifier, so compile it out together with
+        // coat/fuzz and metallic rather than carrying Tail's mixed lobe stack.
+        values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)21);
+        v.shadeTranslucent = make("wavefrontShadeTranslucent", "wavefrontShadeTranslucent");
+        values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)20);
+        values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)21);
+        values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)23);
         values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)21);
         values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)22);
-        const bool shadeLayerEnabled = true;
-        values->setConstantValue(&shadeLayerEnabled, MTL::DataTypeBool, (NS::UInteger)25);
-        v.shadeLayer = make("wavefrontShade");
-        values->setConstantValue(&shadeLayerDisabled, MTL::DataTypeBool, (NS::UInteger)25);
+        v.shadeLayer = make("wavefrontShadeLayer", "wavefrontShadeLayer");
         values->setConstantValue(&disabled, MTL::DataTypeBool, (NS::UInteger)20);
-        const bool shadeBaseEnabled = true;
-        values->setConstantValue(&shadeBaseEnabled, MTL::DataTypeBool, (NS::UInteger)26);
-        v.shadeBase = make("wavefrontShade");
-        values->setConstantValue(&shadeBaseDisabled, MTL::DataTypeBool, (NS::UInteger)26);
+        v.shadeBase = make("wavefrontShadeBase", "wavefrontShadeBase");
         values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)20);
         values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)21);
         values->setConstantValue(&openpbrFeatureEnabled, MTL::DataTypeBool, (NS::UInteger)22);
@@ -1938,10 +2239,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;
     };
     STRELKA_INFO(
-        "  maxThreadsPerTG: generate {} extend {} (motion {}) sssWalk {} (motion {}) shade {} shadow {} (motion {}) "
-        "guide {} (motion {}) miss {}",
+        "  maxThreadsPerTG: generate {} extend {} (motion {}) sssWalk {} (motion {}) connect base {} shade base {} layer {} "
+        "translucent {} tail {} shadow {} (motion {}) guide {} (motion {}) miss {}",
         tgLimit(v.generate), tgLimit(v.extendStatic), tgLimit(v.extendMotion), tgLimit(v.sssWalkStatic),
-        tgLimit(v.sssWalkMotion), tgLimit(v.shade), tgLimit(v.shadowStatic), tgLimit(v.shadowMotion),
+        tgLimit(v.sssWalkMotion), tgLimit(v.connectBase), tgLimit(v.shadeBase), tgLimit(v.shadeLayer),
+        tgLimit(v.shadeTranslucent), tgLimit(v.shade), tgLimit(v.shadowStatic), tgLimit(v.shadowMotion),
         tgLimit(v.guideStatic), tgLimit(v.guideMotion), tgLimit(v.miss));
     return &mVariants.emplace(features, v).first->second;
 }
@@ -2006,13 +2308,17 @@ void MetalWavefrontIntegrator::buildPipelines()
     lib->release();
 }
 
-void MetalWavefrontIntegrator::ensureBuffers(
-    uint32_t width, uint32_t height, uint32_t sharcUpdateDownscale, bool restirEnabled, bool restirBasic)
+void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
+                                             uint32_t height,
+                                             uint32_t sharcUpdateDownscale,
+                                             bool restirEnabled,
+                                             bool restirBasic,
+                                             bool splitBaseNee)
 {
     const uint32_t pixels = width * height;
     sharcUpdateDownscale = std::max(sharcUpdateDownscale, 1u);
     if (pixels == mCapacity && sharcUpdateDownscale == mSharcUpdateDownscale && restirEnabled == mRestirAllocated &&
-        restirBasic == mRestirBasicAllocated && mPathStateBuffer)
+        restirBasic == mRestirBasicAllocated && splitBaseNee == mSplitBaseNeeAllocated && mPathStateBuffer)
     {
         return;
     }
@@ -2043,6 +2349,8 @@ void MetalWavefrontIntegrator::ensureBuffers(
     release(mIorStackBuffer);
     release(mRadianceBuffer);
     release(mGuideRayBuffer);
+    release(mSurfaceGeometryBuffer);
+    release(mBaseLightConnectionBuffer);
     release(mGuideQueueBuffer);
     release(mPathQueueBuffer[0]);
     release(mPathQueueBuffer[1]);
@@ -2071,6 +2379,8 @@ void MetalWavefrontIntegrator::ensureBuffers(
     sz.iorStack = sizeof(IorStack);
     sz.radiance = sizeof(simd::float4);
     sz.guideRay = sizeof(GuideRay);
+    sz.surfaceGeometry = sizeof(SurfaceGeometryPayload);
+    sz.baseLightConnection = sizeof(BaseLightConnectionPayload);
     sz.shadowRay = sizeof(ShadowRay);
     sz.aovSample = sizeof(AovSample);
     sz.restirReservoir = sizeof(RestirReservoir);
@@ -2089,6 +2399,11 @@ void MetalWavefrontIntegrator::ensureBuffers(
     mIorStackBuffer = mDevice->newBuffer(layout.iorStackBytes, MTL::ResourceStorageModePrivate);
     mRadianceBuffer = mDevice->newBuffer(layout.radianceBytes, MTL::ResourceStorageModePrivate);
     mGuideRayBuffer = mDevice->newBuffer(layout.guideRayBytes, MTL::ResourceStorageModePrivate);
+    mSurfaceGeometryBuffer = mDevice->newBuffer(layout.surfaceGeometryBytes, MTL::ResourceStorageModePrivate);
+    if (splitBaseNee)
+    {
+        mBaseLightConnectionBuffer = mDevice->newBuffer(layout.baseLightConnectionBytes, MTL::ResourceStorageModePrivate);
+    }
     mGuideQueueBuffer = mDevice->newBuffer(layout.guideQueueBytes, MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[0] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[1] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
@@ -2134,6 +2449,7 @@ void MetalWavefrontIntegrator::ensureBuffers(
     mSharcUpdateDownscale = sharcUpdateDownscale;
     mRestirAllocated = restirEnabled;
     mRestirBasicAllocated = restirBasic;
+    mSplitBaseNeeAllocated = splitBaseNee;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height, queueBytes() / (1024.0 * 1024.0));
 }

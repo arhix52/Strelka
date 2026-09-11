@@ -23,6 +23,7 @@ public:
     struct Mesh
     {
         uint32_t mTriangleCount = 0;
+        bool mHasVertexColor = false;
     };
 
     /// Per scene curve set: where its segments start in mCurveSegmentBuffer and
@@ -74,6 +75,10 @@ public:
     MTL::Buffer* prevVertexBuffer() const
     {
         return mPrevVertexBuffer;
+    }
+    MTL::Buffer* primitiveDataBuffer() const
+    {
+        return mPrimitiveDataBuffer;
     }
     bool ownsPrevVertexBuffer() const
     {
@@ -149,6 +154,7 @@ private:
     MTL::Buffer* mVertexBuffer = nullptr;
     MTL::Buffer* mIndexBuffer = nullptr;
     MTL::Buffer* mPrevVertexBuffer = nullptr;
+    MTL::Buffer* mPrimitiveDataBuffer = nullptr;
     bool mOwnsPrevVertexBuffer = false;
     // Scene arrays taken so a no-copy wrap can keep them alive after the scene
     // has dropped its own copy. Empty when the wrap aliased the scene, or when
@@ -172,4 +178,3 @@ private:
 };
 
 } // namespace oka::metal
-

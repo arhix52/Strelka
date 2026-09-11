@@ -21,6 +21,8 @@ struct WavefrontElementSizes
     size_t iorStack = 0;
     size_t radiance = 0; // float4
     size_t guideRay = 0;
+    size_t surfaceGeometry = 0;
+    size_t baseLightConnection = 0;
     size_t shadowRay = 0;
     size_t aovSample = 0;
     size_t restirReservoir = 0;
@@ -39,6 +41,8 @@ struct WavefrontBufferLayout
     size_t iorStackBytes = 0;
     size_t radianceBytes = 0;
     size_t guideRayBytes = 0;
+    size_t surfaceGeometryBytes = 0;
+    size_t baseLightConnectionBytes = 0;
     size_t guideQueueBytes = 0;
     size_t pathQueueBytes = 0; // one ping-pong queue
     size_t controlBytes = 0;
@@ -94,8 +98,9 @@ inline constexpr uint32_t kWavefrontStageDiagnosticBase = kWavefrontStageBreadcr
 inline constexpr uint32_t kWavefrontStageDiagnosticBounces = 96;
 inline constexpr uint32_t kWavefrontStageDiagnosticLanes = 4;
 inline constexpr uint32_t kWavefrontStageDiagnosticLaneUints = 11;
+inline constexpr uint32_t kWavefrontStageDiagnosticSssCountOffset = 1;
 inline constexpr uint32_t kWavefrontStageDiagnosticStride =
-    1 + kWavefrontStageDiagnosticLanes * kWavefrontStageDiagnosticLaneUints;
+    2 + kWavefrontStageDiagnosticLanes * kWavefrontStageDiagnosticLaneUints;
 inline constexpr uint32_t kWavefrontStageStatsUints =
     kWavefrontStageDiagnosticBase + kWavefrontStageDiagnosticBounces * kWavefrontStageDiagnosticStride;
 
@@ -118,6 +123,8 @@ inline WavefrontBufferLayout wavefrontBufferLayout(uint32_t width,
     layout.iorStackBytes = (size_t)pixels * sz.iorStack;
     layout.radianceBytes = (size_t)pixels * sz.radiance;
     layout.guideRayBytes = (size_t)pixels * sz.guideRay;
+    layout.surfaceGeometryBytes = (size_t)pixels * sz.surfaceGeometry;
+    layout.baseLightConnectionBytes = (size_t)pixels * sz.baseLightConnection;
     layout.guideQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.pathQueueBytes = (size_t)pixels * sizeof(uint32_t);
     layout.controlBytes = (size_t)kWavefrontControlUints * sizeof(uint32_t);

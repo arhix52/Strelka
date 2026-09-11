@@ -380,29 +380,115 @@ DEVICE_FUNC float openpbr_bsdf_pdf(const THREAD_REF OpenPBR_PreparedBsdf& prepar
 // Fuzz->Coat->Aggregate tree keeps hundreds of bytes live for fields that are
 // provably never read. Retain the upstream prepared values and math, but only
 // the three active base lobes and the reflection-only specular fields.
+struct OpenPBR_BaseParams
+{
+    OpenPBRColor base_color;
+    float base_weight;
+    float base_diffuse_roughness;
+    float base_metalness;
+    float specular_weight;
+    float specular_roughness;
+    OpenPBRColor specular_color;
+    float specular_roughness_anisotropy;
+    float specular_ior;
+    float specular_anisotropy_rotation_cos;
+    float specular_anisotropy_rotation_sin;
+};
+
+DEVICE_FUNC bool openpbr_has_smooth_lobe(const THREAD_REF OpenPBR_BaseParams& p)
+{
+    if (p.base_weight * (1.0f - p.base_metalness) > 0.0f)
+    {
+        return true;
+    }
+    return alpha_from_roughness(p.specular_roughness) >= BSDF_DELTA_ALPHA;
+}
+
+struct OpenPBR_BaseMicrofacetDistribution
+{
+    half2 alpha;
+    half3 tangent;
+    half3 bitangent;
+    half3 normal;
+    half isotropic_alpha;
+};
+
+// OpenPBR colour parameters are normalized. Store the long-lived prepared
+// colours as UNORM16 rather than half: this is both smaller than float3 and
+// about 64x more precise near one than binary16. Packing two channels into one
+// uint also makes the reduced live state explicit to the Metal compiler.
+DEVICE_FUNC uint openpbr_pack_base_unorm2(float2 value)
+{
+    const ushort2 quantized = ushort2(round(saturate(value) * 65535.0f));
+    return as_type<uint>(quantized);
+}
+
+DEVICE_FUNC float2 openpbr_unpack_base_unorm2(uint value)
+{
+    return float2(as_type<ushort2>(value)) * (1.0f / 65535.0f);
+}
+
+DEVICE_FUNC uint2 openpbr_pack_base_color(float3 value)
+{
+    return uint2(openpbr_pack_base_unorm2(value.xy), openpbr_pack_base_unorm2(float2(value.z, 0.0f)));
+}
+
+DEVICE_FUNC float3 openpbr_unpack_base_color(uint2 value)
+{
+    return float3(openpbr_unpack_base_unorm2(value.x), openpbr_unpack_base_unorm2(value.y).x);
+}
+
+// Lobe weights are consumed only after division by their sum: they are a
+// categorical distribution, not radiometric values. Store its two cumulative
+// thresholds instead of three unbounded floats. The first threshold keeps 16
+// bits, the second 15 bits plus a validity bit; both are much more precise over
+// [0,1] than half near one and have no reciprocal singularity at zero.
+DEVICE_FUNC uint openpbr_pack_base_lobe_thresholds(float specular, float metalMms, float diffuse)
+{
+    const float total = specular + metalMms + diffuse;
+    if (!(total > OpenPBR_FloatMin))
+    {
+        return 0u;
+    }
+    const float inverseTotal = 1.0f / total;
+    const uint specularThreshold = uint(round(saturate(specular * inverseTotal) * 65535.0f));
+    const uint metalThreshold = uint(round(saturate((specular + metalMms) * inverseTotal) * 32767.0f));
+    return 0x80000000u | (metalThreshold << 16u) | specularThreshold;
+}
+
+DEVICE_FUNC bool openpbr_unpack_base_lobe_weights(uint packed, THREAD_REF float3& weights)
+{
+    if ((packed & 0x80000000u) == 0u)
+    {
+        weights = float3(0.0f);
+        return false;
+    }
+    const float specular = float(packed & 0xffffu) * (1.0f / 65535.0f);
+    const float specularAndMetal = max(float((packed >> 16u) & 0x7fffu) * (1.0f / 32767.0f), specular);
+    weights = float3(specular, specularAndMetal - specular, 1.0f - specularAndMetal);
+    return true;
+}
+
 struct OpenPBR_BaseSpecularLobe
 {
-    OpenPBR_AnisotropicGGXSmithVNDFMicrofacetDistribution microfacet_distr;
-    vec3 eta_t_over_eta_i_for_opaque_part;
-    vec3 scale_for_reflection_for_opaque_part;
-    vec3 f0_for_metal;
-    vec3 f82_tint_for_metal;
-    float metal_amount;
+    OpenPBR_BaseMicrofacetDistribution microfacet_distr;
+    half eta_t_over_eta_i_for_opaque_part;
+    uint2 specular_color;
+    uint2 f0_for_metal;
+    half dielectric_amount;
+    half metal_amount;
 };
 
 struct OpenPBR_BaseMetalMmsLobe
 {
-    vec3 scale;
-    float alpha;
+    uint2 scale;
     float energy_complement_idotn;
 };
 
 struct OpenPBR_BaseDiffuseLobe
 {
-    vec3 diffuse_albedo;
+    uint2 diffuse_albedo;
     float diffuse_roughness;
-    float specular_alpha;
-    float specular_eta_t_over_eta_i;
     float cached_specular_energy_compensation;
 };
 
@@ -411,22 +497,41 @@ struct OpenPBR_BasePreparedBsdf
     OpenPBR_BaseSpecularLobe specular_lobe;
     OpenPBR_BaseMetalMmsLobe metal_mms_lobe;
     OpenPBR_BaseDiffuseLobe diffuse_lobe;
-    float specular_weight;
-    float metal_mms_weight;
-    float diffuse_weight;
+    uint lobe_thresholds;
 };
 static_assert(sizeof(OpenPBR_PreparedBsdf) == 752, "Unexpected packed Metal OpenPBR layout");
-static_assert(sizeof(OpenPBR_BasePreparedBsdf) == 168, "Metal base OpenPBR state grew unexpectedly");
+static_assert(sizeof(OpenPBR_BaseParams) == 60, "Metal base OpenPBR inputs grew unexpectedly");
+static_assert(sizeof(OpenPBR_BasePreparedBsdf) <= 128, "Metal base OpenPBR state grew unexpectedly");
+
+DEVICE_FUNC OpenPBR_AnisotropicGGXSmithVNDFMicrofacetDistribution
+openpbr_expand_base_distribution(const THREAD_REF OpenPBR_BaseMicrofacetDistribution& compact)
+{
+    OpenPBR_AnisotropicGGXSmithVNDFMicrofacetDistribution result;
+    result.alpha = vec2(compact.alpha);
+    result.basis_ff.t = vec3(compact.tangent);
+    result.basis_ff.b = vec3(compact.bitangent);
+    result.basis_ff.n = vec3(compact.normal);
+    result.isotropic_alpha = float(compact.isotropic_alpha);
+    return result;
+}
 
 DEVICE_FUNC OpenPBR_BaseSpecularLobe
 openpbr_compact_base_specular(const THREAD_REF OpenPBR_ComprehensiveMicrofacetReflectionTransmissionLobe& lobe)
 {
     OpenPBR_BaseSpecularLobe result;
-    result.microfacet_distr = lobe.microfacet_distr;
-    result.eta_t_over_eta_i_for_opaque_part = lobe.refl_trans_coeff.eta_t_over_eta_i_for_opaque_part;
-    result.scale_for_reflection_for_opaque_part = lobe.refl_trans_coeff.scale_for_reflection_for_opaque_part;
-    result.f0_for_metal = lobe.refl_trans_coeff.f0_for_metal;
-    result.f82_tint_for_metal = lobe.refl_trans_coeff.f82_tint_for_metal;
+    result.microfacet_distr.alpha = half2(lobe.microfacet_distr.alpha);
+    result.microfacet_distr.tangent = half3(lobe.microfacet_distr.basis_ff.t);
+    result.microfacet_distr.bitangent = half3(lobe.microfacet_distr.basis_ff.b);
+    result.microfacet_distr.normal = half3(lobe.microfacet_distr.basis_ff.n);
+    result.microfacet_distr.isotropic_alpha = half(lobe.microfacet_distr.isotropic_alpha);
+    result.eta_t_over_eta_i_for_opaque_part = lobe.refl_trans_coeff.eta_t_over_eta_i_for_opaque_part.x;
+    const vec3 specularColor = lobe.refl_trans_coeff.f82_tint_for_metal;
+    result.specular_color = openpbr_pack_base_color(specularColor);
+    result.f0_for_metal = openpbr_pack_base_color(lobe.refl_trans_coeff.f0_for_metal);
+    const float specularMax = max(specularColor.x, max(specularColor.y, specularColor.z));
+    const vec3 reflectionScale = lobe.refl_trans_coeff.scale_for_reflection_for_opaque_part;
+    const float scaleMax = max(reflectionScale.x, max(reflectionScale.y, reflectionScale.z));
+    result.dielectric_amount = specularMax > OpenPBR_FloatMin ? scaleMax / specularMax : 0.0f;
     result.metal_amount = lobe.refl_trans_coeff.metal_amount;
     return result;
 }
@@ -435,8 +540,7 @@ DEVICE_FUNC OpenPBR_BaseMetalMmsLobe
 openpbr_compact_base_metal_mms(const THREAD_REF OpenPBR_MetalMicrofacetMultipleScatteringLobe& lobe)
 {
     OpenPBR_BaseMetalMmsLobe result;
-    result.alpha = lobe.alpha;
-    result.scale = lobe.scale;
+    result.scale = openpbr_pack_base_color(lobe.scale);
     result.energy_complement_idotn = lobe.energy_complement_idotn;
     return result;
 }
@@ -445,10 +549,8 @@ DEVICE_FUNC OpenPBR_BaseDiffuseLobe
 openpbr_compact_base_diffuse(const THREAD_REF OpenPBR_EnergyConservingRoughDiffuseLobe& lobe)
 {
     OpenPBR_BaseDiffuseLobe result;
-    result.diffuse_albedo = lobe.diffuse_albedo;
+    result.diffuse_albedo = openpbr_pack_base_color(lobe.diffuse_albedo);
     result.diffuse_roughness = lobe.diffuse_roughness;
-    result.specular_alpha = lobe.specular_alpha;
-    result.specular_eta_t_over_eta_i = lobe.specular_eta_t_over_eta_i;
     result.cached_specular_energy_compensation = lobe.cached_specular_energy_compensation;
     return result;
 }
@@ -460,30 +562,103 @@ DEVICE_FUNC OpenPBR_BasePreparedBsdf openpbr_compact_base(const THREAD_REF OpenP
     result.specular_lobe = openpbr_compact_base_specular(base.specular_lobe);
     result.metal_mms_lobe = openpbr_compact_base_metal_mms(base.metal_mms_lobe);
     result.diffuse_lobe = openpbr_compact_base_diffuse(base.diffuse_lobe);
-    result.specular_weight = base.lobe_weights[OpenPBR_SpecularLobeIndex];
-    result.metal_mms_weight = base.lobe_weights[OpenPBR_MetalMMSLobeIndex];
-    result.diffuse_weight = base.lobe_weights[OpenPBR_DiffuseLobeIndex];
+    result.lobe_thresholds = openpbr_pack_base_lobe_thresholds(base.lobe_weights[OpenPBR_SpecularLobeIndex],
+                                                               base.lobe_weights[OpenPBR_MetalMMSLobeIndex],
+                                                               base.lobe_weights[OpenPBR_DiffuseLobeIndex]);
     return result;
 }
 
-// Keep the full prepared tree inside the initializer. The base shade variant
-// retains only the compact return value across NEE and BSDF sampling.
-DEVICE_FUNC OpenPBR_BasePreparedBsdf openpbr_prepare_base_at(const THREAD_REF OpenPBRParams& p,
+// Prepare the reflection-only base directly. Building OpenPBR_PreparedBsdf and
+// compacting it afterwards preserves the final 168-byte value, but still makes
+// the compiler materialise the 752-byte layered tree at the peak of this hot
+// path. The base bucket guarantees that coat, fuzz, thin film, transmission and
+// subsurface are absent, so the upstream equations reduce to these three lobes.
+DEVICE_FUNC OpenPBR_BasePreparedBsdf openpbr_prepare_base_at(const THREAD_REF OpenPBR_BaseParams& p,
                                                              const THREAD_REF SurfaceInteraction& si,
                                                              float3 path_throughput)
 {
-    const OpenPBR_PreparedBsdf prepared = openpbr_prepare_surface_at(p, si, path_throughput);
-    return openpbr_compact_base(prepared);
+    OpenPBR_BasePreparedBsdf result;
+
+    OpenPBR_Basis basis = openpbr_make_basis(safe_normalize(si.shading_normal), si.tangent, si.bitangent);
+    openpbr_apply_anisotropy_rotation(
+        basis, make_float2(p.specular_anisotropy_rotation_cos, p.specular_anisotropy_rotation_sin));
+    if (dot(si.wo, basis.n) < 0.0f)
+    {
+        openpbr_invert_basis(basis);
+    }
+    const float3 normalFf = basis.n;
+    const float idotn = dot(si.wo, normalFf);
+
+    const float exteriorIor = si.exterior_ior > 0.0f ? si.exterior_ior : 1.0f;
+    const float relativeIor = openpbr_apply_specular_weight_to_ior(p.specular_ior / exteriorIor, p.specular_weight);
+    const float specularAlpha = openpbr_square(p.specular_roughness);
+    const float2 anisotropicAlpha =
+        openpbr_compute_anisotropic_alpha(specularAlpha, p.specular_roughness_anisotropy, false, 1.0e-6f);
+
+    const float dielectric = 1.0f - p.base_metalness;
+    const float darkenedMetal = p.base_metalness * p.specular_weight;
+    const float3 weightedBaseColor = openpbr_color_to_float3(p.base_color) * p.base_weight;
+    const float3 specularColor = openpbr_color_to_float3(p.specular_color);
+    float3 metalAverageFresnel = float3(1.0f);
+    if (OPENPBR_GET_SPECIALIZATION_CONSTANT(EnableMetallic))
+    {
+        metalAverageFresnel = openpbr_metal_average_fresnel_with_f82_tint(weightedBaseColor, specularColor);
+    }
+
+    result.specular_lobe.microfacet_distr.alpha = half2(anisotropicAlpha);
+    result.specular_lobe.microfacet_distr.tangent = half3(basis.t);
+    result.specular_lobe.microfacet_distr.bitangent = half3(basis.b);
+    result.specular_lobe.microfacet_distr.normal = half3(basis.n);
+    result.specular_lobe.microfacet_distr.isotropic_alpha = half(specularAlpha);
+    result.specular_lobe.eta_t_over_eta_i_for_opaque_part = relativeIor;
+    result.specular_lobe.specular_color = openpbr_pack_base_color(specularColor);
+    result.specular_lobe.f0_for_metal = openpbr_pack_base_color(weightedBaseColor);
+    result.specular_lobe.dielectric_amount = dielectric;
+    result.specular_lobe.metal_amount = darkenedMetal;
+
+    float3 specularEstimate = specularColor * dielectric * openpbr_fresnel_rgb(float3(relativeIor), idotn, false);
+    if (OPENPBR_GET_SPECIALIZATION_CONSTANT(EnableMetallic))
+    {
+        specularEstimate += darkenedMetal * openpbr_metal_schlick_with_f82_tint(weightedBaseColor, specularColor, idotn);
+    }
+    const float specularWeight = openpbr_max_component_of_throughput_weighted_color(path_throughput, specularEstimate);
+
+    const float3 metalMmsScale = openpbr_square(metalAverageFresnel) * darkenedMetal;
+    result.metal_mms_lobe.scale = openpbr_pack_base_color(metalMmsScale);
+    result.metal_mms_lobe.energy_complement_idotn =
+        specularAlpha < OpenPBR_MinAlphaWithVisibleEnergyLoss ?
+            0.0f :
+            openpbr_look_up_ideal_metal_energy_complement(specularAlpha, idotn);
+    const float metalMmsWeight = specularAlpha < OpenPBR_MinAlphaWithVisibleEnergyLoss ?
+                                     0.0f :
+                                     openpbr_max_component_of_throughput_weighted_color(path_throughput, metalMmsScale) *
+                                         result.metal_mms_lobe.energy_complement_idotn;
+
+    const float3 diffuseAlbedo = weightedBaseColor * dielectric;
+    result.diffuse_lobe.diffuse_albedo = openpbr_pack_base_color(diffuseAlbedo);
+    result.diffuse_lobe.diffuse_roughness = p.base_diffuse_roughness;
+    const float untintedNumerator =
+        openpbr_look_up_opaque_dielectric_energy_complement(relativeIor, specularAlpha, idotn);
+    const float untintedDenominator =
+        openpbr_look_up_opaque_dielectric_average_energy_complement(relativeIor, specularAlpha);
+    result.diffuse_lobe.cached_specular_energy_compensation =
+        untintedNumerator / openpbr_clamp_average_energy_complement_above_zero(untintedDenominator);
+    const float diffuseWeight = openpbr_max_component_of_throughput_weighted_color(
+        path_throughput, diffuseAlbedo * result.diffuse_lobe.cached_specular_energy_compensation);
+    result.lobe_thresholds = openpbr_pack_base_lobe_thresholds(specularWeight, metalMmsWeight, diffuseWeight);
+
+    return result;
 }
 
 DEVICE_FUNC vec3 openpbr_base_reflection_coefficient(const THREAD_REF OpenPBR_BaseSpecularLobe& lobe, float idoth)
 {
-    vec3 result = lobe.scale_for_reflection_for_opaque_part *
-                  openpbr_fresnel_rgb(lobe.eta_t_over_eta_i_for_opaque_part, idoth, false);
+    const vec3 specularColor = openpbr_unpack_base_color(lobe.specular_color);
+    vec3 result = specularColor * float(lobe.dielectric_amount) *
+                  openpbr_fresnel_rgb(vec3(float(lobe.eta_t_over_eta_i_for_opaque_part)), idoth, false);
     if (OPENPBR_GET_SPECIALIZATION_CONSTANT(EnableMetallic))
     {
-        result +=
-            lobe.metal_amount * openpbr_metal_schlick_with_f82_tint(lobe.f0_for_metal, lobe.f82_tint_for_metal, idoth);
+        result += float(lobe.metal_amount) * openpbr_metal_schlick_with_f82_tint(
+                                                 openpbr_unpack_base_color(lobe.f0_for_metal), specularColor, idoth);
     }
     return result;
 }
@@ -492,7 +667,9 @@ DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_calculate_lobe_value(const THREAD_RE
                                                                  float3 view_direction,
                                                                  float3 light_direction)
 {
-    const float3 normalFf = lobe.microfacet_distr.basis_ff.n;
+    const OpenPBR_AnisotropicGGXSmithVNDFMicrofacetDistribution distribution =
+        openpbr_expand_base_distribution(lobe.microfacet_distr);
+    const float3 normalFf = distribution.basis_ff.n;
     const float idotn = dot(normalFf, view_direction);
     const float odotn = dot(normalFf, light_direction);
     if (idotn * odotn <= 0.0f)
@@ -502,9 +679,9 @@ DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_calculate_lobe_value(const THREAD_RE
 
     const vec3 half_vector = openpbr_fast_normalize(view_direction + light_direction);
     const float idoth = dot(view_direction, half_vector);
-    const float D = openpbr_eval_ggx(lobe.microfacet_distr, half_vector, normalFf);
+    const float D = openpbr_eval_ggx(distribution, half_vector, normalFf);
     const vec3 F = openpbr_base_reflection_coefficient(lobe, abs(idoth));
-    const float G = openpbr_eval_smith_g2(lobe.microfacet_distr, view_direction, light_direction, idotn, odotn);
+    const float G = openpbr_eval_smith_g2(distribution, view_direction, light_direction, idotn, odotn);
     return openpbr_make_diffuse_specular_from_specular(G * D * (1.0f / (4.0f * idotn)) * F);
 }
 
@@ -512,7 +689,9 @@ DEVICE_FUNC float openpbr_calculate_lobe_pdf(const THREAD_REF OpenPBR_BaseSpecul
                                              float3 view_direction,
                                              float3 light_direction)
 {
-    const float3 normalFf = lobe.microfacet_distr.basis_ff.n;
+    const OpenPBR_AnisotropicGGXSmithVNDFMicrofacetDistribution distribution =
+        openpbr_expand_base_distribution(lobe.microfacet_distr);
+    const float3 normalFf = distribution.basis_ff.n;
     const float idotn = dot(normalFf, view_direction);
     const float odotn = dot(normalFf, light_direction);
     if (idotn * odotn <= 0.0f)
@@ -527,8 +706,8 @@ DEVICE_FUNC float openpbr_calculate_lobe_pdf(const THREAD_REF OpenPBR_BaseSpecul
     {
         return 0.0f;
     }
-    const float D = openpbr_eval_ggx(lobe.microfacet_distr, half_vector, normalFf);
-    const float G = openpbr_eval_smith_g1(lobe.microfacet_distr, view_direction, idotn);
+    const float D = openpbr_eval_ggx(distribution, half_vector, normalFf);
+    const float G = openpbr_eval_smith_g1(distribution, view_direction, idotn);
     return G * D * idoth / (4.0f * odoth * idotn);
 }
 
@@ -540,9 +719,11 @@ DEVICE_FUNC bool openpbr_sample_lobe(const THREAD_REF OpenPBR_BaseSpecularLobe& 
                                      THREAD_REF float& pdf,
                                      THREAD_REF OpenPBR_BsdfLobeType& sampled_type)
 {
-    const float3 normalFf = lobe.microfacet_distr.basis_ff.n;
+    const OpenPBR_AnisotropicGGXSmithVNDFMicrofacetDistribution distribution =
+        openpbr_expand_base_distribution(lobe.microfacet_distr);
+    const float3 normalFf = distribution.basis_ff.n;
     const float idotn = dot(view_direction, normalFf);
-    const vec3 half_vector = openpbr_sample_ggx_smith_vndf(lobe.microfacet_distr, view_direction, normalFf, rand.xy);
+    const vec3 half_vector = openpbr_sample_ggx_smith_vndf(distribution, view_direction, normalFf, rand.xy);
     const float idoth = dot(view_direction, half_vector);
     if (idoth < 0.0f)
     {
@@ -560,90 +741,107 @@ DEVICE_FUNC bool openpbr_sample_lobe(const THREAD_REF OpenPBR_BaseSpecularLobe& 
 
     const float odoth = dot(light_direction, half_vector);
     const vec3 F = openpbr_base_reflection_coefficient(lobe, abs(idoth));
-    const float GShadowing = openpbr_eval_smith_g1(lobe.microfacet_distr, light_direction, odotn);
+    const float GShadowing = openpbr_eval_smith_g1(distribution, light_direction, odotn);
     weight = openpbr_make_diffuse_specular_from_specular(F * GShadowing);
-    const float D = openpbr_eval_ggx(lobe.microfacet_distr, half_vector, normalFf);
+    const float D = openpbr_eval_ggx(distribution, half_vector, normalFf);
     if (D <= 0.0f)
     {
         openpbr_clear_lobe_sampling_output(light_direction, weight, pdf, sampled_type);
         return false;
     }
-    const float GMasking = openpbr_eval_smith_g1(lobe.microfacet_distr, view_direction, idotn);
+    const float GMasking = openpbr_eval_smith_g1(distribution, view_direction, idotn);
     pdf = D * GMasking * idoth / (4.0f * odoth * idotn);
     sampled_type = OpenPBR_BsdfLobeTypeGlossy | OpenPBR_BsdfLobeTypeReflection;
     return true;
 }
 
 DEVICE_FUNC OpenPBR_MetalMicrofacetMultipleScatteringLobe
-openpbr_expand_base_lobe(const THREAD_REF OpenPBR_BaseMetalMmsLobe& lobe, float3 normalFf)
+openpbr_expand_base_lobe(const THREAD_REF OpenPBR_BaseMetalMmsLobe& lobe, float3 normalFf, float specularAlpha)
 {
     OpenPBR_MetalMicrofacetMultipleScatteringLobe result;
     result.normal_ff = normalFf;
-    result.alpha = lobe.alpha;
-    result.scale = lobe.scale;
+    result.alpha = specularAlpha;
+    result.scale = openpbr_unpack_base_color(lobe.scale);
     result.energy_complement_idotn = lobe.energy_complement_idotn;
     return result;
 }
 
-DEVICE_FUNC OpenPBR_EnergyConservingRoughDiffuseLobe
-openpbr_expand_base_lobe(const THREAD_REF OpenPBR_BaseDiffuseLobe& lobe, float3 normalFf)
+DEVICE_FUNC OpenPBR_EnergyConservingRoughDiffuseLobe openpbr_expand_base_lobe(
+    const THREAD_REF OpenPBR_BaseDiffuseLobe& lobe, float3 normalFf, float specularAlpha, float relativeIor)
 {
     OpenPBR_EnergyConservingRoughDiffuseLobe result;
     result.normal_ff = normalFf;
-    result.diffuse_albedo = lobe.diffuse_albedo;
+    result.diffuse_albedo = openpbr_unpack_base_color(lobe.diffuse_albedo);
     result.diffuse_roughness = lobe.diffuse_roughness;
-    result.specular_alpha = lobe.specular_alpha;
-    result.specular_eta_t_over_eta_i = lobe.specular_eta_t_over_eta_i;
+    result.specular_alpha = specularAlpha;
+    result.specular_eta_t_over_eta_i = relativeIor;
     result.cached_specular_energy_compensation = lobe.cached_specular_energy_compensation;
     return result;
 }
 
-#    define STRELKA_OPENPBR_BASE_LOBE_WRAPPERS(CompactType, FullType)                                                  \
-        DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_calculate_lobe_value(                                              \
-            const THREAD_REF CompactType& lobe, float3 viewDirection, float3 lightDirection, float3 normalFf)          \
-        {                                                                                                              \
-            const FullType expanded = openpbr_expand_base_lobe(lobe, normalFf);                                        \
-            return openpbr_calculate_lobe_value(expanded, viewDirection, lightDirection);                              \
-        }                                                                                                              \
-        DEVICE_FUNC float openpbr_calculate_lobe_pdf(                                                                  \
-            const THREAD_REF CompactType& lobe, float3 viewDirection, float3 lightDirection, float3 normalFf)          \
-        {                                                                                                              \
-            const FullType expanded = openpbr_expand_base_lobe(lobe, normalFf);                                        \
-            return openpbr_calculate_lobe_pdf(expanded, viewDirection, lightDirection);                                \
-        }                                                                                                              \
-        DEVICE_FUNC bool openpbr_sample_lobe(const THREAD_REF CompactType& lobe, vec3 rand, vec3 viewDirection,        \
-                                             THREAD_REF vec3& lightDirection,                                          \
-                                             THREAD_REF OpenPBR_DiffuseSpecular& weight, THREAD_REF float& pdf,        \
-                                             THREAD_REF OpenPBR_BsdfLobeType& sampledType, float3 normalFf)            \
-        {                                                                                                              \
-            const FullType expanded = openpbr_expand_base_lobe(lobe, normalFf);                                        \
-            return openpbr_sample_lobe(expanded, rand, viewDirection, lightDirection, weight, pdf, sampledType);       \
+#    define STRELKA_COMMA ,
+#    define STRELKA_OPENPBR_BASE_LOBE_WRAPPERS(CompactType, FullType, ExtraDecl, ExtraArgs)                             \
+        DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_calculate_lobe_value(                                               \
+            const THREAD_REF CompactType& lobe, float3 viewDirection, float3 lightDirection, float3 normalFf ExtraDecl) \
+        {                                                                                                               \
+            const FullType expanded = openpbr_expand_base_lobe(lobe, normalFf ExtraArgs);                               \
+            return openpbr_calculate_lobe_value(expanded, viewDirection, lightDirection);                               \
+        }                                                                                                               \
+        DEVICE_FUNC float openpbr_calculate_lobe_pdf(const THREAD_REF CompactType& lobe, float3 viewDirection,          \
+                                                     float3 lightDirection, float3 normalFf ExtraDecl)                  \
+        {                                                                                                               \
+            const FullType expanded = openpbr_expand_base_lobe(lobe, normalFf ExtraArgs);                               \
+            return openpbr_calculate_lobe_pdf(expanded, viewDirection, lightDirection);                                 \
+        }                                                                                                               \
+        DEVICE_FUNC bool openpbr_sample_lobe(const THREAD_REF CompactType& lobe, vec3 rand, vec3 viewDirection,         \
+                                             THREAD_REF vec3& lightDirection,                                           \
+                                             THREAD_REF OpenPBR_DiffuseSpecular& weight, THREAD_REF float& pdf,         \
+                                             THREAD_REF OpenPBR_BsdfLobeType& sampledType, float3 normalFf ExtraDecl)   \
+        {                                                                                                               \
+            const FullType expanded = openpbr_expand_base_lobe(lobe, normalFf ExtraArgs);                               \
+            return openpbr_sample_lobe(expanded, rand, viewDirection, lightDirection, weight, pdf, sampledType);        \
         }
 
-STRELKA_OPENPBR_BASE_LOBE_WRAPPERS(OpenPBR_BaseMetalMmsLobe, OpenPBR_MetalMicrofacetMultipleScatteringLobe)
-STRELKA_OPENPBR_BASE_LOBE_WRAPPERS(OpenPBR_BaseDiffuseLobe, OpenPBR_EnergyConservingRoughDiffuseLobe)
+STRELKA_OPENPBR_BASE_LOBE_WRAPPERS(OpenPBR_BaseMetalMmsLobe,
+                                   OpenPBR_MetalMicrofacetMultipleScatteringLobe,
+                                   STRELKA_COMMA float specularAlpha,
+                                   STRELKA_COMMA specularAlpha)
+STRELKA_OPENPBR_BASE_LOBE_WRAPPERS(OpenPBR_BaseDiffuseLobe,
+                                   OpenPBR_EnergyConservingRoughDiffuseLobe,
+                                   STRELKA_COMMA float specularAlpha STRELKA_COMMA float relativeIor,
+                                   STRELKA_COMMA specularAlpha STRELKA_COMMA relativeIor)
 #    undef STRELKA_OPENPBR_BASE_LOBE_WRAPPERS
+#    undef STRELKA_COMMA
 
 DEVICE_FUNC OpenPBR_DiffuseSpecular openpbr_base_value(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared,
                                                        float3 viewDirection,
                                                        float3 wi)
 {
-    const float3 normalFf = prepared.specular_lobe.microfacet_distr.basis_ff.n;
+    const float3 normalFf = float3(prepared.specular_lobe.microfacet_distr.normal);
+    const float specularAlpha = float(prepared.specular_lobe.microfacet_distr.isotropic_alpha);
+    const float relativeIor = float(prepared.specular_lobe.eta_t_over_eta_i_for_opaque_part);
     OpenPBR_DiffuseSpecular result = openpbr_calculate_lobe_value(prepared.specular_lobe, viewDirection, wi);
     result = openpbr_add_diffuse_specular(
-        result, openpbr_calculate_lobe_value(prepared.metal_mms_lobe, viewDirection, wi, normalFf));
-    return openpbr_add_diffuse_specular(
-        result, openpbr_calculate_lobe_value(prepared.diffuse_lobe, viewDirection, wi, normalFf));
+        result, openpbr_calculate_lobe_value(prepared.metal_mms_lobe, viewDirection, wi, normalFf, specularAlpha));
+    return openpbr_add_diffuse_specular(result, openpbr_calculate_lobe_value(prepared.diffuse_lobe, viewDirection, wi,
+                                                                             normalFf, specularAlpha, relativeIor));
 }
 
 DEVICE_FUNC float openpbr_base_pdf(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared, float3 viewDirection, float3 wi)
 {
-    const float3 normalFf = prepared.specular_lobe.microfacet_distr.basis_ff.n;
-    float sum = prepared.specular_weight * openpbr_calculate_lobe_pdf(prepared.specular_lobe, viewDirection, wi);
-    sum += prepared.metal_mms_weight * openpbr_calculate_lobe_pdf(prepared.metal_mms_lobe, viewDirection, wi, normalFf);
-    sum += prepared.diffuse_weight * openpbr_calculate_lobe_pdf(prepared.diffuse_lobe, viewDirection, wi, normalFf);
-    const float total = prepared.specular_weight + prepared.metal_mms_weight + prepared.diffuse_weight;
-    return total > 0.0f ? sum / total : 0.0f;
+    float3 weights;
+    if (!openpbr_unpack_base_lobe_weights(prepared.lobe_thresholds, weights))
+    {
+        return 0.0f;
+    }
+    const float3 normalFf = float3(prepared.specular_lobe.microfacet_distr.normal);
+    const float specularAlpha = float(prepared.specular_lobe.microfacet_distr.isotropic_alpha);
+    const float relativeIor = float(prepared.specular_lobe.eta_t_over_eta_i_for_opaque_part);
+    float sum = weights.x * openpbr_calculate_lobe_pdf(prepared.specular_lobe, viewDirection, wi);
+    sum += weights.y * openpbr_calculate_lobe_pdf(prepared.metal_mms_lobe, viewDirection, wi, normalFf, specularAlpha);
+    sum += weights.z *
+           openpbr_calculate_lobe_pdf(prepared.diffuse_lobe, viewDirection, wi, normalFf, specularAlpha, relativeIor);
+    return sum;
 }
 
 DEVICE_FUNC BsdfEvalResult openpbr_bsdf_eval(const THREAD_REF OpenPBR_BasePreparedBsdf& prepared,
@@ -669,30 +867,31 @@ DEVICE_FUNC BsdfSampleResult openpbr_bsdf_sample(const THREAD_REF OpenPBR_BasePr
     result.bsdf_over_pdf = float3(0.0f);
     result.event_type = BSDF_EVENT_ABSORB;
 
-    const float total = prepared.specular_weight + prepared.metal_mms_weight + prepared.diffuse_weight;
-    if (!(total > OpenPBR_FloatMin))
+    float3 lobeWeights;
+    if (!openpbr_unpack_base_lobe_weights(prepared.lobe_thresholds, lobeWeights))
     {
         return result;
     }
 
-    float selector = xi.x * total;
+    const float specularAndMetal = lobeWeights.x + lobeWeights.y;
+    float selector = xi.x;
     float selectedWeight;
     uint selectedLobe;
-    if (selector < prepared.specular_weight)
+    if (selector < lobeWeights.x)
     {
-        selectedWeight = prepared.specular_weight;
+        selectedWeight = lobeWeights.x;
         selectedLobe = 0u;
     }
-    else if (selector < prepared.specular_weight + prepared.metal_mms_weight)
+    else if (selector < specularAndMetal)
     {
-        selector -= prepared.specular_weight;
-        selectedWeight = prepared.metal_mms_weight;
+        selector -= lobeWeights.x;
+        selectedWeight = lobeWeights.y;
         selectedLobe = 1u;
     }
     else
     {
-        selector -= prepared.specular_weight + prepared.metal_mms_weight;
-        selectedWeight = prepared.diffuse_weight;
+        selector -= specularAndMetal;
+        selectedWeight = lobeWeights.z;
         selectedLobe = 2u;
     }
     selector /= selectedWeight;
@@ -703,7 +902,9 @@ DEVICE_FUNC BsdfSampleResult openpbr_bsdf_sample(const THREAD_REF OpenPBR_BasePr
     float pdf = 0.0f;
     OpenPBR_BsdfLobeType sampledType = OpenPBR_BsdfLobeTypeNone;
     const vec3 rand = float3(selector, xi.y, xi.z);
-    const float3 normalFf = prepared.specular_lobe.microfacet_distr.basis_ff.n;
+    const float3 normalFf = float3(prepared.specular_lobe.microfacet_distr.normal);
+    const float specularAlpha = float(prepared.specular_lobe.microfacet_distr.isotropic_alpha);
+    const float relativeIor = float(prepared.specular_lobe.eta_t_over_eta_i_for_opaque_part);
     bool valid;
     if (selectedLobe == 0u)
     {
@@ -711,11 +912,13 @@ DEVICE_FUNC BsdfSampleResult openpbr_bsdf_sample(const THREAD_REF OpenPBR_BasePr
     }
     else if (selectedLobe == 1u)
     {
-        valid = openpbr_sample_lobe(prepared.metal_mms_lobe, rand, viewDirection, wi, weight, pdf, sampledType, normalFf);
+        valid = openpbr_sample_lobe(
+            prepared.metal_mms_lobe, rand, viewDirection, wi, weight, pdf, sampledType, normalFf, specularAlpha);
     }
     else
     {
-        valid = openpbr_sample_lobe(prepared.diffuse_lobe, rand, viewDirection, wi, weight, pdf, sampledType, normalFf);
+        valid = openpbr_sample_lobe(prepared.diffuse_lobe, rand, viewDirection, wi, weight, pdf, sampledType, normalFf,
+                                    specularAlpha, relativeIor);
     }
     if (!valid)
     {
@@ -730,28 +933,29 @@ DEVICE_FUNC BsdfSampleResult openpbr_bsdf_sample(const THREAD_REF OpenPBR_BasePr
         {
             bsdfCos = openpbr_add_diffuse_specular(
                 bsdfCos, openpbr_calculate_lobe_value(prepared.specular_lobe, viewDirection, wi));
-            pdf += prepared.specular_weight * openpbr_calculate_lobe_pdf(prepared.specular_lobe, viewDirection, wi);
+            pdf += lobeWeights.x * openpbr_calculate_lobe_pdf(prepared.specular_lobe, viewDirection, wi);
         }
         if (selectedLobe != 1u)
         {
             bsdfCos = openpbr_add_diffuse_specular(
-                bsdfCos, openpbr_calculate_lobe_value(prepared.metal_mms_lobe, viewDirection, wi, normalFf));
-            pdf += prepared.metal_mms_weight *
-                   openpbr_calculate_lobe_pdf(prepared.metal_mms_lobe, viewDirection, wi, normalFf);
+                bsdfCos,
+                openpbr_calculate_lobe_value(prepared.metal_mms_lobe, viewDirection, wi, normalFf, specularAlpha));
+            pdf += lobeWeights.y *
+                   openpbr_calculate_lobe_pdf(prepared.metal_mms_lobe, viewDirection, wi, normalFf, specularAlpha);
         }
         if (selectedLobe != 2u)
         {
             bsdfCos = openpbr_add_diffuse_specular(
-                bsdfCos, openpbr_calculate_lobe_value(prepared.diffuse_lobe, viewDirection, wi, normalFf));
-            pdf +=
-                prepared.diffuse_weight * openpbr_calculate_lobe_pdf(prepared.diffuse_lobe, viewDirection, wi, normalFf);
+                bsdfCos, openpbr_calculate_lobe_value(
+                             prepared.diffuse_lobe, viewDirection, wi, normalFf, specularAlpha, relativeIor));
+            pdf += lobeWeights.z * openpbr_calculate_lobe_pdf(
+                                       prepared.diffuse_lobe, viewDirection, wi, normalFf, specularAlpha, relativeIor);
         }
-        pdf /= total;
         weight = openpbr_scale_diffuse_specular(bsdfCos, 1.0f / pdf);
     }
     else
     {
-        weight = openpbr_scale_diffuse_specular(weight, total / selectedWeight);
+        weight = openpbr_scale_diffuse_specular(weight, 1.0f / selectedWeight);
     }
 
     result.wi = wi;

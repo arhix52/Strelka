@@ -130,6 +130,56 @@ struct Vertex
 };
 static_assert(sizeof(Vertex) == 32, "Vertex must match Scene::Vertex");
 
+// Geometry reconstructed by extend and streamed once to shade. The packed
+// representation deliberately matches the formats already used by Vertex, so
+// moving the work across the wavefront boundary costs one compact sequential
+// write/read instead of carrying another large float structure per path.
+// Bit 31 of tangent marks records produced by extend; bit 30 remains the glTF
+// tangent handedness bit.
+struct SurfaceGeometryPayload
+{
+    uint32_t shadingNormal;
+    uint32_t geometryNormal;
+    uint32_t tangent;
+    uint32_t uv;
+    uint32_t color;
+    float lodBase;
+};
+static_assert(sizeof(SurfaceGeometryPayload) == 24, "Surface geometry payload must stay compact");
+
+// Light proposal produced before Base material shading. The proposal contains
+// no BSDF state and no ReSTIR sample: this path is compiled only for plain
+// one-candidate NEE. Keeping it to 60 bytes is cheaper than retaining surface
+// reconstruction and light-sampling temporaries across OpenPBR prepare/eval.
+struct BaseLightConnectionPayload
+{
+    packed_float3 radiance;
+    packed_float3 toLight;
+    packed_float3 origin;
+    packed_float3 visibilityTarget;
+    float pdf;
+    float tMax;
+    uint32_t flags;
+};
+static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection payload size changed");
+
+#define BASE_LIGHT_CONNECTION_NEEDS_RAY (1u << 0)
+#define BASE_LIGHT_CONNECTION_VISIBILITY_TARGET (1u << 1)
+#define BASE_LIGHT_CONNECTION_DELTA (1u << 2)
+
+#define SURFACE_GEOMETRY_VALID (1u << 31)
+
+// Instance-independent triangle attributes copied into the acceleration
+// structure. Positions stay in Metal's native triangle payload; this record
+// contains only what surface reconstruction would otherwise gather through
+// three unrelated vertex-buffer cache lines after traversal.
+struct PrimitiveSurfaceData
+{
+    uint32_t normal[3];
+    uint32_t geometryNormal;
+};
+static_assert(sizeof(PrimitiveSurfaceData) == 16, "Primitive surface data ABI changed");
+
 struct Uniforms
 {
     simd::float4x4 viewToWorld;
@@ -362,6 +412,15 @@ struct Uniforms
     uint64_t guideRays;
 #endif
 
+    /// Compact geometry prepared by extend for the matching path slot. Like
+    /// guideRays, this is addressed through the uniform block because shade
+    /// already occupies every explicit Metal 4 buffer binding.
+#ifdef __METAL_VERSION__
+    device SurfaceGeometryPayload* surfaceGeometry;
+#else
+    uint64_t surfaceGeometry;
+#endif
+
 #ifdef __METAL_VERSION__
     device const EmissiveMeshLight* emissiveMeshes;
     device const EmissiveTriangleLight* emissiveTriangles;
@@ -433,8 +492,15 @@ struct Uniforms
     float previousEnvSelectionPdf;
     uint32_t restirEnvironmentHistoryValid;
     uint32_t restirMeshHistoryValid;
+    // Scratch proposals for the split Base NEE path. Kept at the end so adding
+    // it does not shift the ABI of the existing uniform block.
+#ifdef __METAL_VERSION__
+    device BaseLightConnectionPayload* baseLightConnections;
+#else
+    uint64_t baseLightConnections;
+#endif
 };
-static_assert(sizeof(Uniforms) == 1024, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1040, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -684,6 +750,7 @@ struct GeometryEntry
 // sort pass. It never selects shading behavior, so a stale hint is harmless.
 #define GEOM_SHADE_BUCKET_SHIFT 28u
 #define GEOM_SHADE_BUCKET_MASK (3u << GEOM_SHADE_BUCKET_SHIFT)
+#define GEOM_FLAG_PRIMITIVE_SURFACE_DATA (1u << 27)
 #define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
 // Wavefront path state is memory-traffic critical and fixed at 24 bytes; feature-specific state uses side tables.

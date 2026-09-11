@@ -1,6 +1,7 @@
 #include "MetalGeometry.h"
 
 #include <log.h>
+#include <strelka/scene/vertex_packing.h>
 
 #include <algorithm>
 #include <bit>
@@ -133,6 +134,7 @@ void MetalGeometry::release()
     else
         mPrevVertexBuffer = nullptr;
     safeRelease(mVertexBuffer);
+    safeRelease(mPrimitiveDataBuffer);
     mOwnsPrevVertexBuffer = false;
     mVertexBufferAliased = false;
     mWrappedVertices = false;
@@ -176,6 +178,7 @@ void MetalGeometry::buildBuffers(Scene* scene)
         if (mOwnsPrevVertexBuffer)
             safeRelease(mPrevVertexBuffer);
         safeRelease(mVertexBuffer);
+        safeRelease(mPrimitiveDataBuffer);
         mOwnsPrevVertexBuffer = false;
         mPrevVertexBuffer = nullptr;
     }
@@ -236,6 +239,41 @@ void MetalGeometry::buildBuffers(Scene* scene)
     {
         mPrevVertexBuffer = mVertexBuffer;
         mOwnsPrevVertexBuffer = false;
+    }
+
+    // Metal can copy a small application record next to each primitive in the
+    // acceleration structure. Build one dense array in the same global
+    // triangle order as the index buffer; individual geometry descriptors bind
+    // the range that starts at mesh.mIndex / 3.
+    std::vector<PrimitiveSurfaceData> primitiveData(indices.size() / 3u);
+    for (const oka::Mesh& mesh : scene->getMeshes())
+    {
+        const uint32_t triangleCount = mesh.mCount / 3u;
+        const size_t firstTriangle = mesh.mIndex / 3u;
+        for (uint32_t triangle = 0; triangle < triangleCount; ++triangle)
+        {
+            PrimitiveSurfaceData& dst = primitiveData[firstTriangle + triangle];
+            const size_t firstIndex = static_cast<size_t>(mesh.mIndex) + static_cast<size_t>(triangle) * 3u;
+            const Scene::Vertex* v[3];
+            for (uint32_t k = 0; k < 3u; ++k)
+            {
+                v[k] = &vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]];
+                dst.normal[k] = v[k]->normal;
+            }
+
+            const glm::float3 edge1 = v[1]->pos - v[0]->pos;
+            const glm::float3 edge2 = v[2]->pos - v[0]->pos;
+            const glm::float3 geometricNormal = glm::cross(edge1, edge2);
+            const float objectArea2 = glm::length(geometricNormal);
+            dst.geometryNormal = packNormal(objectArea2 > 1e-20f ? geometricNormal / objectArea2 : glm::float3(0, 0, 1));
+        }
+    }
+    if (!primitiveData.empty())
+    {
+        mPrimitiveDataBuffer = mDevice->newBuffer(
+            primitiveData.data(), primitiveData.size() * sizeof(PrimitiveSurfaceData), MTL::ResourceStorageModeShared);
+        STRELKA_INFO("Metal primitive surface data: {} triangles, {:.1f} MB", primitiveData.size(),
+                     primitiveData.size() * sizeof(PrimitiveSurfaceData) / (1024.0 * 1024.0));
     }
 
     buildCurveBuffers(scene);
@@ -348,8 +386,17 @@ void MetalGeometry::createMeshData(Scene* scene, size_t meshIndex)
     auto* result = new Mesh();
 
     result->mTriangleCount = mesh.mCount / 3;
+    const auto* vertices = static_cast<const Scene::Vertex*>(mVertexBuffer->contents());
+    const auto* indices = static_cast<const uint32_t*>(mIndexBuffer->contents());
+    for (uint32_t i = 0; i < mesh.mCount; ++i)
+    {
+        if (vertices[mesh.mVbOffset + indices[mesh.mIndex + i]].color != 0xffffffffu)
+        {
+            result->mHasVertexColor = true;
+            break;
+        }
+    }
     mMetalMeshes.push_back(result);
 }
 
 } // namespace oka::metal
-

@@ -269,6 +269,18 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         const uint32_t meshId = inst.mMeshId;
         const oka::Mesh& mesh = meshes[meshId];
         const MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
+        const bool materialNeedsTangent = inst.mMaterialId < mMaterials->needsAuthoredTangent().size() &&
+                                          mMaterials->needsAuthoredTangent()[inst.mMaterialId] != 0u;
+        const bool materialNeedsUv = inst.mMaterialId < mMaterials->needsSurfaceUv().size() &&
+                                     mMaterials->needsSurfaceUv()[inst.mMaterialId] != 0u;
+        static const bool disablePrimitiveSurfaceData = envFlag("STRELKA_NO_PRIMITIVE_SURFACE_DATA");
+        const bool usePrimitiveSurfaceData = !disablePrimitiveSurfaceData && !skeletal && !meshData->mHasVertexColor &&
+                                             !materialNeedsTangent && !materialNeedsUv;
+        if (usePrimitiveSurfaceData)
+        {
+            ++mPrimitiveSurfaceGeometryCount;
+            mPrimitiveSurfaceTriangleCount += meshData->mTriangleCount;
+        }
 
         static const bool forceAllOpaque = envFlag("STRELKA_ALL_GEOM_OPAQUE");
         const bool isLightProxy = inst.type == oka::Instance::Type::eLight;
@@ -283,7 +295,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         }
         else
         {
-            geom = mPath->makeTriangleGeometry(mGeometry, mesh, meshData->mTriangleCount);
+            geom = mPath->makeTriangleGeometry(mGeometry, mesh, meshData->mTriangleCount, usePrimitiveSurfaceData);
         }
         static const bool leaveDefault = envFlag("STRELKA_NO_SET_OPAQUE");
         if (!leaveDefault)
@@ -300,6 +312,10 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         if (inst.mMaterialId < mMaterials->shadeBucket().size())
         {
             entry.flags = uint32_t(mMaterials->shadeBucket()[inst.mMaterialId]) << GEOM_SHADE_BUCKET_SHIFT;
+        }
+        if (usePrimitiveSurfaceData)
+        {
+            entry.flags |= GEOM_FLAG_PRIMITIVE_SURFACE_DATA;
         }
         mGeometry->geometryEntries().push_back(entry);
     }
@@ -516,6 +532,8 @@ bool MetalAccelStructure::step(double budgetMs)
         mAsBuild = new AsBuildState();
         mOpaqueGeometryCount = 0;
         mCutoutGeometryCount = 0;
+        mPrimitiveSurfaceGeometryCount = 0;
+        mPrimitiveSurfaceTriangleCount = 0;
         // Per build, not per process: as file-scope counters these accumulated
         // across every scene the session opened, so the second load reported the
         // first one's structures as well as its own.
@@ -935,6 +953,8 @@ bool MetalAccelStructure::step(double budgetMs)
     STRELKA_INFO("Geometry opacity: {} opaque, {} cutout ({:.1f}% of geometries need the alpha test)",
                  mOpaqueGeometryCount, mCutoutGeometryCount,
                  100.0 * mCutoutGeometryCount / std::max<uint32_t>(1u, mOpaqueGeometryCount + mCutoutGeometryCount));
+    STRELKA_INFO("Primitive surface data: {} geometries, {} triangles embedded in BLAS", mPrimitiveSurfaceGeometryCount,
+                 mPrimitiveSurfaceTriangleCount);
 
     // Per-geometry lookup table consumed by the kernel.
     mGeometry->uploadGeometryEntryBuffer();
@@ -1564,6 +1584,7 @@ void MetalAccelStructure::addDescriptorResidency()
     mMetal4->addResident(mGeometry->vertexBuffer());
     mMetal4->addResident(mGeometry->prevVertexBuffer());
     mMetal4->addResident(mGeometry->indexBuffer());
+    mMetal4->addResident(mGeometry->primitiveDataBuffer());
     mMetal4->addResident(mGeometry->curvePointBuffer());
     mMetal4->addResident(mGeometry->curveRadiusBuffer());
     mMetal4->addResident(mGeometry->curveSegmentBuffer());

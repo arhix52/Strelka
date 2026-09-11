@@ -119,6 +119,14 @@ public:
     {
         return mMaterialShadeBucket;
     }
+    const std::vector<uint8_t>& needsAuthoredTangent() const
+    {
+        return mMaterialNeedsAuthoredTangent;
+    }
+    const std::vector<uint8_t>& needsSurfaceUv() const
+    {
+        return mMaterialNeedsSurfaceUv;
+    }
 
 private:
     MTL::Device* mDevice = nullptr;
@@ -137,6 +145,8 @@ private:
     std::vector<uint32_t> mMaterialIsMediumBoundary;
     std::vector<uint8_t> mMaterialIsCutout;
     std::vector<uint8_t> mMaterialShadeBucket;
+    std::vector<uint8_t> mMaterialNeedsAuthoredTangent;
+    std::vector<uint8_t> mMaterialNeedsSurfaceUv;
 
     MaterialBuildState* mBuild = nullptr;
 };

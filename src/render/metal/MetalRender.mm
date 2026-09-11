@@ -748,6 +748,7 @@ bool MetalRender::memoryReport(MemoryReport& report) const
 
     add("Vertices", bufBytes(mGeometry.vertexBuffer()));
     add("Indices", bufBytes(mGeometry.indexBuffer()));
+    add("Primitive surface data", bufBytes(mGeometry.primitiveDataBuffer()));
     // A second copy of every vertex, for motion blur and for the denoiser's
     // reprojection. Shared with the current one on a scene with nothing skinned,
     // in which case this reports zero rather than double-counting.
@@ -888,10 +889,12 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, openpbrParams) == 832);
     static_assert(offsetof(Uniforms, openpbrTextures) == 840);
     static_assert(offsetof(Uniforms, guideRays) == 848);
-    static_assert(offsetof(Uniforms, emissiveMeshes) == 856);
-    static_assert(offsetof(Uniforms, emissiveTriangles) == 864);
+    static_assert(offsetof(Uniforms, surfaceGeometry) == 856);
+    static_assert(offsetof(Uniforms, emissiveMeshes) == 864);
+    static_assert(offsetof(Uniforms, emissiveTriangles) == 872);
     static_assert(offsetof(Material, baseColorTexture) == 256);
-    static_assert(sizeof(Uniforms) == 1024, "Uniforms host/Metal ABI changed");
+    static_assert(offsetof(Uniforms, baseLightConnections) == 1032);
+    static_assert(sizeof(Uniforms) == 1040, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -906,6 +909,8 @@ void MetalRender::init()
     // The hot record stays at 24 bytes despite carrying the TLAS instance: its
     // 8-byte-aligned barycentrics come first, leaving no internal/tail padding.
     static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
+    static_assert(sizeof(SurfaceGeometryPayload) == 24, "Surface geometry payload size changed");
+    static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection payload size changed");
     // 16 rather than 12: the fourth word says whether the geometry is a triangle
     // mesh or a curve set, and for a curve set how many segments a strand has.
     // One entry per geometry, not per primitive or per ray, so the word is free.
@@ -1041,6 +1046,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mGeometry.prevVertexBuffer());
     add(mPrevFrameVertexBuffer);
     add(mGeometry.indexBuffer());
+    add(mGeometry.primitiveDataBuffer());
     add(mAccel.instanceBuffer());
     add(mAccel.previousInstanceBuffer());
     add(mAccel.emissiveMeshBuffer());
@@ -1899,9 +1905,16 @@ void MetalRender::render(Buffer* output)
         mEnvironment.ensurePlaceholderAliasBuffer();
 
         {
-            mIntegrator.ensureBuffers(width, height, pUniformData->sharcUpdateDownscale,
-                                      pUniformData->restirDIEnabled != 0u,
-                                      pUniformData->restirDIEnabled != 0u && pUniformData->restirBiasCorrection != 0u);
+            // Keep the split Base NEE path available for scenes where separating
+            // connection/eval from sampling wins. Its current A/B result is inside
+            // wall-time noise, so the production default remains the fused path.
+            // ReSTIR and multi-candidate RIS retain their coupled candidate loop.
+            const bool splitBaseNee = envUint("STRELKA_SPLIT_BASE_NEE", 0u) != 0u &&
+                                      pUniformData->restirDIEnabled == 0u && pUniformData->risCandidates == 1u &&
+                                      mMaterials.hasOpenPBRMaterials();
+            mIntegrator.ensureBuffers(
+                width, height, pUniformData->sharcUpdateDownscale, pUniformData->restirDIEnabled != 0u,
+                pUniformData->restirDIEnabled != 0u && pUniformData->restirBiasCorrection != 0u, splitBaseNee);
             // Output resolution, not render resolution: this is what the display
             // shows and what MetalFX upscales into.
             mPost.ensureDisplayTextures(outWidth, outHeight);
@@ -1924,15 +1937,29 @@ void MetalRender::render(Buffer* output)
             }
 
             const bool profileStages = settings.getAs<uint32_t>("render/pt/profileStages") != 0;
-            if (profileStages && !useMetal4)
+            if (profileStages)
             {
-                mIntegrator.createStageTimestampBuffer();
+                if (useMetal4)
+                {
+                    mIntegrator.createStageTimestampHeapMetal4();
+                }
+                else
+                {
+                    mIntegrator.createStageTimestampBuffer();
+                }
             }
 
             const auto encodeStart = std::chrono::high_resolution_clock::now();
             metal::IntegratorFeatureInputs featureIn;
             featureIn.hasEnvMap = pUniformData->hasEnvMap;
             featureIn.hasLights = pUniformData->numLights > 0 || pUniformData->numEmissiveMeshes > 0;
+            featureIn.hasEmissiveMeshLights = pUniformData->numEmissiveMeshes > 0;
+            const auto& analyticLights = mScene->getLightsDesc();
+            featureIn.allAnalyticLightsRect =
+                pUniformData->numLights > 0 &&
+                std::ranges::all_of(
+                    analyticLights, [](const Scene::UniformLightDesc& light) { return light.type == LIGHT_TYPE_RECT; });
+            featureIn.uniformRectLightSampling = pUniformData->rectLightSamplingMethod == 0u;
             featureIn.hasAlphaMaterials = mMaterials.hasAlphaMaterials();
             featureIn.enableMotionBlur = pUniformData->enableMotionBlur;
             featureIn.motionBlasBuilt = mAccel.motionBlasBuilt();
@@ -1952,6 +1979,7 @@ void MetalRender::render(Buffer* output)
                                                   (auditRenderWork && pUniformData->restirFinalVisibilityReuse != 0u);
             featureIn.restir = pUniformData->restirDIEnabled != 0u;
             featureIn.risOne = pUniformData->risCandidates == 1u;
+            featureIn.splitBaseNee = splitBaseNee;
             featureIn.writeAov = pUniformData->writeAov != 0u;
             featureIn.samplerType = pUniformData->samplerType;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
@@ -1978,6 +2006,8 @@ void MetalRender::render(Buffer* output)
             pUniformData->openpbrTextures =
                 mMaterials.openpbrTextureBuffer() ? mMaterials.openpbrTextureBuffer()->gpuAddress() : 0ull;
             pUniformData->guideRays = mIntegrator.guideRayAddress();
+            pUniformData->surfaceGeometry = mIntegrator.surfaceGeometryAddress();
+            pUniformData->baseLightConnections = mIntegrator.baseLightConnectionAddress();
             pUniformData->guideQueue = mIntegrator.guideQueueAddress();
             pUniformData->restirQueue = mIntegrator.restirQueueAddress();
             pUniformData->emissiveMeshes = mAccel.emissiveMeshBuffer() ? mAccel.emissiveMeshBuffer()->gpuAddress() : 0ull;
@@ -2050,7 +2080,10 @@ void MetalRender::render(Buffer* output)
                 // Build the variant first: compiling a pipeline can allocate,
                 // and residency has to name every allocation the frame will
                 // touch before the frame is committed.
-                mIntegrator.resetStageProfilingMetal4();
+                if (profileStages)
+                {
+                    mIntegrator.resetStageProfilingMetal4();
+                }
                 mIntegrator.variantFor(features | metal::WavefrontFeatures::kMetal4);
                 if (featureIn.hasSharc)
                 {
@@ -2387,7 +2420,9 @@ void MetalRender::render(Buffer* output)
                                     }
                                     else
                                     {
-                                        STRELKA_ERROR("Metal 4 stage diagnosis disabled; reproduce with STRELKA_STAGES=1");
+                                        STRELKA_ERROR(
+                                            "Metal 4 stage diagnosis disabled; reproduce with STRELKA_STAGES=1 "
+                                            "STRELKA_STAGE_BREADCRUMBS=1");
                                     }
                                 }
                                 mMetal4.signalFrame(frameSignalValue);
@@ -2406,6 +2441,10 @@ void MetalRender::render(Buffer* output)
                                 return;
                             }
 
+                            if (profileStages)
+                            {
+                                mIntegrator.reportStageTimingsMetal4();
+                            }
                             mMetal4.signalFrame(frameSignalValue);
                             const double frameGpuMs = state->gpuMs;
                             mLastRenderTimeMs.store(frameGpuMs, std::memory_order_relaxed);

@@ -326,6 +326,8 @@ private:
     bool mBuildMotionBlas = false;
     uint32_t mOpaqueGeometryCount = 0;
     uint32_t mCutoutGeometryCount = 0;
+    uint32_t mPrimitiveSurfaceGeometryCount = 0;
+    uint64_t mPrimitiveSurfaceTriangleCount = 0;
     // What the bottom-level builds cost this scene. Reset when a build starts.
     double mBlasEncodeMs = 0.0;
     uint32_t mBlasCount = 0;

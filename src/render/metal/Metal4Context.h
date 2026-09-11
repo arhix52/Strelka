@@ -204,7 +204,8 @@ public:
     /// Metal 3 way are not usable with an argument table.
     MTL::ComputePipelineState* newComputePipelineState(MTL::Library* library,
                                                        const char* functionName,
-                                                       MTL::FunctionConstantValues* constants);
+                                                       MTL::FunctionConstantValues* constants,
+                                                       const char* label = nullptr);
     MTL::ComputePipelineState* newComputePipelineStateLinked(MTL::Library* library,
                                                              const char* functionName,
                                                              const char* linkedFunctionName0,

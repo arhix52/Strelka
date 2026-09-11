@@ -214,6 +214,8 @@ void MetalMaterials::release()
     mMaterialIsMediumBoundary.clear();
     mMaterialIsCutout.clear();
     mMaterialShadeBucket.clear();
+    mMaterialNeedsAuthoredTangent.clear();
+    mMaterialNeedsSurfaceUv.clear();
 }
 
 void MetalMaterials::uploadOpenPBRBuffer(const std::vector<OpenPBRParams>& params)
@@ -312,11 +314,16 @@ void MetalMaterials::publishParameters(Scene* scene)
     mMaterialIsMediumBoundary.clear();
     mMaterialShadeBucket.clear();
     mMaterialShadeBucket.reserve(matDescs.size());
+    mMaterialNeedsAuthoredTangent.clear();
+    mMaterialNeedsAuthoredTangent.reserve(matDescs.size());
+    mMaterialNeedsSurfaceUv.clear();
+    mMaterialNeedsSurfaceUv.reserve(matDescs.size());
     mSceneHasAlphaMaterials = false;
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
     mSceneAllOpenPBRMaterials = !matDescs.empty();
     mSceneAllNativeOpenPBRMaterials = !matDescs.empty();
+    uint32_t shadeBucketCounts[4] = {};
 
     // Which material model the scene shades with. A render setting rather than a
     // scene property on purpose: it makes the two models an A/B on one asset,
@@ -491,10 +498,15 @@ void MetalMaterials::publishParameters(Scene* scene)
 
         // Four broad classes are enough to keep the main OpenPBR branches
         // coherent. The key is packed into GeometryEntry once; extend then
-        // reads no material data merely to schedule shade.
+        // reads no material data merely to schedule shade. Bucket 2 is the
+        // cheap translucent family, not just SSS: ordinary glass/water and
+        // unlayered subsurface use the same OpenPBR feature subset.
         uint8_t shadeBucket = 0u;
-        if (st.gpuMaterials.back().material_type == MATERIAL_TYPE_HAIR)
+        if ((st.gpuMaterials.back().medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u ||
+            st.gpuMaterials.back().material_type == MATERIAL_TYPE_HAIR)
         {
+            // Boundary crossings, fused SSS exits and fibre shading are handled
+            // by Tail. Keep their call graphs out of the ordinary surface PSOs.
             shadeBucket = 3u;
         }
         else if (st.gpuMaterials.back().material_type == MATERIAL_TYPE_OPENPBR && !openpbrParams.empty())
@@ -504,9 +516,21 @@ void MetalMaterials::publishParameters(Scene* scene)
                                         (1u << OPENPBR_TEX_SUBSURFACE_RADIUS);
             const uint32_t layerMaps = (1u << OPENPBR_TEX_COAT_WEIGHT) | (1u << OPENPBR_TEX_FUZZ_WEIGHT) |
                                        (1u << OPENPBR_TEX_COAT_COLOR) | (1u << OPENPBR_TEX_FUZZ_COLOR);
-            if (o.transmission_weight > 0.0f || o.subsurface_weight > 0.0f || (o.texture_mask & volumeMaps) != 0u)
+            const bool hasSubsurface =
+                o.subsurface_weight > 0.0f || (o.texture_mask & (1u << OPENPBR_TEX_SUBSURFACE_WEIGHT)) != 0u;
+            const bool hasTranslucency =
+                o.transmission_weight > 0.0f || hasSubsurface || (o.texture_mask & volumeMaps) != 0u;
+            const bool simpleTranslucent =
+                hasTranslucency && o.transmission_dispersion_scale == 0.0f && o.base_metalness == 0.0f &&
+                (o.texture_mask & (1u << OPENPBR_TEX_BASE_METALNESS)) == 0u && o.coat_weight == 0.0f &&
+                o.fuzz_weight == 0.0f && o.thin_film_weight == 0.0f && (o.texture_mask & layerMaps) == 0u;
+            if (simpleTranslucent)
             {
                 shadeBucket = 2u;
+            }
+            else if (hasTranslucency)
+            {
+                shadeBucket = 3u;
             }
             else if (o.coat_weight > 0.0f || o.fuzz_weight > 0.0f || o.thin_film_weight > 0.0f ||
                      (o.texture_mask & layerMaps) != 0u)
@@ -515,6 +539,20 @@ void MetalMaterials::publishParameters(Scene* scene)
             }
         }
         mMaterialShadeBucket.push_back(shadeBucket);
+        bool needsAuthoredTangent =
+            (st.gpuMaterials.back().features & (MATERIAL_TEX_NORMAL | MATERIAL_FEATURE_ANISOTROPY)) != 0u;
+        bool needsSurfaceUv = (st.gpuMaterials.back().features & MATERIAL_TEXTURE_MASK) != 0u;
+        if (st.gpuMaterials.back().material_type == MATERIAL_TYPE_OPENPBR && !openpbrParams.empty())
+        {
+            const OpenPBRParams& o = openpbrParams.back();
+            const uint32_t normalMaps = (1u << OPENPBR_TEX_GEOMETRY_NORMAL) | (1u << OPENPBR_TEX_GEOMETRY_COAT_NORMAL);
+            needsAuthoredTangent = needsAuthoredTangent || o.specular_roughness_anisotropy != 0.0f ||
+                                   o.coat_roughness_anisotropy != 0.0f || (o.texture_mask & normalMaps) != 0u;
+            needsSurfaceUv = needsSurfaceUv || o.texture_mask != 0u;
+        }
+        mMaterialNeedsAuthoredTangent.push_back(needsAuthoredTangent ? 1u : 0u);
+        mMaterialNeedsSurfaceUv.push_back(needsSurfaceUv ? 1u : 0u);
+        ++shadeBucketCounts[shadeBucket];
 
         if (p.alpha_mode != ALPHA_MODE_OPAQUE)
             mSceneHasAlphaMaterials = true;
@@ -530,6 +568,8 @@ void MetalMaterials::publishParameters(Scene* scene)
         // ground into the callback with the needles.
         mMaterialIsCutout.push_back(p.alpha_mode != ALPHA_MODE_OPAQUE ? 1u : 0u);
     }
+    STRELKA_INFO("Material shade buckets: base {}, layer {}, translucent {}, tail {}", shadeBucketCounts[0],
+                 shadeBucketCounts[1], shadeBucketCounts[2], shadeBucketCounts[3]);
     uploadMaterialBuffer(st.gpuMaterials);
     uploadOpenPBRBuffer(openpbrParams);
     allocOpenPBRTextureBuffer(openpbrParams.empty() ? 0 : openpbrParams.size());

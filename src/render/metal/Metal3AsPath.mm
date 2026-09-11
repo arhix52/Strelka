@@ -69,7 +69,10 @@ public:
     {
     }
 
-    NS::Object* makeTriangleGeometry(MetalGeometry* geometry, const oka::Mesh& mesh, uint32_t triangleCount) override
+    NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
+                                     const oka::Mesh& mesh,
+                                     uint32_t triangleCount,
+                                     bool usePrimitiveSurfaceData) override
     {
         auto* geom = MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
         geom->setVertexBuffer(geometry->vertexBuffer());
@@ -79,6 +82,13 @@ public:
         geom->setIndexBufferOffset(mesh.mIndex * sizeof(uint32_t));
         geom->setIndexType(MTL::IndexTypeUInt32);
         geom->setTriangleCount(triangleCount);
+        if (usePrimitiveSurfaceData)
+        {
+            geom->setPrimitiveDataBuffer(geometry->primitiveDataBuffer());
+            geom->setPrimitiveDataBufferOffset((mesh.mIndex / 3u) * sizeof(PrimitiveSurfaceData));
+            geom->setPrimitiveDataStride(sizeof(PrimitiveSurfaceData));
+            geom->setPrimitiveDataElementSize(sizeof(PrimitiveSurfaceData));
+        }
         return geom;
     }
 

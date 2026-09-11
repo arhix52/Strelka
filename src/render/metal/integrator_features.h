@@ -51,6 +51,19 @@ public:
     // Every surface was authored as OpenPBR rather than translated from glTF.
     // This lets shade delete the generic material initializer entirely.
     static constexpr uint32_t kAllNativeOpenPBR = 1u << 22;
+    // Emissive triangle NEE pulls geometry reconstruction and mesh-light alias
+    // sampling into shade. Keep it out of scenes that only have analytic lights.
+    static constexpr uint32_t kEmissiveMeshLights = 1u << 23;
+    // A common production-lighting case. It deletes the other seven analytic
+    // samplers, IES/projector code and their PDF branches from shade.
+    static constexpr uint32_t kAllAnalyticLightsRect = 1u << 24;
+    // Rectangle sampling is a binary render setting. Specialising it avoids
+    // charging the default uniform-area PSO for the much larger spherical-quad
+    // sampler and its peak register footprint.
+    static constexpr uint32_t kUniformRectLightSampling = 1u << 25;
+    // Plain one-candidate Base NEE can generate its light proposal in a small
+    // stage before OpenPBR prepare/eval, avoiding their combined register peak.
+    static constexpr uint32_t kSplitBaseNee = 1u << 26;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -108,6 +121,10 @@ struct IntegratorFeatureInputs
     bool writeAov = false;
     bool allOpenPBR = false;
     bool allNativeOpenPBR = false;
+    bool hasEmissiveMeshLights = false;
+    bool allAnalyticLightsRect = false;
+    bool uniformRectLightSampling = false;
+    bool splitBaseNee = false;
     uint32_t samplerType = 0u;
 };
 
@@ -152,6 +169,14 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kAllOpenPBR | WavefrontFeatures::kOpenPBR;
     if (in.allNativeOpenPBR)
         features |= WavefrontFeatures::kAllNativeOpenPBR | WavefrontFeatures::kAllOpenPBR | WavefrontFeatures::kOpenPBR;
+    if (in.hasEmissiveMeshLights)
+        features |= WavefrontFeatures::kEmissiveMeshLights | WavefrontFeatures::kLights;
+    if (in.allAnalyticLightsRect)
+        features |= WavefrontFeatures::kAllAnalyticLightsRect;
+    if (in.uniformRectLightSampling)
+        features |= WavefrontFeatures::kUniformRectLightSampling;
+    if (in.splitBaseNee && in.risOne && !in.restir)
+        features |= WavefrontFeatures::kSplitBaseNee;
     features |= (in.samplerType & 7u) << WavefrontFeatures::kSamplerShift;
     return WavefrontFeatures(features);
 }

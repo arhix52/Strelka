@@ -607,7 +607,8 @@ uint64_t Metal4Context::residencyAllocatedSize() const
 
 MTL::ComputePipelineState* Metal4Context::newComputePipelineState(MTL::Library* library,
                                                                   const char* functionName,
-                                                                  MTL::FunctionConstantValues* constants)
+                                                                  MTL::FunctionConstantValues* constants,
+                                                                  const char* label)
 {
     if (!mCompiler || !library)
     {
@@ -620,6 +621,10 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineState(MTL::Library* 
     functionDesc->setName(NS::String::string(functionName, NS::UTF8StringEncoding));
 
     MTL4::ComputePipelineDescriptor* pipelineDesc = MTL4::ComputePipelineDescriptor::alloc()->init();
+    if (label)
+    {
+        pipelineDesc->setLabel(NS::String::string(label, NS::UTF8StringEncoding));
+    }
     // Function constants arrive wrapped in a specialising descriptor rather than
     // as an argument to the pipeline call, as they were in Metal 3.
     MTL4::SpecializedFunctionDescriptor* specialized = nullptr;

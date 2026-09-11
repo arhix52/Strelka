@@ -58,9 +58,14 @@ constant bool kFcOpenPBRSheenAndCoat [[function_constant(20)]];
 constant bool kFcOpenPBRDispersion [[function_constant(21)]];
 constant bool kFcOpenPBRTranslucency [[function_constant(22)]];
 constant bool kFcOpenPBRMetallic [[function_constant(23)]];
-constant bool kFcShadeTail [[function_constant(24)]];
-constant bool kFcShadeLayer [[function_constant(25)]];
-constant bool kFcShadeBase [[function_constant(26)]];
+// Profiling-only phase cut for the production shade entry points. Zero is the
+// real renderer; non-zero values let Xcode report register allocation for the
+// exact same prefix with later phases compiled out.
+constant uint kFcShadeProbe [[function_constant(24)]];
+constant bool kFcEmissiveMeshLights [[function_constant(25)]];
+constant bool kFcAllAnalyticLightsRect [[function_constant(26)]];
+constant bool kFcUniformRectLightSampling [[function_constant(27)]];
+constant bool kFcSplitBaseNee [[function_constant(28)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
@@ -102,9 +107,14 @@ constant bool SPEC_OPENPBR_DISPERSION = is_function_constant_defined(kFcOpenPBRD
 constant bool SPEC_OPENPBR_TRANSLUCENCY =
     is_function_constant_defined(kFcOpenPBRTranslucency) ? kFcOpenPBRTranslucency : true;
 constant bool SPEC_OPENPBR_METALLIC = is_function_constant_defined(kFcOpenPBRMetallic) ? kFcOpenPBRMetallic : true;
-constant bool SPEC_SHADE_TAIL = is_function_constant_defined(kFcShadeTail) ? kFcShadeTail : false;
-constant bool SPEC_SHADE_LAYER = is_function_constant_defined(kFcShadeLayer) ? kFcShadeLayer : false;
-constant bool SPEC_SHADE_BASE = is_function_constant_defined(kFcShadeBase) ? kFcShadeBase : false;
+constant uint SPEC_SHADE_PROBE = is_function_constant_defined(kFcShadeProbe) ? kFcShadeProbe : 0u;
+constant bool SPEC_EMISSIVE_MESH_LIGHTS =
+    is_function_constant_defined(kFcEmissiveMeshLights) ? kFcEmissiveMeshLights : true;
+constant bool SPEC_ALL_ANALYTIC_LIGHTS_RECT =
+    is_function_constant_defined(kFcAllAnalyticLightsRect) ? kFcAllAnalyticLightsRect : false;
+constant bool SPEC_UNIFORM_RECT_LIGHT_SAMPLING =
+    is_function_constant_defined(kFcUniformRectLightSampling) ? kFcUniformRectLightSampling : false;
+constant bool SPEC_SPLIT_BASE_NEE = is_function_constant_defined(kFcSplitBaseNee) ? kFcSplitBaseNee : false;
 
 __attribute__((always_inline)) float3 transformDirection(float3 p, float3 axisX, float3 axisY, float3 axisZ)
 {
@@ -183,69 +193,83 @@ static bool openpbrHasMap(thread const OpenPBRParams& p, uint slot)
     return (p.texture_mask & (1u << slot)) != 0u;
 }
 
+// Ray-cone level of detail, following Akenine-Moller et al: the triangle term
+// carries texels per world unit, the cone term carries how wide the footprint
+// has grown, and the texture contributes its own resolution here because one
+// material's slots are rarely all the same size.
+template <typename Tex2D>
+inline float texLod(Tex2D tex, float lodBase, bool hasLod)
+{
+    if (!hasLod)
+    {
+        return 0.0f;
+    }
+    const float dim = float(tex.get_width() * tex.get_height());
+    return max(0.0f, lodBase + 0.5f * log2(max(dim, 1.0f)));
+}
+
 static void applyOpenPBRTextures(thread OpenPBRParams& p,
                                  device const OpenPBRTextures& t,
                                  thread SurfaceInteraction& si,
-                                 float2 uv)
+                                 float2 uv,
+                                 float lodBase = -1e30f)
 {
-    // Its own sampler: the glTF path's lives inside initSurfaceInteraction and
-    // is not in scope here. Repeat rather than clamp, because MaterialX's image
-    // node tiles by default and a clamped one would smear the last texel across
-    // anything with a UV outside the unit square.
-    constexpr sampler openpbrSampler(mag_filter::linear, min_filter::linear, address::repeat);
-
     const float c = cos(p.uv_rotation);
     const float sn = sin(p.uv_rotation);
     const float2 k = float2(p.uv_scale_x, p.uv_scale_y);
     const float2 tuv = float2(uv.x * k.x * c - uv.y * k.y * sn, uv.x * k.x * sn + uv.y * k.y * c) +
                        float2(p.uv_offset_x, p.uv_offset_y);
+    const bool hasLod = lodBase > -1e29f;
+    constexpr sampler openpbrSampler(mag_filter::linear, min_filter::linear, mip_filter::linear, address::repeat);
+#define SAMPLE_OPENPBR_TEXTURE(slot)                                                                                   \
+    t.tex[slot].sample(openpbrSampler, tuv, level(texLod(t.tex[slot], lodBase, hasLod)))
 
     if (openpbrHasMap(p, OPENPBR_TEX_BASE_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_BASE_COLOR]))
     {
-        const float3 v = t.tex[OPENPBR_TEX_BASE_COLOR].sample(openpbrSampler, tuv).rgb;
+        const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_BASE_COLOR).rgb;
         p.base_color = OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_BASE_METALNESS) && !is_null_texture(t.tex[OPENPBR_TEX_BASE_METALNESS]))
-        p.base_metalness = t.tex[OPENPBR_TEX_BASE_METALNESS].sample(openpbrSampler, tuv).r;
+        p.base_metalness = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_BASE_METALNESS).r;
     if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_ROUGHNESS) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ROUGHNESS]))
-        p.specular_roughness = t.tex[OPENPBR_TEX_SPECULAR_ROUGHNESS].sample(openpbrSampler, tuv).r;
+        p.specular_roughness = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SPECULAR_ROUGHNESS).r;
     if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_ANISOTROPY) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ANISOTROPY]))
-        p.specular_roughness_anisotropy = t.tex[OPENPBR_TEX_SPECULAR_ANISOTROPY].sample(openpbrSampler, tuv).r;
+        p.specular_roughness_anisotropy = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SPECULAR_ANISOTROPY).r;
     if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_COLOR]))
     {
-        const float3 v = t.tex[OPENPBR_TEX_SPECULAR_COLOR].sample(openpbrSampler, tuv).rgb;
+        const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SPECULAR_COLOR).rgb;
         p.specular_color = OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_COAT_WEIGHT) && !is_null_texture(t.tex[OPENPBR_TEX_COAT_WEIGHT]))
-        p.coat_weight = t.tex[OPENPBR_TEX_COAT_WEIGHT].sample(openpbrSampler, tuv).r;
+        p.coat_weight = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_COAT_WEIGHT).r;
     if (openpbrHasMap(p, OPENPBR_TEX_COAT_ROUGHNESS) && !is_null_texture(t.tex[OPENPBR_TEX_COAT_ROUGHNESS]))
-        p.coat_roughness = t.tex[OPENPBR_TEX_COAT_ROUGHNESS].sample(openpbrSampler, tuv).r;
+        p.coat_roughness = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_COAT_ROUGHNESS).r;
     if (openpbrHasMap(p, OPENPBR_TEX_COAT_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_COAT_COLOR]))
     {
-        const float3 v = t.tex[OPENPBR_TEX_COAT_COLOR].sample(openpbrSampler, tuv).rgb;
+        const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_COAT_COLOR).rgb;
         p.coat_color = OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_FUZZ_WEIGHT) && !is_null_texture(t.tex[OPENPBR_TEX_FUZZ_WEIGHT]))
-        p.fuzz_weight = t.tex[OPENPBR_TEX_FUZZ_WEIGHT].sample(openpbrSampler, tuv).r;
+        p.fuzz_weight = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_FUZZ_WEIGHT).r;
     if (openpbrHasMap(p, OPENPBR_TEX_FUZZ_ROUGHNESS) && !is_null_texture(t.tex[OPENPBR_TEX_FUZZ_ROUGHNESS]))
-        p.fuzz_roughness = t.tex[OPENPBR_TEX_FUZZ_ROUGHNESS].sample(openpbrSampler, tuv).r;
+        p.fuzz_roughness = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_FUZZ_ROUGHNESS).r;
     if (openpbrHasMap(p, OPENPBR_TEX_TRANSMISSION_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_TRANSMISSION_COLOR]))
     {
-        const float3 v = t.tex[OPENPBR_TEX_TRANSMISSION_COLOR].sample(openpbrSampler, tuv).rgb;
+        const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_TRANSMISSION_COLOR).rgb;
         p.transmission_color = OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_SUBSURFACE_COLOR]))
     {
-        const float3 v = t.tex[OPENPBR_TEX_SUBSURFACE_COLOR].sample(openpbrSampler, tuv).rgb;
+        const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SUBSURFACE_COLOR).rgb;
         p.subsurface_color = OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_GEOMETRY_OPACITY) && !is_null_texture(t.tex[OPENPBR_TEX_GEOMETRY_OPACITY]))
-        p.geometry_opacity = t.tex[OPENPBR_TEX_GEOMETRY_OPACITY].sample(openpbrSampler, tuv).r;
+        p.geometry_opacity = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_GEOMETRY_OPACITY).r;
     if (openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_WEIGHT) && !is_null_texture(t.tex[OPENPBR_TEX_SUBSURFACE_WEIGHT]))
-        p.subsurface_weight = t.tex[OPENPBR_TEX_SUBSURFACE_WEIGHT].sample(openpbrSampler, tuv).r;
+        p.subsurface_weight = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SUBSURFACE_WEIGHT).r;
     if (openpbrHasMap(p, OPENPBR_TEX_FUZZ_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_FUZZ_COLOR]))
     {
-        const float3 v = t.tex[OPENPBR_TEX_FUZZ_COLOR].sample(openpbrSampler, tuv).rgb;
+        const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_FUZZ_COLOR).rgb;
         p.fuzz_color = OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_RADIUS) && !is_null_texture(t.tex[OPENPBR_TEX_SUBSURFACE_RADIUS]))
@@ -253,12 +277,15 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
         // A per-channel tint on the mean free path. The scalar length stays as
         // authored: a map here says how the three channels differ, not how far
         // light travels, which is what subsurface_radius carries.
-        const float3 v = t.tex[OPENPBR_TEX_SUBSURFACE_RADIUS].sample(openpbrSampler, tuv).rgb;
+        const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SUBSURFACE_RADIUS).rgb;
         p.subsurface_radius_scale = OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_EMISSION_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_EMISSION_COLOR]))
     {
-        const float3 v = t.tex[OPENPBR_TEX_EMISSION_COLOR].sample(openpbrSampler, tuv).rgb;
+        // Emissive-mesh NEE cannot reconstruct this surface ray's cone. Keep
+        // both strategies on level zero until they share an explicit footprint.
+        constexpr sampler emissionSampler(mag_filter::linear, min_filter::linear, address::repeat);
+        const float3 v = t.tex[OPENPBR_TEX_EMISSION_COLOR].sample(emissionSampler, tuv).rgb;
         p.emission_color = OpenPBRColor{ v.r, v.g, v.b };
     }
     si.emission = float3(p.emission_color.r, p.emission_color.g, p.emission_color.b) * p.emission_luminance;
@@ -267,7 +294,7 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
     // because a compressed normal map is BC5 and stores two channels.
     if (openpbrHasMap(p, OPENPBR_TEX_GEOMETRY_NORMAL) && !is_null_texture(t.tex[OPENPBR_TEX_GEOMETRY_NORMAL]))
     {
-        const float2 xy = t.tex[OPENPBR_TEX_GEOMETRY_NORMAL].sample(openpbrSampler, tuv).xy * 2.0f - 1.0f;
+        const float2 xy = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_GEOMETRY_NORMAL).xy * 2.0f - 1.0f;
         const float z = sqrt(saturate(1.0f - dot(xy, xy)));
         const float3x3 TBN = float3x3(si.tangent, si.bitangent, si.shading_normal);
         si.shading_normal = normalize(TBN * float3(xy, z));
@@ -281,6 +308,7 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
             si.diffuse_faces_away = true;
         }
     }
+#undef SAMPLE_OPENPBR_TEXTURE
 }
 
 static float2 applyTextureTransform(float2 uv, device const Material& m)
@@ -526,21 +554,6 @@ void generateCameraRay(uint2 pixelIndex,
     }
 }
 
-// Ray-cone level of detail, following Akenine-Moller et al: the triangle term
-// carries texels per world unit, the cone term carries how wide the footprint
-// has grown, and the texture contributes its own resolution here because one
-// material's slots are rarely all the same size.
-template <typename Tex2D>
-inline float texLod(Tex2D tex, float lodBase, bool hasLod)
-{
-    if (!hasLod)
-    {
-        return 0.0f;
-    }
-    const float dim = float(tex.get_width() * tex.get_height());
-    return max(0.0f, lodBase + 0.5f * log2(max(dim, 1.0f)));
-}
-
 // Geometry-only half of surface initialisation. Native OpenPBR materials use
 // it without ever touching the parallel generic Material record; their maps
 // need the frame before their parameter block can be finalised below.
@@ -573,42 +586,35 @@ static __attribute__((always_inline)) void initOpenPBRSurfaceMaterial(thread Sur
                                                                       device const OpenPBRParams& p,
                                                                       float3 vertexColor)
 {
-    const float3 base = float3(p.base_color.r, p.base_color.g, p.base_color.b);
-    si.albedo = base * vertexColor;
     // OpenPBR opacity has historically not participated in Metal traversal or
     // shadow coverage. Preserve that contract here; making it coherent across
     // all ray types is a separate correctness change, not part of this fast path.
     si.opacity = 1.0f;
-    // These are compatibility fields read by common integrator code, not by
-    // the OpenPBR BSDF. Match the old MaterialX -> Material projection so this
-    // optimisation changes neither path topology nor the estimator.
-    si.metallic = 0.0f;
+    // Only these values survive into the common continuation. The OpenPBR BSDF
+    // consumes its own parameter block directly; eagerly filling every generic
+    // Material field kept the whole SurfaceInteraction aggregate live through
+    // prepare, NEE and sample even though those fields were constants.
     si.roughness = 0.0001f;
     si.ior = 0.0f;
     si.transmission = 0.0f;
     si.emission = float3(p.emission_color.r, p.emission_color.g, p.emission_color.b) * p.emission_luminance;
-    si.clearcoat = 0.0f;
-    si.clearcoat_roughness = 0.0001f;
-    si.clearcoat_ior = 1.5f;
-    si.anisotropy = 0.0f;
-    si.specular = 0.0f;
-    si.specular_color = float3(1.0f);
-    si.subsurface_reference = float3(0.0f);
-    si.iridescence = 0.0f;
-    si.iridescence_ior = 1.3f;
-    si.iridescence_thickness = 0.0f;
     si.diffuse_transmission = 0.0f;
-    si.diffuse_transmission_color = float3(0.0f);
-    si.sheen = 0.0f;
-    si.sheen_roughness = 0.0f;
-    si.sheen_color = float3(0.0f);
     si.subsurface = saturate(p.subsurface_weight);
-    si.subsurface_radius = float3(0.0f);
-    si.subsurface_anisotropy = 0.0f;
-    si.material_type = MATERIAL_TYPE_OPENPBR;
     si.thin_walled = p.geometry_thin_walled;
     si.dielectric_priority = 0u;
     si.exterior_ior = 1.0f;
+
+    // SHaRC's current common demodulation path still projects OpenPBR onto the
+    // generic base/specular fields. Keep that cold compatibility state only in
+    // variants which can actually read it.
+    if (SPEC_SHARC || SPEC_SHARC_UPDATE)
+    {
+        const float3 base = float3(p.base_color.r, p.base_color.g, p.base_color.b);
+        si.albedo = base * vertexColor;
+        si.metallic = 0.0f;
+        si.specular = 0.0f;
+        si.specular_color = float3(1.0f);
+    }
 }
 
 // Fill SurfaceInteraction from hit geometry and sample Material textures
@@ -982,17 +988,18 @@ static float3 offset_ray(const float3 p, const float3 n)
 static float3 emittedLightRadiance(device const UniformLight& light,
                                    float3 directionFromLight,
                                    float distance,
-                                   device const IesGpuBufferHeader* iesBuffer)
+                                   device const IesGpuBufferHeader* iesBuffer,
+                                   int lightType)
 {
     float3 radiance = float3(light.color);
-    if (lightIsPunctual(light.type))
+    if (lightIsPunctual(lightType))
     {
         const float safeDistance = max(distance, 1e-4f);
         const bool soft = punctualLightIsSoft(light.points[0].x);
         radiance *= rangeWindow(light, safeDistance) *
                     (soft ? sphereRadianceFromIntensity(light.points[0].x) : (1.0f / (safeDistance * safeDistance)));
         const bool hasIes = light.points[0].y >= 0.0f;
-        if (light.type == LIGHT_TYPE_PROJECTOR)
+        if (lightType == LIGHT_TYPE_PROJECTOR)
         {
             radiance *= projectorEmission(light, directionFromLight);
         }
@@ -1000,12 +1007,20 @@ static float3 emittedLightRadiance(device const UniformLight& light,
         {
             radiance *= sampleIesCandela(iesBuffer, light, directionFromLight);
         }
-        else if (light.type == LIGHT_TYPE_SPOT)
+        else if (lightType == LIGHT_TYPE_SPOT)
         {
             radiance *= spotAttenuation(light, directionFromLight);
         }
     }
-    return radiance * areaFalloff(light, distance);
+    return radiance * areaFalloff(light, distance, lightType);
+}
+
+static float3 emittedLightRadiance(device const UniformLight& light,
+                                   float3 directionFromLight,
+                                   float distance,
+                                   device const IesGpuBufferHeader* iesBuffer)
+{
+    return emittedLightRadiance(light, directionFromLight, distance, iesBuffer, light.type);
 }
 
 LightConnection connectLightSample(constant Uniforms& uniforms,
@@ -1022,11 +1037,12 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
                                    float analyticSelectionPdf,
                                    float lightSelectionPdf)
 {
+    const int lightType = SPEC_ALL_ANALYTIC_LIGHTS_RECT ? LIGHT_TYPE_RECT : light.type;
     LightSampleData lightSampleData = {};
-    switch (light.type)
+    switch (lightType)
     {
     case LIGHT_TYPE_RECT:
-        if (uniforms.rectLightSamplingMethod == 0)
+        if (SPEC_UNIFORM_RECT_LIGHT_SAMPLING)
         {
             lightSampleData = SampleRectLightUniform(light, uv, si.position);
         }
@@ -1064,12 +1080,12 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
     }
 
     LightConnection c = makeEmptyConnection();
-    c.sample = reconnecting ? storedSample : restirAnalyticSample(lightId, light.type, uv, lightSampleData.L);
+    c.sample = reconnecting ? storedSample : restirAnalyticSample(lightId, lightType, uv, lightSampleData.L);
     c.toLight = lightSampleData.L;
-    const float shapeParameter = lightIsPunctual(light.type) ? light.points[0].x : light.halfAngle;
-    c.isDelta = lightIsDeltaForMis(light.type, shapeParameter);
+    const float shapeParameter = lightIsPunctual(lightType) ? light.points[0].x : light.halfAngle;
+    c.isDelta = lightIsDeltaForMis(lightType, shapeParameter);
 
-    const float3 Li = emittedLightRadiance(light, -lightSampleData.L, lightSampleData.distToLight, iesBuffer);
+    const float3 Li = emittedLightRadiance(light, -lightSampleData.L, lightSampleData.distToLight, iesBuffer, lightType);
 
     // For area lights the facing test uses the light's surface normal; for a
     // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
@@ -1081,8 +1097,8 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
     // light hit still deducts a share for them loses that share outright. OptiX
     // has always tested against zero.
     const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
-    const bool facesLight = lightConnectionFacesVertex(light.type, -dot(lightSampleData.L, lightSampleData.normal),
-                                                       lightIsPunctual(light.type) ? light.points[0].x : 0.0f);
+    const bool facesLight = lightConnectionFacesVertex(lightType, -dot(lightSampleData.L, lightSampleData.normal),
+                                                       lightIsPunctual(lightType) ? light.points[0].x : 0.0f);
     const bool facing = (volumeEvent || lit) && facesLight && emitsLight(Li);
     if (facing)
     {
@@ -1108,11 +1124,11 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
         // to the complementary BSDF-hit path; calling it here repeated
         // fillLightData() (a full ellipsoid intersection for a sphere) and
         // rectSolidAngle().
-        const LightPdfQuery query = buildLightPdfQuery(light, lightSampleData);
+        const LightPdfQuery query = buildLightPdfQuery(light, lightSampleData, lightType);
         c.pdf = marginalLightSolidAnglePdf(query, localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
         c.tMax = lightSampleData.distToLight;
         c.needsRay = true;
-        if (lightUsesAnalyticSurfaceIntersection(light.type, lightIsPunctual(light.type) ? light.points[0].x : 0.0f))
+        if (lightUsesAnalyticSurfaceIntersection(lightType, lightIsPunctual(lightType) ? light.points[0].x : 0.0f))
         {
             c.visibilityTarget =
                 offset_ray(lightSampleData.pointOnLight, orientedFaceNormal(lightSampleData.normal, -lightSampleData.L));
@@ -1481,7 +1497,7 @@ LightConnection connectToLight(constant Uniforms& uniforms,
                                bool volumeEvent = false)
 {
     const bool hasAnalytic = SPEC_LIGHTS && numLights > 0u;
-    const bool hasMesh = SPEC_LIGHTS && uniforms.numEmissiveMeshes > 0u;
+    const bool hasMesh = SPEC_LIGHTS && SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0u;
     const bool hasLocal = hasAnalytic || hasMesh;
     // Keep the categorical emitter choice coherent within a SIMD-group. Each
     // lane still has the same marginal distribution and draws its own light
@@ -1561,7 +1577,7 @@ LightConnection reconnectRestirSampleContext(constant Uniforms& uniforms,
                                              thread const RestirLightSample& sample)
 {
     const bool hasAnalytic = SPEC_LIGHTS && numLights > 0u;
-    const bool hasMesh = SPEC_LIGHTS && numEmissiveMeshes > 0u;
+    const bool hasMesh = SPEC_LIGHTS && SPEC_EMISSIVE_MESH_LIGHTS && numEmissiveMeshes > 0u;
     const bool hasLocal = hasAnalytic || hasMesh;
     const float localSelectionPdf = SPEC_ENV_MAP && hasEnvMap && hasLocal ? 1.0f - envSelectionPdf : 1.0f;
     const uint32_t sampleType = restirSampleType(sample);

@@ -19,6 +19,91 @@
 #undef STRELKA_OPENPBR_FEATURE_EnableSheenAndCoat
 #include <sharc_query_eligibility.h>
 
+// ShadeBase never reaches coat, fuzz, transmission, thin-film or subsurface
+// lobes. Keep the common 272-byte device block out of thread memory and retain
+// only the fields that feed its base/specular preparation.
+static __attribute__((always_inline)) void loadOpenPBRBaseParams(device const OpenPBRParams& p,
+                                                                 thread OpenPBR_BaseParams& base)
+{
+    base.base_color = p.base_color;
+    base.base_weight = p.base_weight;
+    base.base_diffuse_roughness = p.base_diffuse_roughness;
+    base.base_metalness = p.base_metalness;
+    base.specular_weight = p.specular_weight;
+    base.specular_roughness = p.specular_roughness;
+    base.specular_color = p.specular_color;
+    base.specular_roughness_anisotropy = p.specular_roughness_anisotropy;
+    base.specular_ior = p.specular_ior;
+    base.specular_anisotropy_rotation_cos = p.specular_anisotropy_rotation_cos;
+    base.specular_anisotropy_rotation_sin = p.specular_anisotropy_rotation_sin;
+}
+
+// Texture counterpart of loadOpenPBRBaseParams. The source block stays in
+// device memory; emission and the normal map update SurfaceInteraction at the
+// same point as the generic path.
+static void applyOpenPBRBaseTextures(thread OpenPBR_BaseParams& p,
+                                     device const OpenPBRParams& source,
+                                     device const OpenPBRTextures& t,
+                                     thread SurfaceInteraction& si,
+                                     float2 uv,
+                                     float lodBase = -1e30f)
+{
+    const float c = cos(source.uv_rotation);
+    const float sn = sin(source.uv_rotation);
+    const float2 k = float2(source.uv_scale_x, source.uv_scale_y);
+    const float2 tuv = float2(uv.x * k.x * c - uv.y * k.y * sn, uv.x * k.x * sn + uv.y * k.y * c) +
+                       float2(source.uv_offset_x, source.uv_offset_y);
+    const bool hasLod = lodBase > -1e29f;
+    constexpr sampler openpbrSampler(mag_filter::linear, min_filter::linear, mip_filter::linear, address::repeat);
+#define SAMPLE_OPENPBR_BASE_TEXTURE(slot)                                                                              \
+    t.tex[slot].sample(openpbrSampler, tuv, level(texLod(t.tex[slot], lodBase, hasLod)))
+
+    const uint32_t mask = source.texture_mask;
+    if ((mask & (1u << OPENPBR_TEX_BASE_COLOR)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_BASE_COLOR]))
+    {
+        const float3 v = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_BASE_COLOR).rgb;
+        p.base_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if ((mask & (1u << OPENPBR_TEX_BASE_METALNESS)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_BASE_METALNESS]))
+    {
+        p.base_metalness = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_BASE_METALNESS).r;
+    }
+    if ((mask & (1u << OPENPBR_TEX_SPECULAR_ROUGHNESS)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ROUGHNESS]))
+    {
+        p.specular_roughness = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_SPECULAR_ROUGHNESS).r;
+    }
+    if ((mask & (1u << OPENPBR_TEX_SPECULAR_ANISOTROPY)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ANISOTROPY]))
+    {
+        p.specular_roughness_anisotropy = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_SPECULAR_ANISOTROPY).r;
+    }
+    if ((mask & (1u << OPENPBR_TEX_SPECULAR_COLOR)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_COLOR]))
+    {
+        const float3 v = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_SPECULAR_COLOR).rgb;
+        p.specular_color = OpenPBRColor{ v.r, v.g, v.b };
+    }
+    if ((mask & (1u << OPENPBR_TEX_EMISSION_COLOR)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_EMISSION_COLOR]))
+    {
+        constexpr sampler emissionSampler(mag_filter::linear, min_filter::linear, address::repeat);
+        const float3 v = t.tex[OPENPBR_TEX_EMISSION_COLOR].sample(emissionSampler, tuv).rgb;
+        si.emission = v * source.emission_luminance;
+    }
+    if ((mask & (1u << OPENPBR_TEX_GEOMETRY_NORMAL)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_GEOMETRY_NORMAL]))
+    {
+        const float2 xy = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_GEOMETRY_NORMAL).xy * 2.0f - 1.0f;
+        const float z = sqrt(saturate(1.0f - dot(xy, xy)));
+        const float3x3 TBN = float3x3(si.tangent, si.bitangent, si.shading_normal);
+        si.shading_normal = normalize(TBN * float3(xy, z));
+        si.bump_normal = si.shading_normal;
+        if (dot(si.shading_normal, si.wo) <= 0.0f)
+        {
+            const float3 facingGeom = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
+            si.shading_normal = ensureValidSpecularReflection(facingGeom, si.wo, si.shading_normal);
+            si.diffuse_faces_away = true;
+        }
+    }
+#undef SAMPLE_OPENPBR_BASE_TEXTURE
+}
+
 // Path state stays pixel-indexed while queues compact live indices between stages.
 // Shadow traversal is deferred so its incoherent work stays out of shade.
 
@@ -141,13 +226,20 @@ WF_ANALYTIC_INTERSECTION_FAMILY(RestirSpatialDiagnostic)
 #define WF_CTRL_SHADE_BASE_DIS 80
 #define WF_CTRL_SHADE_LAYER_START 83
 #define WF_CTRL_SHADE_LAYER_DIS 84
-#define WF_CTRL_SHADE_TAIL_START 87
-#define WF_CTRL_SHADE_TAIL_DIS 88
+#define WF_CTRL_SHADE_TRANSLUCENT_START 87
+#define WF_CTRL_SHADE_TRANSLUCENT_DIS 88
+#define WF_CTRL_SHADE_TAIL_START 91
+#define WF_CTRL_SHADE_TAIL_DIS 92
 // Profiling only: live path count and shadow ray count per bounce, so the
 // per-stage timings can be read as a cost per ray rather than a cost per stage.
 #define WF_CTRL_STATS_PATHS 32
 #define WF_CTRL_STATS_SHADOW 64
 #define WF_HIT_BUCKET_COUNT 4u
+#define WF_SHADE_BASE 0u
+#define WF_SHADE_LAYER 1u
+#define WF_SHADE_TRANSLUCENT 2u
+#define WF_SHADE_TAIL 3u
+#define WF_SHADE_GENERIC 4u
 
 // Shared pre-traversal breadcrumbs. The prepare dispatch completes before
 // extend starts, so these survive even when one of the first few rays wedges in
@@ -155,7 +247,7 @@ WF_ANALYTIC_INTERSECTION_FAMILY(RestirSpatialDiagnostic)
 #define WF_DIAG_BOUNCES 96
 #define WF_DIAG_LANES 4
 #define WF_DIAG_LANE_WORDS 11
-#define WF_DIAG_STRIDE (1 + WF_DIAG_LANES * WF_DIAG_LANE_WORDS)
+#define WF_DIAG_STRIDE (2 + WF_DIAG_LANES * WF_DIAG_LANE_WORDS)
 #define WF_STAGE_BREADCRUMB 96
 #define WF_DIAG_BASE 97
 
@@ -457,7 +549,45 @@ struct ExtendIntersection
     float distance;
     float2 barycentrics;
     float curveParameter;
+    device const void* primitiveData;
 };
+
+static void fetchTriangleBlended(device const char* vertexBuffer,
+                                 device const char* prevVertexBuffer,
+                                 device const uint32_t* indexBuffer,
+                                 GeometryEntry entry,
+                                 uint32_t primitiveId,
+                                 bool interpolateMotion,
+                                 float motionTime,
+                                 float2 bary,
+                                 thread float3& outNormal,
+                                 thread float3& outTangent,
+                                 thread float2& outUv,
+                                 thread float3& outColor,
+                                 thread float& tangentSign,
+                                 thread float3& outGeomNormal,
+                                 thread float& outUvArea2);
+
+static inline uint32_t packSurfaceNormal(float3 normal)
+{
+    constexpr float scale = 256.0f;
+    const uint3 q = uint3(clamp((normal + 1.0f) * scale, 0.0f, 1023.0f));
+    return (q.z << 20) | (q.y << 10) | q.x;
+}
+
+static inline uint32_t packSurfaceUv(float2 uv)
+{
+    const uint2 q = uint2(clamp((uv + 10.0f) * (16383.99999f / 20.0f), 0.0f, 65535.0f));
+    return (q.y << 16) | q.x;
+}
+
+static inline uint32_t packSurfaceColor(float3 color)
+{
+    const uint3 q = uint3(round(saturate(color) * 255.0f));
+    return q.x | (q.y << 8) | (q.z << 16) | 0xff000000u;
+}
+
+#define SURFACE_GEOMETRY_PAYLOAD_ENABLED true
 
 template <typename R>
 static inline ExtendIntersection captureExtendIntersection(thread const R& r, float curveParameter)
@@ -470,6 +600,7 @@ static inline ExtendIntersection captureExtendIntersection(thread const R& r, fl
     out.distance = INFINITY;
     out.barycentrics = float2(0.0f);
     out.curveParameter = 0.0f;
+    out.primitiveData = nullptr;
     if (r.type != intersection_type::none)
     {
         out.instanceId = r.instance_id;
@@ -479,6 +610,7 @@ static inline ExtendIntersection captureExtendIntersection(thread const R& r, fl
         if (r.type == intersection_type::triangle)
         {
             out.barycentrics = r.triangle_barycentric_coord;
+            out.primitiveData = r.primitive_data;
         }
         else if (r.type == intersection_type::curve)
         {
@@ -575,6 +707,20 @@ static inline float sharcReceiverRoughness(bool isOpenPBR,
     roughness = sharcReceiverLobeRoughness(roughness, si.clearcoat_roughness, si.clearcoat);
     roughness = sharcReceiverLobeRoughness(roughness, si.sheen_roughness, si.sheen);
     return roughness;
+}
+
+static inline float sharcReceiverRoughness(bool isOpenPBR,
+                                           thread const OpenPBR_BaseParams& openpbr,
+                                           thread const SurfaceInteraction& si)
+{
+    if (isOpenPBR)
+    {
+        return sharcReceiverLobeRoughness(1.0f, openpbr.specular_roughness, openpbr.specular_weight);
+    }
+
+    float roughness = sharcReceiverLobeRoughness(1.0f, si.roughness, 1.0f);
+    roughness = sharcReceiverLobeRoughness(roughness, si.clearcoat_roughness, si.clearcoat);
+    return sharcReceiverLobeRoughness(roughness, si.sheen_roughness, si.sheen);
 }
 
 // ---------------------------------------------------------------------------
@@ -852,28 +998,28 @@ static inline void hitQueuePush(constant Uniforms& uniforms,
     }
 }
 
+template <uint ShadeBucket>
 static inline uint32_t bucketedHitIndex(uint32_t index, device const uint32_t* queue, device const uint32_t* control)
 {
     const uint32_t capacity = control[WF_CTRL_CAPACITY];
 
-    // The three OpenPBR shade PSOs already know which contiguous logical
-    // segment they consume. Avoid walking the preceding bucket counters again
-    // for the base and layer segments; only the tail PSO still has to choose
-    // between its two physical buckets.
-    if (SPEC_SHADE_BASE)
+    // Each OpenPBR shade PSO knows which contiguous logical segment it consumes,
+    // so none of them needs to walk the preceding bucket counters.
+    if (ShadeBucket == WF_SHADE_BASE)
     {
         return WF_HIT_BUCKET_COUNT + index;
     }
-    if (SPEC_SHADE_LAYER)
+    if (ShadeBucket == WF_SHADE_LAYER)
     {
         return WF_HIT_BUCKET_COUNT + capacity + index - control[WF_CTRL_SHADE_LAYER_START];
     }
-    if (SPEC_SHADE_TAIL)
+    if (ShadeBucket == WF_SHADE_TRANSLUCENT)
     {
-        index -= control[WF_CTRL_SHADE_TAIL_START];
-        const uint32_t count2 = min(queue[2], capacity);
-        return index < count2 ? WF_HIT_BUCKET_COUNT + 2u * capacity + index :
-                                WF_HIT_BUCKET_COUNT + 3u * capacity + index - count2;
+        return WF_HIT_BUCKET_COUNT + 2u * capacity + index - control[WF_CTRL_SHADE_TRANSLUCENT_START];
+    }
+    if (ShadeBucket == WF_SHADE_TAIL)
+    {
+        return WF_HIT_BUCKET_COUNT + 3u * capacity + index - control[WF_CTRL_SHADE_TAIL_START];
     }
 
     const uint32_t count0 = min(queue[0], capacity);
@@ -906,7 +1052,8 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
                                        device uint32_t* missQueue,
                                        device atomic_uint* missCounter,
                                        device const uint32_t* control,
-                                       device const GeometryEntry* geometryEntries)
+                                       device const GeometryEntry* geometryEntries,
+                                       bool forceTail)
 {
     if (hit.type == intersection_type::none)
     {
@@ -925,7 +1072,9 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
     rec.distance = hit.distance;
     *wavefrontHitRecord(hits, tid) = rec;
     const uint32_t bucket =
-        isLight ? 3u : ((geometryEntries[rec.geomEntryIndex].flags & GEOM_SHADE_BUCKET_MASK) >> GEOM_SHADE_BUCKET_SHIFT);
+        (isLight || forceTail) ?
+            3u :
+            ((geometryEntries[rec.geomEntryIndex].flags & GEOM_SHADE_BUCKET_MASK) >> GEOM_SHADE_BUCKET_SHIFT);
     hitQueuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY], bucket);
 }
 
@@ -971,13 +1120,21 @@ kernel void wavefrontClassifySss(uint gid [[thread_position_in_grid]],
 }
 
 kernel void wavefrontPrepareSss(device uint32_t* sssControl [[buffer(0)]],
-                                constant uint32_t& threadsPerGroup [[buffer(1)]])
+                                constant uint32_t& threadsPerGroup [[buffer(1)]],
+                                device uint32_t* stageStats [[buffer(2)]],
+                                constant uint32_t& bounceIdx [[buffer(3)]],
+                                constant uint32_t& diagnosticsEnabled [[buffer(4)]])
 {
     const uint32_t n = sssControl[0];
     sssControl[1] = n;
     sssControl[2] = (n + threadsPerGroup - 1u) / threadsPerGroup;
     sssControl[3] = 1u;
     sssControl[4] = 1u;
+    if (diagnosticsEnabled != 0u)
+    {
+        const uint32_t diagBase = WF_DIAG_BASE + min(bounceIdx, WF_DIAG_BOUNCES - 1u) * WF_DIAG_STRIDE;
+        stageStats[diagBase + 1u] = n;
+    }
 }
 
 template <typename T>
@@ -1076,8 +1233,12 @@ static void sssWalkImpl(uint gid,
             paths[tid] = p;
             mediumState.medium = medium | (step << MEDIUM_STEP_SHIFT);
             mediumPaths[tid] = mediumState;
+            // This surface was produced by the fused SSS traversal, not by the
+            // regular extend path that prepares compact geometry. Force shade
+            // onto its exact vertex-buffer fallback for this uncommon exit.
+            uniforms.surfaceGeometry[tid].tangent = 0u;
             enqueueExtendSurfaceResult(uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue,
-                                       missCounter, control, geometryEntries);
+                                       missCounter, control, geometryEntries, true);
             return;
         }
 
@@ -1138,6 +1299,114 @@ static void sssWalkImpl(uint gid,
 WF_SSS_WALK_ENTRY(wavefrontSssWalk, MotionTraversal)
 WF_SSS_WALK_ENTRY(wavefrontSssWalkStatic, StaticTraversal)
 
+static bool storeSurfaceGeometry(constant Uniforms& uniforms,
+                                 constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                 device const GeometryEntry* geometryEntries,
+                                 device const char* vertexBuffer,
+                                 device const char* prevVertexBuffer,
+                                 device const uint32_t* indexBuffer,
+                                 thread const ExtendIntersection& hit,
+                                 uint32_t tid,
+                                 uint32_t pathFlags,
+                                 float motionTime,
+                                 float3 rayDirection)
+{
+    if (!SURFACE_GEOMETRY_PAYLOAD_ENABLED)
+    {
+        return false;
+    }
+    if (hit.type == intersection_type::none)
+    {
+        return false;
+    }
+
+    SurfaceGeometryPayload payload = {};
+    payload.lodBase = -1e30f;
+
+    const auto inst = instances[hit.instanceId];
+    const bool isLight = inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN;
+    if (hit.type != intersection_type::triangle || isLight)
+    {
+        uniforms.surfaceGeometry[tid] = payload;
+        return false;
+    }
+
+    const GeometryEntry entry = geometryEntries[inst.userID + hit.geometryId];
+    const bool interpolateMotion =
+        SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
+    float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
+    float2 uv;
+    float tangentSign = 1.0f;
+    float uvArea2 = 0.0f;
+    const bool hasPrimitiveSurfaceData =
+        (entry.flags & GEOM_FLAG_PRIMITIVE_SURFACE_DATA) != 0u && hit.primitiveData != nullptr && !interpolateMotion;
+    if (hasPrimitiveSurfaceData)
+    {
+        device const PrimitiveSurfaceData& primitive = *(device const PrimitiveSurfaceData*)hit.primitiveData;
+        const float3 weight = float3(1.0f - hit.barycentrics.x - hit.barycentrics.y, hit.barycentrics);
+        objectNormal = float3(0.0f);
+        uv = float2(0.0f);
+        vertexColor = float3(1.0f);
+        for (uint32_t k = 0; k < 3u; ++k)
+        {
+            objectNormal += unpackNormal(primitive.normal[k]) * weight[k];
+        }
+        tangentSign = 1.0f;
+        objectGeomNormal = unpackNormal(primitive.geometryNormal);
+    }
+    else
+    {
+        fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, hit.primitiveId, interpolateMotion,
+                             motionTime, hit.barycentrics, objectNormal, objectTangent, uv, vertexColor, tangentSign,
+                             objectGeomNormal, uvArea2);
+    }
+
+    const float3 axisX = float3(inst.transformationMatrix[0]);
+    const float3 axisY = float3(inst.transformationMatrix[1]);
+    const float3 axisZ = float3(inst.transformationMatrix[2]);
+    const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
+    const float3 shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                                     normalTransform.cofactorZ, normalTransform.orientation);
+    const float3 worldGeomNormal = normalTransform.cofactorX * objectGeomNormal.x +
+                                   normalTransform.cofactorY * objectGeomNormal.y +
+                                   normalTransform.cofactorZ * objectGeomNormal.z;
+    const float worldArea2 = length(worldGeomNormal);
+    if (!(worldArea2 > 1e-20f) || !all(isfinite(shadingNormal)))
+    {
+        uniforms.surfaceGeometry[tid] = payload;
+        return false;
+    }
+    const float3 geometryNormal = normalTransform.orientation * (worldGeomNormal / worldArea2);
+    float3 tangent;
+    if (hasPrimitiveSurfaceData)
+    {
+        const float3 tangentAxis = abs(shadingNormal.z) < 0.999f ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+        tangent = normalize(cross(tangentAxis, shadingNormal));
+    }
+    else
+    {
+        tangent = orthonormalizeTangent(shadingNormal, transformDirection(objectTangent, axisX, axisY, axisZ));
+    }
+
+    const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
+    const uint32_t depth = pathDepth(pathFlags);
+    const float coneSpread = (depth == 0u || (pathFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
+    const float coneWidthHere = coneSpread * hit.distance;
+    if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && coneWidthHere > 0.0f)
+    {
+        const float ndotd = max(abs(dot(geometryNormal, rayDirection)), 1e-4f);
+        payload.lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+    }
+
+    payload.shadingNormal = packSurfaceNormal(shadingNormal);
+    payload.geometryNormal = packSurfaceNormal(geometryNormal);
+    payload.tangent = packSurfaceNormal(tangent) | (tangentSign < 0.0f ? (1u << 30) : 0u) | SURFACE_GEOMETRY_VALID;
+    payload.uv = packSurfaceUv(uv);
+    payload.color = packSurfaceColor(vertexColor);
+    uniforms.surfaceGeometry[tid] = payload;
+    return true;
+}
+
 template <typename T>
 static void extendImpl(uint gid,
                        constant Uniforms& uniforms,
@@ -1163,6 +1432,9 @@ static void extendImpl(uint gid,
                        device const MediumPathState* mediumPaths,
                        device const GeometryEntry* geometryEntries,
                        typename T::table functionTable,
+                       device const char* vertexBuffer,
+                       device const char* prevVertexBuffer,
+                       device const uint32_t* indexBuffer,
                        // Chosen per dispatch rather than per ray: the only thing it distinguishes
                        // is the camera bounce from the rest, and `extend` is encoded once per
                        // bounce anyway. Reading the path's depth here to answer the same question
@@ -1192,8 +1464,9 @@ static void extendImpl(uint gid,
         }
     }
     const PathRay pr = rays[tid];
+    const uint32_t pathFlags = paths[tid].depthAndFlags;
 
-    const uint32_t auditBounce = min(pathDepth(paths[tid].depthAndFlags), WORK_BOUNCE_SLOTS - 1u);
+    const uint32_t auditBounce = min(pathDepth(pathFlags), WORK_BOUNCE_SLOTS - 1u);
     auditWork(uniforms, WORK_EXTEND_RAYS_BASE + auditBounce);
     auditWork(uniforms, WORK_INTERSECTION_QUERIES);
     auditWork(uniforms, WORK_EXTENSION_QUERIES);
@@ -1205,7 +1478,7 @@ static void extendImpl(uint gid,
     // solve different halves of self-intersection. Round curves can still report
     // the surface the secondary ray just left at an almost-zero t after several
     // fibre crossings.
-    r.min_distance = pathDepth(paths[tid].depthAndFlags) == 0u ? 0.0f : 1e-6f;
+    r.min_distance = pathDepth(pathFlags) == 0u ? 0.0f : 1e-6f;
     r.max_distance = INFINITY;
     r.origin = float3(pr.origin);
     r.direction = float3(pr.direction);
@@ -1248,7 +1521,7 @@ static void extendImpl(uint gid,
                 const float3 sigmaT = mp.sigmaT;
                 const float3 albedo = mp.albedo;
                 const float3 channelPdf = sssChannelPdf(float3(paths[tid].throughput), albedo);
-                SamplerState srng = samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags) + step);
+                SamplerState srng = samplerFor(uniforms, tid, sampleIdx, pathDepth(pathFlags) + step);
                 const float2 distanceRandom =
                     random2<SampleDimension::eSssChannel, SampleDimension::eSssDistance>(srng, uniforms.samplerType).value;
                 // Bound free flights by the scene: a longer draw left the medium and can wedge traversal on leaked
@@ -1263,7 +1536,7 @@ static void extendImpl(uint gid,
     }
     if (SPEC_FOG && uniforms.hasFog && !insideSss)
     {
-        SamplerState frng = samplerFor(uniforms, tid, sampleIdx, pathDepth(paths[tid].depthAndFlags));
+        SamplerState frng = samplerFor(uniforms, tid, sampleIdx, pathDepth(pathFlags));
         if (fogSampleDistance(r.origin, r.direction, 1e16f, uniforms.fogHeight, uniforms.fogSigmaT,
                               random<SampleDimension::eFogDistance>(frng, uniforms.samplerType), mediumScatterT))
         {
@@ -1326,8 +1599,11 @@ static void extendImpl(uint gid,
         return;
     }
 
-    enqueueExtendSurfaceResult(
-        uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control, geometryEntries);
+    const bool hasSurfaceGeometry =
+        storeSurfaceGeometry(uniforms, instances, geometryEntries, vertexBuffer, prevVertexBuffer, indexBuffer, hit,
+                             tid, pathFlags, motionTime, r.direction);
+    enqueueExtendSurfaceResult(uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter,
+                               control, geometryEntries, !hasSurfaceGeometry);
 }
 
 
@@ -1343,11 +1619,14 @@ static void extendImpl(uint gid,
         device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
         constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
         constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],       \
-        device const GeometryEntry* geometryEntries [[buffer(18)]], TRAITS::table functionTable [[buffer(19)]])        \
+        device const GeometryEntry* geometryEntries [[buffer(18)]], TRAITS::table functionTable [[buffer(19)]],        \
+        device const char* vertexBuffer [[buffer(20)]], device const char* prevVertexBuffer [[buffer(21)]],            \
+        device const uint32_t* indexBuffer [[buffer(22)]])                                                             \
     {                                                                                                                  \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
                            rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
-                           materials, mediumPaths, geometryEntries, functionTable, rayMask);                           \
+                           materials, mediumPaths, geometryEntries, functionTable, vertexBuffer, prevVertexBuffer,     \
+                           indexBuffer, rayMask);                                                                      \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -1824,6 +2103,25 @@ static inline DenoiserMaterialGuides openpbrDenoiserGuides(thread const OpenPBR_
     return g;
 }
 
+static inline DenoiserMaterialGuides openpbrBaseDenoiserGuides(thread const OpenPBR_BaseParams& in,
+                                                               thread const SurfaceInteraction& si)
+{
+    DenoiserMaterialGuides g;
+    const float3 weightedBase = openpbr_color_to_float3(in.base_color) * in.base_weight;
+    const float dielectric = 1.0f - in.base_metalness;
+    g.diffuse = weightedBase * dielectric;
+
+    const float cosView = saturate(abs(dot(float3(si.shading_normal), float3(si.wo))));
+    const float dielectricF0 = f0_from_ior(max(in.specular_ior, 1.0f)) * in.specular_weight;
+    const float3 dielectricSpecular = saturate(openpbr_color_to_float3(in.specular_color) * dielectricF0);
+    const float3 metalSpecular = saturate(weightedBase * in.specular_weight);
+    const float3 f0 = mix(dielectricSpecular, metalSpecular, in.base_metalness);
+    g.specular = fresnel_schlick_roughness(f0, cosView, in.specular_roughness);
+    g.roughness = in.specular_roughness;
+    g.transmission = 0.0f;
+    return g;
+}
+
 static inline float denoiserInterfaceIor(bool isOpenPBR,
                                          thread const OpenPBRParams& openpbr,
                                          thread const SurfaceInteraction& si,
@@ -1843,6 +2141,21 @@ static inline float denoiserInterfaceIor(bool isOpenPBR,
     const float surrounding = entersCoat ? mix(exterior, max(openpbr.coat_ior, 1.0f), openpbr.coat_weight) : exterior;
     return surrounding *
            openpbr_apply_specular_weight_to_ior(max(openpbr.specular_ior, 1.0f) / surrounding, openpbr.specular_weight);
+}
+
+static inline float denoiserInterfaceIor(bool isOpenPBR,
+                                         thread const OpenPBR_BaseParams& openpbr,
+                                         thread const SurfaceInteraction& si,
+                                         bool entering)
+{
+    (void)entering;
+    if (!isOpenPBR)
+    {
+        return max(si.ior, 1.0f);
+    }
+    const float exterior = max(si.exterior_ior, 1e-4f);
+    return exterior *
+           openpbr_apply_specular_weight_to_ior(max(openpbr.specular_ior, 1.0f) / exterior, openpbr.specular_weight);
 }
 
 static inline uint32_t packGuideIors(float currentIor, float exteriorIor)
@@ -2017,7 +2330,9 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             const float envPdf =
                 envMapPdf(rayDir, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation);
             const float envSelectionPdf =
-                (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0) ? uniforms.envMapColorTint.w : 1.0f;
+                (uniforms.numLights > 0 || (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0)) ?
+                    uniforms.envMapColorTint.w :
+                    1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
             // A texel of zero luminance has zero sampling density, so light
             // sampling could never have produced this direction and the BSDF
@@ -2043,7 +2358,9 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     if (SPEC_LIGHTS)
     {
         const float localSelectionPdf = (SPEC_ENV_MAP && uniforms.hasEnvMap) ? (1.0f - uniforms.envMapColorTint.w) : 1.0f;
-        const float analyticClassPdf = uniforms.numEmissiveMeshes > 0u ? (1.0f - uniforms.meshLightSelectionPdf) : 1.0f;
+        const float analyticClassPdf = SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0u ?
+                                           (1.0f - uniforms.meshLightSelectionPdf) :
+                                           1.0f;
         for (uint32_t infiniteIndex = 0; infiniteIndex < uniforms.numInfiniteLights; ++infiniteIndex)
         {
             auditWork(uniforms, WORK_MISS_LIGHT_EVALUATIONS);
@@ -2395,57 +2712,215 @@ static inline ShadowRay loadShadowRay(device const char* data, uint32_t index)
     return ray;
 }
 
-kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
-                           constant Uniforms& uniforms [[buffer(0)]],
-                           constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
-                           device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
-                           device UniformLight* lights [[buffer(3)]],
-                           device Material* materials [[buffer(4)]],
-                           device PathState* paths [[buffer(5)]],
-                           device PathRay* rays [[buffer(21)]],
-                           device char* hits [[buffer(6)]],
-                           device float4* radianceOut [[buffer(7)]],
-                           device IorStack* iorStacks [[buffer(8)]],
-                           device const GeometryEntry* geometryEntries [[buffer(9)]],
-                           device const EnvAliasEntry* envAliasTable [[buffer(10)]],
-                           device const char* vertexBuffer [[buffer(11)]],
-                           device const char* prevVertexBuffer [[buffer(12)]],
-                           device const uint32_t* indexBuffer [[buffer(13)]],
-                           constant uint32_t& sampleIdx [[buffer(14)]],
-                           device const uint32_t* queue [[buffer(15)]],
-                           device uint32_t* queueOut [[buffer(16)]],
-                           device atomic_uint* outCounter [[buffer(17)]],
-                           device uint32_t* control [[buffer(18)]],
-                           device char* shadowRays [[buffer(19)]],
-                           device atomic_uint* shadowCounter [[buffer(20)]],
-                           device AovSample* aov [[buffer(22)]],
-                           // The previous frame's pose, for motion vectors. Separate from
-                           // prevVertexBuffer, which is a motion-blur shutter keyframe and is forced
-                           // equal to the current pose whenever motion blur is off.
-                           device char* sharcPassBuffer0 [[buffer(23)]],
-                           device const char* sharcPassBuffer1 [[buffer(24)]],
-                           CurveStaticTraversal::structure diagnosticAccelerationStructure [[buffer(25)]],
-                           CurveStaticTraversal::table diagnosticFunctionTable [[buffer(26)]],
-                           device const uint32_t* curveSegments [[buffer(27)]],
-                           // Two counters for the ways the nested-dielectric stack loses a path; see
-                           // ShaderTypes.h. Written only when one of them has already gone wrong.
-                           device atomic_uint* iorStats [[buffer(28)]],
-                           device char* sharcPassState [[buffer(29)]],
-                           device MediumPathState* mediumPaths [[buffer(30)]],
-                           texture2d<float> envMapTexture [[texture(0)]])
+static inline BaseLightConnectionPayload packBaseLightConnection(thread const LightConnection& connection)
 {
-    gid += SPEC_SHADE_TAIL ? control[WF_CTRL_SHADE_TAIL_START] :
-                             (SPEC_SHADE_LAYER ? control[WF_CTRL_SHADE_LAYER_START] : 0u);
+    BaseLightConnectionPayload payload;
+    payload.radiance = packed_float3(connection.radiance);
+    payload.toLight = packed_float3(connection.toLight);
+    payload.origin = packed_float3(connection.origin);
+    payload.visibilityTarget = packed_float3(connection.visibilityTarget);
+    payload.pdf = connection.pdf;
+    payload.tMax = connection.tMax;
+    payload.flags = (connection.needsRay ? BASE_LIGHT_CONNECTION_NEEDS_RAY : 0u) |
+                    (connection.hasVisibilityTarget ? BASE_LIGHT_CONNECTION_VISIBILITY_TARGET : 0u) |
+                    (connection.isDelta ? BASE_LIGHT_CONNECTION_DELTA : 0u);
+    return payload;
+}
+
+static inline LightConnection unpackBaseLightConnection(device const BaseLightConnectionPayload& payload)
+{
+    LightConnection connection = makeEmptyConnection();
+    connection.radiance = float3(payload.radiance);
+    connection.toLight = float3(payload.toLight);
+    connection.origin = float3(payload.origin);
+    connection.visibilityTarget = float3(payload.visibilityTarget);
+    connection.pdf = payload.pdf;
+    connection.tMax = payload.tMax;
+    connection.needsRay = (payload.flags & BASE_LIGHT_CONNECTION_NEEDS_RAY) != 0u;
+    connection.hasVisibilityTarget = (payload.flags & BASE_LIGHT_CONNECTION_VISIBILITY_TARGET) != 0u;
+    connection.isDelta = (payload.flags & BASE_LIGHT_CONNECTION_DELTA) != 0u;
+    return connection;
+}
+
+// Diagnostic thread-local connection representation. Radiance and density
+// retain float precision; unit directions and the endpoint offsets relative to
+// the already-live surface position use half. Probe 10 consumes this value
+// directly, so comparing it with probe 5 measures compact state rather than
+// recreating the full float connection at the observation point.
+struct PackedLightConnectionProbe
+{
+    packed_float3 radiance;
+    uint2 toLight;
+    uint2 originOffset;
+    uint2 visibilityTargetOffset;
+    float pdf;
+    float tMax;
+    uint32_t flags;
+};
+
+static inline uint2 packProbeHalf3(float3 value)
+{
+    return uint2(as_type<uint>(half2(value.xy)), uint(as_type<ushort>(half(value.z))));
+}
+
+static inline PackedLightConnectionProbe packLightConnectionProbe(thread const LightConnection& connection,
+                                                                  float3 surfacePosition)
+{
+    PackedLightConnectionProbe payload;
+    payload.radiance = packed_float3(connection.radiance);
+    payload.toLight = packProbeHalf3(connection.toLight);
+    payload.originOffset = packProbeHalf3(connection.origin - surfacePosition);
+    payload.visibilityTargetOffset = packProbeHalf3(connection.visibilityTarget - surfacePosition);
+    payload.pdf = connection.pdf;
+    payload.tMax = connection.tMax;
+    payload.flags = (connection.needsRay ? BASE_LIGHT_CONNECTION_NEEDS_RAY : 0u) |
+                    (connection.hasVisibilityTarget ? BASE_LIGHT_CONNECTION_VISIBILITY_TARGET : 0u) |
+                    (connection.isDelta ? BASE_LIGHT_CONNECTION_DELTA : 0u);
+    return payload;
+}
+
+// Probe 11 stops immediately after the Base NEE eval, but keeps every field
+// needed by the later BSDF sample observable. Unlike probe 7, this prevents DCE
+// from deleting sample-only lifetime at the phase boundary without executing
+// openpbr_bsdf_sample() itself.
+static inline float baseSampleStateChecksum(thread const OpenPBR_BasePreparedBsdf& prepared)
+{
+    const thread OpenPBR_BaseMicrofacetDistribution& distribution = prepared.specular_lobe.microfacet_distr;
+    float checksum = dot(float2(distribution.alpha), float2(1.0f, 2.0f));
+    checksum += dot(float3(distribution.tangent), float3(3.0f, 5.0f, 7.0f));
+    checksum += dot(float3(distribution.bitangent), float3(11.0f, 13.0f, 17.0f));
+    checksum += dot(float3(distribution.normal), float3(19.0f, 23.0f, 29.0f));
+    checksum += float(distribution.isotropic_alpha) * 31.0f;
+    checksum += float(prepared.specular_lobe.eta_t_over_eta_i_for_opaque_part) * 37.0f;
+    checksum += float(prepared.specular_lobe.dielectric_amount) * 41.0f;
+    checksum += float(prepared.specular_lobe.metal_amount) * 43.0f;
+    checksum += prepared.metal_mms_lobe.energy_complement_idotn * 47.0f;
+    checksum += prepared.diffuse_lobe.diffuse_roughness * 53.0f;
+    checksum += prepared.diffuse_lobe.cached_specular_energy_compensation * 59.0f;
+
+    uint packedHash = hash_combine(prepared.specular_lobe.specular_color.x, prepared.specular_lobe.specular_color.y);
+    packedHash = hash_combine(packedHash, prepared.specular_lobe.f0_for_metal.x);
+    packedHash = hash_combine(packedHash, prepared.specular_lobe.f0_for_metal.y);
+    packedHash = hash_combine(packedHash, prepared.metal_mms_lobe.scale.x);
+    packedHash = hash_combine(packedHash, prepared.metal_mms_lobe.scale.y);
+    packedHash = hash_combine(packedHash, prepared.diffuse_lobe.diffuse_albedo.x);
+    packedHash = hash_combine(packedHash, prepared.diffuse_lobe.diffuse_albedo.y);
+    packedHash = hash_combine(packedHash, prepared.lobe_thresholds);
+    return checksum + float(packedHash) * (1.0f / 4294967296.0f);
+}
+
+// Plain one-candidate NEE does not need material parameters to propose a light.
+// Generate the proposal from extend's compact geometry before Base shade so the
+// light sampler and OpenPBR prepare/eval never occupy the same register live set.
+kernel void wavefrontConnectBase(uint gid [[thread_position_in_grid]],
+                                 constant Uniforms& uniforms [[buffer(0)]],
+                                 constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],
+                                 device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
+                                 device UniformLight* lights [[buffer(3)]],
+                                 device const Material* materials [[buffer(4)]],
+                                 device const PathState* paths [[buffer(5)]],
+                                 device const PathRay* rays [[buffer(6)]],
+                                 device char* hits [[buffer(7)]],
+                                 constant uint32_t& sampleIdx [[buffer(8)]],
+                                 device const uint32_t* queue [[buffer(9)]],
+                                 device const uint32_t* control [[buffer(10)]],
+                                 device const EnvAliasEntry* envAliasTable [[buffer(11)]],
+                                 device const char* vertexBuffer [[buffer(12)]],
+                                 device const char* prevVertexBuffer [[buffer(13)]],
+                                 device const uint32_t* indexBuffer [[buffer(14)]],
+                                 texture2d<float> envMapTexture [[texture(0)]])
+{
+    if (gid >= control[WF_CTRL_SHADE_LAYER_START])
+    {
+        return;
+    }
+    const uint32_t tid = queue[bucketedHitIndex<WF_SHADE_BASE>(gid, queue, control)];
+    const SurfaceGeometryPayload geometry = uniforms.surfaceGeometry[tid];
+    if ((geometry.tangent & SURFACE_GEOMETRY_VALID) == 0u)
+    {
+        const LightConnection empty = makeEmptyConnection();
+        uniforms.baseLightConnections[tid] = packBaseLightConnection(empty);
+        return;
+    }
+
+    const PathRay pathRay = rays[tid];
+    const float3 rayDirection = float3(pathRay.direction);
+    const HitRecord hit = *wavefrontHitRecord(hits, tid);
+    SurfaceInteraction lightSurface = {};
+    lightSurface.position = float3(pathRay.origin) + rayDirection * hit.distance;
+    lightSurface.shading_normal = normalize(unpackNormal(geometry.shadingNormal));
+    lightSurface.geometry_normal = normalize(unpackNormal(geometry.geometryNormal));
+    lightSurface.wo = -rayDirection;
+    lightSurface.front_face = dot(lightSurface.geometry_normal, lightSurface.wo) > 0.0f;
+    lightSurface.material_type = MATERIAL_TYPE_OPENPBR;
+
+    const uint32_t depth = pathDepth(paths[tid].depthAndFlags);
+    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
+    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
+    const LightConnection connection =
+        connectToLight(uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer,
+                       indexBuffer, motionTime, rng, lightSurface, envAliasTable, envMapTexture, iesProfiles);
+    uniforms.baseLightConnections[tid] = packBaseLightConnection(connection);
+}
+
+template <uint ShadeBucket>
+static inline void wavefrontShadeImpl(uint gid,
+                                      constant Uniforms& uniforms,
+                                      constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                      device const IesGpuBufferHeader* iesProfiles,
+                                      device UniformLight* lights,
+                                      device Material* materials,
+                                      device PathState* paths,
+                                      device PathRay* rays,
+                                      device char* hits,
+                                      device float4* radianceOut,
+                                      device IorStack* iorStacks,
+                                      device const GeometryEntry* geometryEntries,
+                                      device const EnvAliasEntry* envAliasTable,
+                                      device const char* vertexBuffer,
+                                      device const char* prevVertexBuffer,
+                                      device const uint32_t* indexBuffer,
+                                      constant uint32_t& sampleIdx,
+                                      device const uint32_t* queue,
+                                      device uint32_t* queueOut,
+                                      device atomic_uint* outCounter,
+                                      device uint32_t* control,
+                                      device char* shadowRays,
+                                      device atomic_uint* shadowCounter,
+                                      device AovSample* aov,
+                                      device char* sharcPassBuffer0,
+                                      device const char* sharcPassBuffer1,
+                                      CurveStaticTraversal::structure diagnosticAccelerationStructure,
+                                      CurveStaticTraversal::table diagnosticFunctionTable,
+                                      device const uint32_t* curveSegments,
+                                      device atomic_uint* iorStats,
+                                      device char* sharcPassState,
+                                      device MediumPathState* mediumPaths,
+                                      texture2d<float> envMapTexture)
+{
+    constexpr bool kShadeBase = ShadeBucket == WF_SHADE_BASE;
+    constexpr bool kShadeLayer = ShadeBucket == WF_SHADE_LAYER;
+    constexpr bool kShadeTranslucent = ShadeBucket == WF_SHADE_TRANSLUCENT;
+    constexpr bool kShadeTail = ShadeBucket == WF_SHADE_TAIL;
+    // Extend sends fog events, SSS scattering events and analytic-light hits
+    // directly to bucket 3. Keeping their large, mutually exclusive call
+    // graphs reachable from the three material-only kernels inflated every
+    // surface PSO even though no lane in those dispatches can take them.
+    constexpr bool kHandlesSpecialHits = kShadeTail || ShadeBucket == WF_SHADE_GENERIC;
+    gid += kShadeTail ? control[WF_CTRL_SHADE_TAIL_START] :
+                        (kShadeTranslucent ? control[WF_CTRL_SHADE_TRANSLUCENT_START] :
+                                             (kShadeLayer ? control[WF_CTRL_SHADE_LAYER_START] : 0u));
     const uint32_t segmentEnd =
-        SPEC_SHADE_TAIL ?
-            control[WF_CTRL_HIT_N] :
-            (SPEC_SHADE_LAYER ? control[WF_CTRL_SHADE_TAIL_START] :
-                                (SPEC_SHADE_BASE ? control[WF_CTRL_SHADE_LAYER_START] : control[WF_CTRL_HIT_N]));
+        kShadeTail ? control[WF_CTRL_HIT_N] :
+                     (kShadeTranslucent ?
+                          control[WF_CTRL_SHADE_TAIL_START] :
+                          (kShadeLayer ? control[WF_CTRL_SHADE_TRANSLUCENT_START] :
+                                         (kShadeBase ? control[WF_CTRL_SHADE_LAYER_START] : control[WF_CTRL_HIT_N])));
     if (gid >= segmentEnd)
     {
         return;
     }
-    const uint32_t tid = queue[bucketedHitIndex(gid, queue, control)];
+    const uint32_t tid = queue[bucketedHitIndex<ShadeBucket>(gid, queue, control)];
     device SharcHashEntry* sharcHashEntries = (device SharcHashEntry*)uniforms.sharcHashData;
     device const packed_float3* curvePoints = (device const packed_float3*)uniforms.curvePointData;
     device const char* prevFrameVertexBuffer = sharcPassBuffer0;
@@ -2520,7 +2995,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // Free-flight sampling was analog, so the only weight is the single-
     // scattering albedo -- the fraction of an extinction event that scatters
     // rather than absorbs.
-    if (SPEC_FOG && (rec.geomEntryIndex & HIT_FOG_BIT) != 0u)
+    if (kHandlesSpecialHits && SPEC_FOG && (rec.geomEntryIndex & HIT_FOG_BIT) != 0u)
     {
         SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
         const float3 scatterPoint = rayOrigin + rayDir * rec.distance;
@@ -2548,8 +3023,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // draws where the connection failed, and the two strategies stop
         // summing to one.
         const bool didNee = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0, (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
-                                             (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0,
+            (SPEC_LIGHTS && (uniforms.numLights > 0 || (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0))) ||
+                (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNee)
         {
             auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
@@ -2647,7 +3123,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     //
     // Dense random walks skip NEE; bounded media connect at the scatter vertex.
     // Surface NEE handles light entering and leaving the material.
-    if (SPEC_SSS && (rec.geomEntryIndex & HIT_SSS_BIT) != 0u)
+    if (kHandlesSpecialHits && SPEC_SSS && (rec.geomEntryIndex & HIT_SSS_BIT) != 0u)
     {
         const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
         const uint32_t step = mediumState.medium >> MEDIUM_STEP_SHIFT;
@@ -2686,7 +3162,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         const bool didNeeVolume =
             isBounded &&
             volumeNeePairsWithBounce(uniforms.estimatorMode == 0,
-                                     (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
+                                     (SPEC_LIGHTS && (uniforms.numLights > 0 ||
+                                                      (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0))) ||
                                          (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (isBounded)
         {
@@ -2800,7 +3277,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
 
     // --- Emissive geometry --------------------------------------------------
-    if (SPEC_LIGHTS && (rec.geomEntryIndex & HIT_LIGHT_BIT) != 0u)
+    if (kHandlesSpecialHits && SPEC_LIGHTS && (rec.geomEntryIndex & HIT_LIGHT_BIT) != 0u)
     {
         const uint32_t lightId = rec.geomEntryIndex & ~HIT_LIGHT_BIT;
         device const UniformLight& currLight = lights[lightId];
@@ -2913,8 +3390,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             else
             {
                 const float localSelectionPdf = uniforms.hasEnvMap ? 1.0f - uniforms.envMapColorTint.w : 1.0f;
-                const float analyticClassPdf =
-                    uniforms.numEmissiveMeshes > 0u ? 1.0f - uniforms.meshLightSelectionPdf : 1.0f;
+                const float analyticClassPdf = SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0u ?
+                                                   1.0f - uniforms.meshLightSelectionPdf :
+                                                   1.0f;
                 const float lightIdentityPdf = analyticLightSelectionPdf(currLight);
                 const float lightPdf = areaPdfToSolidAngleMarginalPdf(
                     hitDistance, lightCosine, lightAreaPdf, localSelectionPdf, analyticClassPdf, lightIdentityPdf, 1.0f);
@@ -2973,31 +3451,54 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
     else
     {
-        float uvArea2 = 0.0f;
-        fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
-                             motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
-                             objectGeomNormal, uvArea2);
-        const auto inst = instances[rec.instanceIndex];
-        const float3 axisX = float3(inst.transformationMatrix[0]);
-        const float3 axisY = float3(inst.transformationMatrix[1]);
-        const float3 axisZ = float3(inst.transformationMatrix[2]);
-        const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
-        shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
-                                            normalTransform.cofactorZ, normalTransform.orientation);
-        const float3 worldGeomNormal = normalTransform.cofactorX * objectGeomNormal.x +
-                                       normalTransform.cofactorY * objectGeomNormal.y +
-                                       normalTransform.cofactorZ * objectGeomNormal.z;
-        const float worldArea2 = length(worldGeomNormal);
-        shadingGeomNormal = normalTransform.orientation * (worldGeomNormal / worldArea2);
-        shadingTangent = orthonormalizeTangent(shadingNormal, transformDirection(objectTangent, axisX, axisY, axisZ));
-
-        const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
-        const float coneSpread = (depth == 0u || (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
-        const float coneWidthHere = coneSpread * rec.distance;
-        if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f && coneWidthHere > 0.0f)
+        const SurfaceGeometryPayload preparedGeometry = uniforms.surfaceGeometry[tid];
+        // Regular extend routes every triangle without a valid compact payload
+        // to Tail. Consequently Base/Layer/Translucent can compile without the
+        // vertex-fetch fallback and its peak live range; Tail retains the exact
+        // path for fused SSS exits, curves and degenerate transforms.
+        if (!kHandlesSpecialHits ||
+            (SURFACE_GEOMETRY_PAYLOAD_ENABLED && (preparedGeometry.tangent & SURFACE_GEOMETRY_VALID) != 0u))
         {
-            const float ndotd = max(abs(dot(shadingGeomNormal, rayDir)), 1e-4f);
-            lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+            shadingNormal = normalize(unpackNormal(preparedGeometry.shadingNormal));
+            shadingGeomNormal = normalize(unpackNormal(preparedGeometry.geometryNormal));
+            shadingTangent = orthonormalizeTangent(shadingNormal, unpackNormal(preparedGeometry.tangent));
+            tangentSign = unpackTangentSign(preparedGeometry.tangent);
+            uv = unpackUV(preparedGeometry.uv);
+            vertexColor = unpackVertexColor(preparedGeometry.color);
+            lodBase = preparedGeometry.lodBase;
+        }
+        else
+        {
+            // Fused SSS exits are traced in a separate kernel which deliberately
+            // stays free of geometry reconstruction. Retain the exact old path
+            // in Tail for those uncommon records and for a degenerate triangle
+            // rejected by extend.
+            float uvArea2 = 0.0f;
+            fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
+                                 motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
+                                 objectGeomNormal, uvArea2);
+            const auto inst = instances[rec.instanceIndex];
+            const float3 axisX = float3(inst.transformationMatrix[0]);
+            const float3 axisY = float3(inst.transformationMatrix[1]);
+            const float3 axisZ = float3(inst.transformationMatrix[2]);
+            const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
+            shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                                normalTransform.cofactorZ, normalTransform.orientation);
+            const float3 worldGeomNormal = normalTransform.cofactorX * objectGeomNormal.x +
+                                           normalTransform.cofactorY * objectGeomNormal.y +
+                                           normalTransform.cofactorZ * objectGeomNormal.z;
+            const float worldArea2 = length(worldGeomNormal);
+            shadingGeomNormal = normalTransform.orientation * (worldGeomNormal / worldArea2);
+            shadingTangent = orthonormalizeTangent(shadingNormal, transformDirection(objectTangent, axisX, axisY, axisZ));
+
+            const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
+            const float coneSpread = (depth == 0u || (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
+            const float coneWidthHere = coneSpread * rec.distance;
+            if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f && coneWidthHere > 0.0f)
+            {
+                const float ndotd = max(abs(dot(shadingGeomNormal, rayDir)), 1e-4f);
+                lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+            }
         }
     }
 
@@ -3016,7 +3517,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // carries on with the same direction and throughput -- unshaded, and without
     // spending a bounce, because a volume the light passes through twice would
     // otherwise cost two of them.
-    if (SPEC_SSS && (materials[entry.materialId].medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
+    if (kHandlesSpecialHits && SPEC_SSS && (materials[entry.materialId].medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
     {
         // The segment just travelled was attenuated at the top of this kernel,
         // which is the only place that sees all four kinds of vertex.
@@ -3090,7 +3591,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // surface; for geometry that interpenetrates it is a simplification, and the
     // alternative is carrying the entry instance and rejecting hits on anything
     // else -- which turns an open mesh into a light leak instead.
-    if (SPEC_SSS && (mediumState.medium & MEDIUM_INDEX_MASK) != 0u &&
+    if (kHandlesSpecialHits && SPEC_SSS && (mediumState.medium & MEDIUM_INDEX_MASK) != 0u &&
         (materials[(mediumState.medium & MEDIUM_INDEX_MASK) - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
     {
         const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
@@ -3117,8 +3618,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // hemisphere, which is smooth at every parameter, so there is nothing
         // about the material to ask.
         const bool didNeeExit = volumeNeePairsWithBounce(
-            uniforms.estimatorMode == 0, (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
-                                             (SPEC_ENV_MAP && uniforms.hasEnvMap));
+            uniforms.estimatorMode == 0,
+            (SPEC_LIGHTS && (uniforms.numLights > 0 || (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0))) ||
+                (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (didNeeExit)
         {
             auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
@@ -3253,7 +3755,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // neither the hemisphere tests nor the ray offsets below apply. Gated on the
     // geometry as well as the material because the chord needs a radius, and only
     // a curve hit has one.
-    const bool fibreMaterial = scattersThroughFibre(si);
+    const bool fibreMaterial = !isOpenPBR && scattersThroughFibre(si);
     const bool isFibre = isCurve && fibreMaterial;
 
     // None of the surface setup above consumes randomness. Keep these five
@@ -3338,13 +3840,27 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // The native initializer above reads its four required groups directly from
     // device memory, so this large thread value starts at the same point as it
     // did before the native fast path and does not inflate the early live state.
+    OpenPBR_BaseParams openpbrBaseMat;
     OpenPBRParams openpbrMat;
     if (isOpenPBR)
     {
-        openpbrMat = uniforms.openpbrParams[entry.materialId];
-        if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
+        device const OpenPBRParams& source = uniforms.openpbrParams[entry.materialId];
+        if (kShadeBase)
         {
-            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv);
+            loadOpenPBRBaseParams(source, openpbrBaseMat);
+            if (source.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
+            {
+                applyOpenPBRBaseTextures(
+                    openpbrBaseMat, source, uniforms.openpbrTextures[entry.materialId], si, uv, lodBase);
+            }
+        }
+        else
+        {
+            openpbrMat = source;
+            if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
+            {
+                applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv, lodBase);
+            }
         }
     }
 
@@ -3369,13 +3885,20 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         else
         {
             // Visualize displacement between the motion-interpolated and current-frame normals.
+            float3 motionNormal, motionTangent, motionColor, motionGeomNormal;
+            float2 motionUv;
+            float motionTangentSign = 1.0f;
+            float motionUvArea2 = 0.0f;
+            fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
+                                 motionTime, bary, motionNormal, motionTangent, motionUv, motionColor,
+                                 motionTangentSign, motionGeomNormal, motionUvArea2);
             float3 nCur[3], pCur[3], tCur[3], cCur[3];
             float2 uvCur[3];
             float signCur = 1.0f; // unused by this debug view
             fetchTriangle(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, false, motionTime, pCur,
                           nCur, tCur, uvCur, signCur, cCur);
             dbg = float3(
-                motionTime, clamp(length(normalize(objectNormal) - normalize(nCur[0])) * 10.0f, 0.0f, 1.0f), 0.0f);
+                motionTime, clamp(length(normalize(motionNormal) - normalize(nCur[0])) * 10.0f, 0.0f, 1.0f), 0.0f);
         }
         radianceOut[tid] += float4(dbg, 0.0f);
         return;
@@ -3420,8 +3943,15 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         DenoiserMaterialGuides materialGuides = {};
         if (isOpenPBR)
         {
-            const OpenPBR_ResolvedInputs openpbrInputs = openpbr_resolve_inputs(openpbrMat, si);
-            materialGuides = openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
+            if (kShadeBase)
+            {
+                materialGuides = openpbrBaseDenoiserGuides(openpbrBaseMat, si);
+            }
+            else
+            {
+                const OpenPBR_ResolvedInputs openpbrInputs = openpbr_resolve_inputs(openpbrMat, si);
+                materialGuides = openpbrDenoiserGuides(openpbrInputs, si, openpbrBaseMapDetailsSubsurface(openpbrMat));
+            }
         }
         else
         {
@@ -3461,7 +3991,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         float interfaceCosine = 0.0f;
         if (!guideOpaque)
         {
-            interfaceIor = denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
+            interfaceIor = kShadeBase ? denoiserInterfaceIor(isOpenPBR, openpbrBaseMat, si, entering) :
+                                        denoiserInterfaceIor(isOpenPBR, openpbrMat, si, entering);
             const float eta = entering ? si.exterior_ior / interfaceIor : interfaceIor / max(si.exterior_ior, 1e-4f);
             interfaceCosine = abs(dot(float3(si.shading_normal), float3(si.wo)));
             interfaceFresnel = fresnel_dielectric(interfaceCosine, eta);
@@ -3551,9 +4082,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     const float3 diffuseAlbedo = float3(si.albedo) * (1.0f - si.metallic);
     const float3 specularF0 = gltf_f0(si.ior, si.specular, si.specular_color, si.albedo, si.metallic);
     const float3 materialDemodulation = sharcMaterialDemodulation(diffuseAlbedo, specularF0);
-    const float receiverRoughness = sharcReceiverRoughness(isOpenPBR, openpbrMat, si);
+    const float receiverRoughness = kShadeBase ? sharcReceiverRoughness(isOpenPBR, openpbrBaseMat, si) :
+                                                 sharcReceiverRoughness(isOpenPBR, openpbrMat, si);
     const bool cacheableReceiver = sharcReceiverCacheEligible(
-        receiverRoughness, isOpenPBR ? openpbrMat.transmission_weight : max(si.transmission, si.diffuse_transmission),
+        receiverRoughness,
+        isOpenPBR ? (kShadeBase ? 0.0f : openpbrMat.transmission_weight) : max(si.transmission, si.diffuse_transmission),
         isFibre, uniforms.sharcRoughnessThreshold);
 
     if (SPEC_SHARC_UPDATE && uniforms.sharcCapacity != 0u)
@@ -3649,7 +4182,8 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     if (any(surfaceEmission > 0.0f))
     {
         float emissionMis = 1.0f;
-        if (SPEC_LIGHTS && depth > 0u && !specularBounce && neeDone && !isCurve && uniforms.numEmissiveMeshes > 0u)
+        if (SPEC_LIGHTS && SPEC_EMISSIVE_MESH_LIGHTS && depth > 0u && !specularBounce && neeDone && !isCurve &&
+            uniforms.numEmissiveMeshes > 0u)
         {
             const uint32_t geometryId = rec.geomEntryIndex - instances[rec.instanceIndex].userID;
             const float3 misOrigin = rayOrigin - rayDir * p.misDistance;
@@ -3662,6 +4196,16 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
         }
         radiance += throughput * surfaceEmission * emissionMis;
+    }
+
+    if (SPEC_SHADE_PROBE == 1u)
+    {
+        // Keep the actual resolved surface prefix observable while compiling
+        // prepare, NEE and sampling out of this diagnostic specialization.
+        const float3 checksum = si.position + si.geometry_normal + si.shading_normal + si.tangent + si.bitangent +
+                                si.wo + surfaceEmission + float3(si.exterior_ior);
+        radianceOut[tid] = float4(checksum, 1.0f);
+        return;
     }
 
     // Next-event estimation first, and decided by the material rather than by the
@@ -3689,7 +4233,9 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // Placed after si is finished with rather than beside initSurfaceInteraction:
     // the nested-dielectric exterior IOR is resolved above, and prepare() reads
     // it. SHARC eligibility never mutates these shading parameters.
-    const bool smoothLobe = isOpenPBR ? openpbr_has_smooth_lobe(openpbrMat) : bsdf_has_smooth_lobe(si);
+    const bool smoothLobe =
+        isOpenPBR ? (kShadeBase ? openpbr_has_smooth_lobe(openpbrBaseMat) : openpbr_has_smooth_lobe(openpbrMat)) :
+                    bsdf_has_smooth_lobe(si);
     bool openpbrEntersSubsurface = false;
     float3 openpbrWalkAlbedo = float3(0.0f);
     OpenPBR_PreparedBsdf openpbrPrepared;
@@ -3699,7 +4245,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         // Base and layer queues cannot enter a volume. For the tail, finish
         // the short-lived volume derivation before constructing the surface
         // lobes so the two large OpenPBR states never overlap.
-        if (SPEC_SSS && !SPEC_SHADE_BASE && !SPEC_SHADE_LAYER)
+        if (SPEC_SSS && !kShadeBase && !kShadeLayer)
         {
             openpbrEntersSubsurface = openpbrMat.subsurface_weight > 0.0f && openpbrMat.geometry_thin_walled == 0u;
             if (openpbrEntersSubsurface)
@@ -3719,18 +4265,19 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
             }
         }
 
-        if (SPEC_SHADE_BASE)
+        if (kShadeBase)
         {
-            openpbrBasePrepared = openpbr_prepare_base_at(openpbrMat, si, throughput);
+            openpbrBasePrepared = openpbr_prepare_base_at(openpbrBaseMat, si, throughput);
         }
-        else
+        else if (!kShadeBase)
         {
             openpbrPrepared = openpbr_prepare_surface_at(openpbrMat, si, throughput);
         }
     }
 
-    const bool hasEmitter = (SPEC_LIGHTS && (uniforms.numLights > 0 || uniforms.numEmissiveMeshes > 0)) ||
-                            (SPEC_ENV_MAP && uniforms.hasEnvMap);
+    const bool hasEmitter =
+        (SPEC_LIGHTS && (uniforms.numLights > 0 || (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0))) ||
+        (SPEC_ENV_MAP && uniforms.hasEnvMap);
     bool didNee = neeRunsAtVertex(uniforms.estimatorMode == 0, hasEmitter, smoothLobe);
     if (!smoothLobe)
     {
@@ -3738,7 +4285,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     }
     const ShadedFrame neeFrame =
         shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission, si.diffuse_transmission);
-    if (didNee)
+    if (didNee && SPEC_SHADE_PROBE != 3u && SPEC_SHADE_PROBE != 4u)
     {
         auditWork(uniforms, WORK_NEE_ELIGIBLE_HITS);
         if (SPEC_RIS_ONE)
@@ -3752,15 +4299,87 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 auditWork(uniforms, WORK_SECONDARY_NEE_SAMPLES, 1u);
             }
 
-            const LightConnection conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials,
-                                                        vertexBuffer, prevVertexBuffer, indexBuffer, motionTime, rng,
-                                                        si, envAliasTable, envMapTexture, iesProfiles);
+            LightConnection conn;
+            if (SPEC_SHADE_PROBE == 6u)
+            {
+                // Production surface + prepare + eval, with the scene light
+                // sampler removed. This distinguishes eval/prepared overlap
+                // from connectToLight's own peak without a synthetic kernel.
+                conn = makeEmptyConnection();
+                conn.toLight = normalize(si.shading_normal + 0.25f * si.tangent);
+                conn.radiance = float3(1.0f);
+                conn.pdf = 0.5f;
+                conn.tMax = 1.0f;
+                conn.needsRay = true;
+            }
+            else if (kShadeBase && SPEC_SPLIT_BASE_NEE)
+            {
+                conn = unpackBaseLightConnection(uniforms.baseLightConnections[tid]);
+            }
+            else
+            {
+                conn = connectToLight(uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer,
+                                      prevVertexBuffer, indexBuffer, motionTime, rng, si, envAliasTable, envMapTexture,
+                                      iesProfiles);
+            }
             auditNeeSampledConnection(uniforms, conn);
-            const LightConnectionEvaluation candidate =
-                SPEC_SHADE_BASE ? evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrBasePrepared,
-                                                          uniforms.misHeuristic) :
-                                  evaluateLightConnection(
-                                      conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
+            if (SPEC_SHADE_PROBE == 10u)
+            {
+                const PackedLightConnectionProbe packed = packLightConnectionProbe(conn, si.position);
+                uint packedHash = hash_combine(packed.toLight.x, packed.toLight.y);
+                packedHash = hash_combine(packedHash, packed.originOffset.x);
+                packedHash = hash_combine(packedHash, packed.originOffset.y);
+                packedHash = hash_combine(packedHash, packed.visibilityTargetOffset.x);
+                packedHash = hash_combine(packedHash, packed.visibilityTargetOffset.y);
+                const float packedChecksum =
+                    packed.pdf + packed.tMax + float(packed.flags) + float(packedHash) * (1.0f / 4294967296.0f);
+                radianceOut[tid] = float4(float3(packed.radiance), packedChecksum);
+                return;
+            }
+            if (SPEC_SHADE_PROBE == 5u)
+            {
+                // Production surface + connectToLight, stopping before BSDF
+                // eval. Consume every deferred-shadow field so the compiler
+                // cannot turn this into a direction-only light micro-test.
+                const float3 checksum = conn.radiance + conn.toLight + conn.origin + conn.visibilityTarget +
+                                        float3(conn.pdf + conn.tMax + float(conn.needsRay) + float(conn.isDelta) +
+                                               float(conn.hasVisibilityTarget));
+                radianceOut[tid] = float4(checksum, 1.0f);
+                return;
+            }
+            LightConnectionEvaluation candidate;
+            if (SPEC_SHADE_PROBE == 8u)
+            {
+                // Proposal + deferred-shadow payload, with BSDF prepare/eval
+                // removed. Preserve connection-dependent values so this still
+                // measures everything that must cross connectToLight before a
+                // shadow record can be emitted.
+                candidate.integrand = conn.radiance * conn.pdf;
+                candidate.target = conn.needsRay && conn.pdf > 0.0f ? max(luminance(candidate.integrand), 1.0e-6f) : 0.0f;
+            }
+            else
+            {
+                candidate = kShadeBase ? evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR,
+                                                                 openpbrBasePrepared, uniforms.misHeuristic) :
+                                         evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR,
+                                                                 openpbrPrepared, uniforms.misHeuristic);
+            }
+            if (kShadeBase && SPEC_SHADE_PROBE == 11u)
+            {
+                // Exact eval/sample phase boundary. Keep both the completed
+                // evaluation and the prepared state required by the future
+                // sampler alive, while compiling the sampler itself out.
+                const float retainedSampleState = isOpenPBR ? baseSampleStateChecksum(openpbrBasePrepared) : 0.0f;
+                radianceOut[tid] = float4(candidate.integrand, candidate.target + retainedSampleState * 1.0e-6f);
+                return;
+            }
+            if (SPEC_SHADE_PROBE == 6u || SPEC_SHADE_PROBE == 7u)
+            {
+                // 6: prepare/eval against a synthetic connection.
+                // 7: production proposal + prepare/eval, before shadow append.
+                radianceOut[tid] = float4(candidate.integrand, candidate.target);
+                return;
+            }
             if (candidate.target > 0.0f)
             {
                 auditWork(uniforms, WORK_NEE_VALID_CANDIDATES);
@@ -3769,34 +4388,45 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                 const float proposalWeight = candidate.target / conn.pdf;
                 const float W = proposalWeight / candidate.target;
                 const float3 weight = throughput * candidate.integrand * W;
-                const float3 shadowOrigin =
-                    isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, conn.toLight) :
-                              conn.origin;
-                const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, shadowOrigin);
-                if (any(weight != 0.0f) && visibility.valid)
+                if (SPEC_SHADE_PROBE == 9u)
                 {
-                    ShadowRay sr;
-                    sr.origin = packed_float3(shadowOrigin);
-                    sr.direction = packed_float3(visibility.direction);
-                    sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
-                    sr.maxDistance = visibility.maxDistance;
-                    sr.pixelIndex = tid;
-                    sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
-                    sr.sharcRadiance = packed_float3(float3(0.0f));
-                    sr.sharcPathIndex = tid;
-                    sr.rrCutoff =
-                        random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
-                    const uint32_t slot = allocateShadowSlot(shadowCounter);
-                    auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
-                    storeShadowRay(shadowRays, slot, sr);
-                }
-                else if (!any(weight != 0.0f))
-                {
-                    auditWork(uniforms, WORK_NEE_SHADOW_REJECT_WEIGHT);
+                    // Diagnostic upper bound: treat every selected connection
+                    // as unoccluded and resolve it in shade. This intentionally
+                    // changes the image, but removes both the deferred payload
+                    // and the complete shadow dispatch from the experiment.
+                    radiance += clampIndirectContribution(weight, depth, uniforms.clampIndirect);
                 }
                 else
                 {
-                    auditWork(uniforms, WORK_NEE_SHADOW_REJECT_SEGMENT);
+                    const float3 shadowOrigin = isFibre ? fibreExitOrigin(si.position, si.tangent, si.shading_normal,
+                                                                          curveRadius, conn.toLight) :
+                                                          conn.origin;
+                    const EmissiveVisibilitySegment visibility = lightVisibilitySegment(conn, shadowOrigin);
+                    if (any(weight != 0.0f) && visibility.valid)
+                    {
+                        ShadowRay sr;
+                        sr.origin = packed_float3(shadowOrigin);
+                        sr.direction = packed_float3(visibility.direction);
+                        sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.maxDistance = visibility.maxDistance;
+                        sr.pixelIndex = tid;
+                        sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
+                        sr.sharcRadiance = packed_float3(float3(0.0f));
+                        sr.sharcPathIndex = tid;
+                        sr.rrCutoff =
+                            random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                        const uint32_t slot = allocateShadowSlot(shadowCounter);
+                        auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
+                        storeShadowRay(shadowRays, slot, sr);
+                    }
+                    else if (!any(weight != 0.0f))
+                    {
+                        auditWork(uniforms, WORK_NEE_SHADOW_REJECT_WEIGHT);
+                    }
+                    else
+                    {
+                        auditWork(uniforms, WORK_NEE_SHADOW_REJECT_SEGMENT);
+                    }
                 }
             }
             else if (conn.needsRay && !(conn.pdf > 0.0f))
@@ -3860,10 +4490,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                                             crng, si, envAliasTable, envMapTexture, iesProfiles);
                 auditNeeSampledConnection(uniforms, conn);
                 const LightConnectionEvaluation candidate =
-                    SPEC_SHADE_BASE ? evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR,
-                                                              openpbrBasePrepared, uniforms.misHeuristic) :
-                                      evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared,
-                                                              uniforms.misHeuristic);
+                    kShadeBase ? evaluateLightConnection(conn, si, isFibre, neeFrame, isOpenPBR, openpbrBasePrepared,
+                                                         uniforms.misHeuristic) :
+                                 evaluateLightConnection(
+                                     conn, si, isFibre, neeFrame, isOpenPBR, openpbrPrepared, uniforms.misHeuristic);
                 if (!(candidate.target > 0.0f))
                 {
                     if (conn.needsRay && !(conn.pdf > 0.0f))
@@ -4077,7 +4707,7 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
                                     uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer,
                                     motionTime, si, envAliasTable, envMapTexture, iesProfiles, previousSampleAtCurrent);
                                 previousEvaluation =
-                                    SPEC_SHADE_BASE ?
+                                    kShadeBase ?
                                         evaluateLightConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
                                                                 openpbrBasePrepared, uniforms.misHeuristic) :
                                         evaluateLightConnection(previousConnection, si, isFibre, neeFrame, isOpenPBR,
@@ -4283,6 +4913,14 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         }
     }
 
+    if (SPEC_SHADE_PROBE == 2u || SPEC_SHADE_PROBE == 8u)
+    {
+        // NEE has already emitted its shadow record. Probe 2 retains the full
+        // path, while probe 8 omits BSDF prepare/eval; both remove continuation.
+        radianceOut[tid] += float4(radiance, 0.0f);
+        return;
+    }
+
     // Direct lighting at this vertex is complete. A terminal path has no next
     // segment, so drawing and evaluating the full layered BSDF cannot affect
     // the image. SHARC update still needs the sampled lobe to record its
@@ -4293,15 +4931,53 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         return;
     }
 
+    // Base has no post-sample surface contribution: NEE has already emitted
+    // its shadow ray and the only local radiance is emission/cache lookup from
+    // this vertex. Commit it before the large OpenPBR sample so three radiance
+    // registers do not span the sampler's peak live range. Later Base exits add
+    // zero; the other buckets retain the original ordering because their
+    // transmission/SSS continuation still shares the generic tail below.
+    if (kShadeBase)
+    {
+        radianceOut[tid] += float4(radiance, 0.0f);
+        radiance = float3(0.0f);
+    }
+
+    // Only this compact continuation state has to cross the Base sampler. The
+    // hit position is reconstructed from PathRay/HitRecord afterwards, and the
+    // path flags are reloaded after AOV handling has had a chance to update
+    // them. Half normals retain substantially more precision than the packed
+    // queue representation while occupying half the live register lanes.
+    half3 baseContinuationShadingNormal = half3(0.0h);
+    half3 baseContinuationGeometryNormal = half3(0.0h);
+    half baseContinuationRoughness = half(0.0h);
+    if (kShadeBase)
+    {
+        baseContinuationShadingNormal = half3(si.shading_normal);
+        baseContinuationGeometryNormal = half3(si.geometry_normal);
+        baseContinuationRoughness = half(si.roughness);
+    }
+
     const RandomSample4 bsdfRandom =
         random4<SampleDimension::eBSDF0, SampleDimension::eBSDF1, SampleDimension::eBSDF2, SampleDimension::eBSDF3>(
             rng, uniforms.samplerType);
     const float4 xi = bsdfRandom.value;
     const uint32_t lobeWord = bsdfRandom.bits.z >> 9u;
     const uint32_t fresnelWord = bsdfRandom.bits.w >> 9u;
-    BsdfSampleResult sampleResult = isOpenPBR ? (SPEC_SHADE_BASE ? openpbr_bsdf_sample(openpbrBasePrepared, si.wo, xi) :
-                                                                   openpbr_bsdf_sample(openpbrPrepared, xi)) :
+    BsdfSampleResult sampleResult = isOpenPBR ? (kShadeBase ? openpbr_bsdf_sample(openpbrBasePrepared, si.wo, xi) :
+                                                              openpbr_bsdf_sample(openpbrPrepared, xi)) :
                                                 bsdf_sample(si, xi, lobeWord, fresnelWord);
+
+    if (SPEC_SHADE_PROBE == 4u)
+    {
+        // Keep preparation and the complete BSDF sample observable while
+        // deleting continuation, roulette and path write-back. This separates
+        // the sampler's peak from state that only the next segment consumes.
+        const float eventChecksum = float(sampleResult.event_type & 255u) * 1.0e-6f;
+        radianceOut[tid] =
+            float4(float3(sampleResult.wi) + float3(sampleResult.bsdf_over_pdf) + eventChecksum, sampleResult.pdf);
+        return;
+    }
 
     if (sampleResult.event_type == BSDF_EVENT_ABSORB)
     {
@@ -4322,9 +4998,96 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
         sharcUpdates[updateIndex] = updateState;
     }
 
+    if (kShadeBase)
+    {
+        // Base is opaque and cannot enter SSS or mutate the IOR stack. Keep its
+        // continuation out of the generic transmission tail: besides deleting
+        // unreachable code, this creates a hard lifetime boundary after the
+        // large OpenPBR sample. Cheap streamed state is reloaded here instead
+        // of occupying registers across openpbr_bsdf_sample().
+        const PathRay continuationRay = rays[tid];
+        const HitRecord continuationHit = *wavefrontHitRecord(hits, tid);
+        const float3 continuationRayOrigin = float3(continuationRay.origin);
+        const float3 continuationRayDirection = float3(continuationRay.direction);
+        const float3 continuationPosition = continuationRayOrigin + continuationRayDirection * continuationHit.distance;
+        const float3 continuationShadingNormal = float3(baseContinuationShadingNormal);
+        const float3 continuationGeometryNormal = float3(baseContinuationGeometryNormal);
+        const float3 continuationWo = -continuationRayDirection;
+        const float3 continuationFaceNg = dot(continuationGeometryNormal, continuationWo) > 0.0f ?
+                                              continuationGeometryNormal :
+                                              -continuationGeometryNormal;
+        const float3 continuationDirection = normalize(float3(sampleResult.wi));
+        float3 segmentThroughput = float3(sampleResult.bsdf_over_pdf);
+        float3 nextThroughput = SPEC_SHARC_UPDATE ? segmentThroughput : throughput * segmentThroughput;
+
+        const ShadedFrame continuationFrame = shadedFrame(dot(continuationGeometryNormal, continuationWo) > 0.0f,
+                                                          dot(continuationShadingNormal, continuationWo), 0.0f, 0.0f);
+        const bool continuationDidNee =
+            neePairsWithBounce(didNee, false, continuationFrame.frontFace,
+                               continuationFrame.normalSign * dot(continuationShadingNormal, continuationDirection));
+
+        bool alive = dot(nextThroughput, nextThroughput) >= 1e-4f;
+        if (alive && depth > 3u)
+        {
+            const float q = min(max(nextThroughput.x, max(nextThroughput.y, nextThroughput.z)), 1.0f);
+            SamplerState rrng = samplerFor(uniforms, tid, sampleIdx, depth);
+            if (random<SampleDimension::eRussianRoulette>(rrng, uniforms.samplerType) > q)
+            {
+                alive = false;
+            }
+            else
+            {
+                const float invQ = 1.0f / max(q, 1e-5f);
+                nextThroughput *= invQ;
+                segmentThroughput *= invQ;
+            }
+        }
+        if (depth + 1u >= uniforms.maxDepth || !alive)
+        {
+            return;
+        }
+
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
+            SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcSetThroughput(updateState, segmentThroughput);
+            sharcUpdates[updateIndex] = updateState;
+        }
+
+        PathRay nextRay;
+        nextRay.origin = packed_float3(offset_ray(continuationPosition, continuationFaceNg));
+        nextRay.direction = packed_float3(continuationDirection);
+        rays[tid] = nextRay;
+
+        PathState nextPath = paths[tid];
+        nextPath.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : nextThroughput);
+        nextPath.lastBsdfPdf = nextSpecular ? 1.0f : sampleResult.pdf;
+        nextPath.misDistance = 0.0f;
+        const float previousSharcRoughness = unpackSharcRoughness(nextPath.depthAndFlags);
+        const float sharcRoughness =
+            min(previousSharcRoughness +
+                    (((sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0) ? 1.0f : float(baseContinuationRoughness)),
+                1.0f);
+        nextPath.depthAndFlags = (depth + 1u) | PATH_FLAG_ALIVE | (nextSpecular ? PATH_FLAG_SPECULAR : 0u) |
+                                 (continuationDidNee ? PATH_FLAG_NEE_DONE : 0u) |
+                                 (nextPath.depthAndFlags & (PATH_FLAG_AOV_DONE | PATH_FLAG_IOR_STACK_ACTIVE)) |
+                                 packSharcRoughness(sharcRoughness);
+        paths[tid] = nextPath;
+
+        auditWork(uniforms, WORK_PATH_CONTINUATIONS);
+        queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
+        return;
+    }
+
     // --- Next segment -------------------------------------------------------
     const float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
     float3 nextOrigin;
+    // Bucket construction guarantees that native OpenPBR Base and Layer have
+    // neither transmission nor subsurface. Make that fact visible here: the
+    // generic continuation below carries IOR-stack, medium and SSS-entry state
+    // which cannot be reached by either specialised PSO.
+    const bool openpbrOpaqueBucket = isOpenPBR && (kShadeBase || kShadeLayer);
     // Colour the diffuse-transmission lobe applied on the way into a subsurface
     // medium, divided back out below. The walk supplies the colour itself, once
     // per scattering event, so leaving the lobe's copy in charges the first event
@@ -4338,7 +5101,11 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // is crossed within the one event, so there is no medium to enter and no entry
     // to match with an exit. Pushing the IOR stack here left every transmitted hair
     // path one level deeper than it came in, and a groom is thousands of hairs deep.
-    if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
+    if (openpbrOpaqueBucket)
+    {
+        nextOrigin = offset_ray(si.position, faceNg);
+    }
+    else if ((sampleResult.event_type & BSDF_EVENT_TRANSMISSION) != 0 && !isFibre)
     {
         // A diffuse-transmission event crosses an infinitesimally thin sheet.
         // A subsurface event enters the separately tracked random walk. Neither
@@ -4496,8 +5263,10 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     // Record exactly the support NEE offered in the same shaded frame. A raw
     // back face may be an opaque two-sided surface whose BSDF flipped its frame,
     // or a transmissive exit that did not; shadedFrame distinguishes them.
-    didNee = neePairsWithBounce(didNee, neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission),
-                                neeFrame.frontFace, neeFrame.normalSign * dot(si.shading_normal, nextDir));
+    const bool neeCrosses =
+        openpbrOpaqueBucket ? false : neeCrossesSurface(isFibre, si.transmission, si.diffuse_transmission);
+    didNee = neePairsWithBounce(
+        didNee, neeCrosses, neeFrame.frontFace, neeFrame.normalSign * dot(si.shading_normal, nextDir));
 
     radianceOut[tid] += float4(radiance, 0.0f);
 
@@ -4505,7 +5274,21 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     if (alive && depth > 3u)
     {
         const float q = min(max(nextThroughput.x, max(nextThroughput.y, nextThroughput.z)), 1.0f);
-        if (random<SampleDimension::eRussianRoulette>(rng, uniforms.samplerType) > q)
+        float rr;
+        if (kShadeBase)
+        {
+            // random() is stateless in (pixel, sample, depth, dimension), so
+            // rebuilding here returns the identical roulette value. It also
+            // lets the five-register sampler used by NEE/BSDF die before
+            // openpbr_bsdf_sample instead of keeping it alive for this late use.
+            SamplerState rrng = samplerFor(uniforms, tid, sampleIdx, depth);
+            rr = random<SampleDimension::eRussianRoulette>(rrng, uniforms.samplerType);
+        }
+        else
+        {
+            rr = random<SampleDimension::eRussianRoulette>(rng, uniforms.samplerType);
+        }
+        if (rr > q)
         {
             alive = false;
         }
@@ -4556,6 +5339,43 @@ kernel void wavefrontShade(uint gid [[thread_position_in_grid]],
     auditWork(uniforms, WORK_PATH_CONTINUATIONS);
     queuePush(uniforms, outCounter, queueOut, tid, control[WF_CTRL_CAPACITY]);
 }
+
+#define STRELKA_WAVEFRONT_SHADE_ENTRY(Name, ShadeBucket)                                                                \
+    kernel void Name(                                                                                                   \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                                \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                           \
+        device const IesGpuBufferHeader* iesProfiles [[buffer(2)]], device UniformLight* lights [[buffer(3)]],          \
+        device Material* materials [[buffer(4)]], device PathState* paths [[buffer(5)]],                                \
+        device PathRay* rays [[buffer(21)]], device char* hits [[buffer(6)]], device float4* radianceOut [[buffer(7)]], \
+        device IorStack* iorStacks [[buffer(8)]], device const GeometryEntry* geometryEntries [[buffer(9)]],            \
+        device const EnvAliasEntry* envAliasTable [[buffer(10)]], device const char* vertexBuffer [[buffer(11)]],       \
+        device const char* prevVertexBuffer [[buffer(12)]], device const uint32_t* indexBuffer [[buffer(13)]],          \
+        constant uint32_t& sampleIdx [[buffer(14)]], device const uint32_t* queue [[buffer(15)]],                       \
+        device uint32_t* queueOut [[buffer(16)]], device atomic_uint* outCounter [[buffer(17)]],                        \
+        device uint32_t* control [[buffer(18)]], device char* shadowRays [[buffer(19)]],                                \
+        device atomic_uint* shadowCounter [[buffer(20)]], device AovSample* aov [[buffer(22)]],                         \
+        device char* sharcPassBuffer0 [[buffer(23)]], device const char* sharcPassBuffer1 [[buffer(24)]],               \
+        CurveStaticTraversal::structure diagnosticAccelerationStructure [[buffer(25)]],                                 \
+        CurveStaticTraversal::table diagnosticFunctionTable [[buffer(26)]],                                             \
+        device const uint32_t* curveSegments [[buffer(27)]], device atomic_uint* iorStats [[buffer(28)]],               \
+        device char* sharcPassState [[buffer(29)]], device MediumPathState* mediumPaths [[buffer(30)]],                 \
+        texture2d<float> envMapTexture [[texture(0)]])                                                                  \
+    {                                                                                                                   \
+        wavefrontShadeImpl<ShadeBucket>(gid, uniforms, instances, iesProfiles, lights, materials, paths, rays, hits,    \
+                                        radianceOut, iorStacks, geometryEntries, envAliasTable, vertexBuffer,           \
+                                        prevVertexBuffer, indexBuffer, sampleIdx, queue, queueOut, outCounter,          \
+                                        control, shadowRays, shadowCounter, aov, sharcPassBuffer0, sharcPassBuffer1,    \
+                                        diagnosticAccelerationStructure, diagnosticFunctionTable, curveSegments,        \
+                                        iorStats, sharcPassState, mediumPaths, envMapTexture);                          \
+    }
+
+STRELKA_WAVEFRONT_SHADE_ENTRY(wavefrontShade, WF_SHADE_GENERIC)
+STRELKA_WAVEFRONT_SHADE_ENTRY(wavefrontShadeBase, WF_SHADE_BASE)
+STRELKA_WAVEFRONT_SHADE_ENTRY(wavefrontShadeLayer, WF_SHADE_LAYER)
+STRELKA_WAVEFRONT_SHADE_ENTRY(wavefrontShadeTranslucent, WF_SHADE_TRANSLUCENT)
+STRELKA_WAVEFRONT_SHADE_ENTRY(wavefrontShadeTail, WF_SHADE_TAIL)
+
+#undef STRELKA_WAVEFRONT_SHADE_ENTRY
 
 static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
                                        float4x4 objectToWorld,
@@ -4655,7 +5475,7 @@ static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
         OpenPBRParams openpbrMat = uniforms.openpbrParams[entry.materialId];
         if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
         {
-            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv);
+            applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv, stored.lodBase);
         }
         openpbrPrepared = openpbr_prepare_surface_at(openpbrMat, si, float3(stored.throughput));
     }
@@ -5405,7 +6225,7 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
         stageStats[diagBase] = n;
         for (uint32_t lane = 0u; lane < min(n, (uint32_t)WF_DIAG_LANES); ++lane)
         {
-            const uint32_t laneBase = diagBase + 1u + lane * WF_DIAG_LANE_WORDS;
+            const uint32_t laneBase = diagBase + 2u + lane * WF_DIAG_LANE_WORDS;
             const uint32_t tid = queue[lane];
             stageStats[laneBase] = tid;
             if (tid >= control[WF_CTRL_CAPACITY])
@@ -5474,8 +6294,13 @@ kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_SHADE_LAYER_DIS + 0] = (layer + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADE_LAYER_DIS + 1] = 1u;
     control[WF_CTRL_SHADE_LAYER_DIS + 2] = 1u;
-    control[WF_CTRL_SHADE_TAIL_START] = base + layer;
-    control[WF_CTRL_SHADE_TAIL_DIS + 0] = (h - base - layer + threadsPerGroup - 1u) / threadsPerGroup;
+    const uint32_t translucent = min(hitQueue[2], h - base - layer);
+    control[WF_CTRL_SHADE_TRANSLUCENT_START] = base + layer;
+    control[WF_CTRL_SHADE_TRANSLUCENT_DIS + 0] = (translucent + threadsPerGroup - 1u) / threadsPerGroup;
+    control[WF_CTRL_SHADE_TRANSLUCENT_DIS + 1] = 1u;
+    control[WF_CTRL_SHADE_TRANSLUCENT_DIS + 2] = 1u;
+    control[WF_CTRL_SHADE_TAIL_START] = base + layer + translucent;
+    control[WF_CTRL_SHADE_TAIL_DIS + 0] = (h - base - layer - translucent + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADE_TAIL_DIS + 1] = 1u;
     control[WF_CTRL_SHADE_TAIL_DIS + 2] = 1u;
 

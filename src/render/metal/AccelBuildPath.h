@@ -58,7 +58,10 @@ public:
 
     // --- Descriptor factories (return retained objects; caller releases) ---
 
-    virtual NS::Object* makeTriangleGeometry(MetalGeometry* geometry, const oka::Mesh& mesh, uint32_t triangleCount) = 0;
+    virtual NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
+                                             const oka::Mesh& mesh,
+                                             uint32_t triangleCount,
+                                             bool usePrimitiveSurfaceData) = 0;
 
     virtual NS::Object* makeBoundingBoxGeometry(MTL::Buffer* bounds,
                                                 size_t offset,
