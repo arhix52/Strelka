@@ -6,6 +6,73 @@ already been ruled out, so a reader starting cold can act without repeating the
 elimination. What is closed is here too, because the *why* is what the next
 person needs and it is the same why either way.
 
+## pine_scene is a different launch, 2026-09-11
+
+Everything above was measured on the two rooms, and pine does not share their
+limiter. One launch of 16 samples at 1280x720, depth 4:
+
+| | pine_scene | kids_room |
+|---|---|---|
+| DRAM per launch | **90.6 GB** | 9.2 GB |
+| DRAM throughput | **62.5 %** | 5.7 % |
+| `long_scoreboard`, cycles per issued instruction | **27.1** | 3.4 |
+| `no_instruction` | 20.2 | 32.8 |
+| L2 hit / L1 hit | 83.5 % / 40.2 % | 98.2 % / 45.7 % |
+| SM throughput | 7.3 % | 9.2 % |
+| active lanes of 32 | 14.0 | 15.2 |
+
+The rooms are issue-starved; **pine waits on memory**, at 62 % of the card's
+DRAM peak. Nothing in this file's instruction-footprint work applies to it, and
+its numbers should not be read as a smaller version of kids_room's.
+
+Where the traffic is, same launch:
+
+| | |
+|---|---|
+| global loads | 53.0 GB |
+| local loads / stores | 31.4 / 32.7 GB |
+| texture | 7.4 GB |
+| DRAM read / write | 71.7 / 18.9 GB |
+
+And 76 % of the closest hit's *global* sector requests are scalar 32-bit LDGs,
+whose top lines are three groups of eight loads at offsets 0x0..0x1c from three
+different bases: the three 32-byte `Scene::Vertex` records of the triangle
+fetch, one dword at a time.
+
+Two things measured against that and neither kept:
+
+- **Loading each vertex as two 16-byte vectors** instead of eight dwords.
+  `Vertex` is float3 plus uints, so its alignment is 4 and nvcc emits the eight;
+  the buffer is cudaMalloc'd on a 32-byte stride, so a `float4` pair is legal.
+  Four times fewer requests for the same bytes, and pine does not move: 109.9
+  against 109.2 ms, kids_room unchanged. The sectors are what costs, not the
+  requests that ask for them.
+- **Fetching only the uv for the coverage test**, and the three positions only
+  when the test decides to pass through -- 36 bytes of vertex against 96, with
+  no normal, tangent or colour unpacking and no attribute transforms. 106.2
+  against 106.4 ms. Also not kept.
+
+  A trap found on the way: `optixGetTriangleVertexData()` would be cheaper still
+  -- traversal has just read that triangle -- but it requires
+  `OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS` on every GAS, and without it the
+  launch takes an illegal address rather than failing at build time. The flag
+  means keeping the vertex buffer a second time, which is 1.5 GB in this scene.
+
+**What the cutouts cost, and what is left of it.** Compiling the coverage test
+out entirely (`hasCutout` forced false -- wrong image, measured for the bound)
+is 93.3 ms against 106.4: the feature is 13 % of pine's frame. Moving the test
+above `initSurfaceInteraction()`, so that a needle the path slips through no
+longer resolves base colour, metallic-roughness, emission and the normal map
+first, takes 3 % of that (109.2 -> 106.1). The other 10 % is not shading at all:
+it is the traversal restart every pass-through costs, one full trace per needle,
+with the segment bookkeeping and the continuation-stack spill that go with it.
+An `__anyhit__radiance` that ignores the intersection is what removes that --
+the radiance hit group has no any-hit program today, and cutout instances
+already omit `OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT` for the shadow ray's sake. It
+needs a per-intersection random rather than the per-vertex `passthrough`
+counter, so it would change the noise pattern (not the estimate), and Metal
+keeps the loop until someone ports it.
+
 ## The profile after the traffic work, 2026-09-11
 
 `--set full` on the render launch, kids_room, one launch of 16 samples at

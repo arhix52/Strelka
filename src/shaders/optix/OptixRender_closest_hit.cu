@@ -2536,6 +2536,60 @@ extern "C" __global__ void __closesthit__radiance()
         return;
     }
 
+    // --- Leaving a subsurface medium ----------------------------------------
+    //
+    // Before the coverage test, the guides, emission and the BSDF, all of which
+    // describe a ray arriving from outside. This one is on its way out, and it
+    // reads the hit rather than the interaction, so it does not need one built.
+    if (insideMedium && !mediumIsBounded)
+    {
+        exitMedium(prd, surfaceHit.position, surfaceHit.normal, surfaceHit.geom_normal, ray_dir);
+        return;
+    }
+
+    // Coverage. MASK resolves to 0 or 1 and BLEND to its alpha, so one
+    // stochastic test covers both: with probability (1 - opacity) the path
+    // continues straight through, unchanged and unshaded. Nothing else about
+    // the path moves -- not the throughput, not `specularBounce`, not
+    // `lastBsdfPdf` -- so a light or an environment seen through a cutout is
+    // still weighted against the bounce that actually produced the direction.
+    //
+    // Before the surface is built, which is the point: a needle the path slips
+    // through used to pay for initSurfaceInteraction() first -- base colour,
+    // metallic-roughness, emission, the normal map, the vertex colour -- and have
+    // it thrown away. pine_scene is a forest of those, and the whole cutout path
+    // is 13 % of its frame (93.3 ms with cutouts compiled out against 106.4
+    // with them); this is 3 % of it. The transform is applied here because
+    // initSurfaceInteraction() is what used to apply it, and the alpha has to be
+    // sampled at the coordinate the material's maps are.
+    //
+    // Fetching only the uv for the test, and the positions only for the step-off,
+    // was measured and is not here: it reads 36 bytes of vertex where the full
+    // fetch reads 96, and pine_scene does not move for it (106.2 against 106.4).
+    // What is left of the 13 % is the traversal restart each pass-through costs,
+    // which wants an any-hit program rather than a cheaper closest hit.
+    //
+    // params.hasCutout is bound, so a scene whose materials are all opaque does
+    // not carry the test -- nor the opacity texture fetch inside it. Metal
+    // spells it kFcAlpha.
+    if (params.hasCutout && prd->passthrough < PATH_PASSTHROUGH_MAX)
+    {
+        const float opacity = resolveOpacity(matParams, textures, apply_texture_transform(surfaceHit.uv, matParams));
+        if (opacity < 1.0f && opacitySample(prd->sampler, launchPixelIndex(params), prd->passthrough) >= opacity)
+        {
+            // Step off on the side the ray was travelling, so the next trace
+            // cannot re-hit the surface it just passed through.
+            const float3 faceNg = (dot(surfaceHit.geom_normal, ray_dir) > 0.0f) ? surfaceHit.geom_normal
+                                                                                : -surfaceHit.geom_normal;
+            prd->origin = offset_ray(surfaceHit.position, faceNg);
+            prd->dir = ray_dir;
+            prd->misDistance += segment;
+            ++prd->passthrough;
+            prd->passedThrough = true;
+            return;
+        }
+    }
+
     // Fill SurfaceInteraction from hit data, resolving textures, the uv
     // transform, the normal map, vertex colour and coverage on the way.
     SurfaceInteraction si;
@@ -2576,16 +2630,6 @@ extern "C" __global__ void __closesthit__radiance()
     // a curve hit has one.
     const bool isFibre = isCurveHit && scattersThroughFibre(si) && surfaceHit.curveRadius > 0.0f;
     const float curveRadius = isFibre ? surfaceHit.curveRadius : 0.0f;
-
-    // --- Leaving a subsurface medium ----------------------------------------
-    //
-    // Before the guides, the cutout test, emission and the BSDF, all of which
-    // describe a ray arriving from outside. This one is on its way out.
-    if (insideMedium && !mediumIsBounded)
-    {
-        exitMedium(prd, surfaceHit.position, surfaceHit.normal, surfaceHit.geom_normal, ray_dir);
-        return;
-    }
 
     if (prd->writeAov && params.aov != nullptr)
     {
@@ -2664,32 +2708,6 @@ extern "C" __global__ void __closesthit__radiance()
                 cached += sharcReadResponsive(params.sharcEntries, params.sharcCapacity, key);
                 params.image[launchPixelIndex(params)] = make_float4(cached, 1.0f);
             }
-        }
-    }
-
-    // Coverage. MASK resolves to 0 or 1 and BLEND to its alpha, so one
-    // stochastic test covers both: with probability (1 - opacity) the path
-    // continues straight through, unchanged and unshaded. Nothing else about
-    // the path moves -- not the throughput, not `specularBounce`, not
-    // `lastBsdfPdf` -- so a light or an environment seen through a cutout is
-    // still weighted against the bounce that actually produced the direction.
-    // params.hasCutout is bound, so a scene whose materials are all opaque does
-    // not carry the test -- nor the opacity texture fetch inside it, which is a
-    // dependent load on every shaded vertex. Metal spells it kFcAlpha.
-    const float opacity = params.hasCutout ? resolveOpacity(matParams, textures, si.uv) : 1.0f;
-    if (params.hasCutout && opacity < 1.0f && prd->passthrough < PATH_PASSTHROUGH_MAX)
-    {
-        if (opacitySample(prd->sampler, launchPixelIndex(params), prd->passthrough) >= opacity)
-        {
-            // Step off on the side the ray was travelling, so the next trace
-            // cannot re-hit the surface it just passed through.
-            const float3 faceNg = (dot(si.geometry_normal, ray_dir) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
-            prd->origin = offset_ray(si.position, faceNg);
-            prd->dir = ray_dir;
-            prd->misDistance += segment;
-            ++prd->passthrough;
-            prd->passedThrough = true;
-            return;
         }
     }
 
