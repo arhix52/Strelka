@@ -630,6 +630,26 @@ void OptiXRender::createContext()
     CUcontext cuCtx = nullptr;
     unsigned int reorderFlags = 0;
 
+    // Sleep while the device works instead of spinning on a core.
+    //
+    // The default policy busy-waits, and a wait proportional to how long the GPU
+    // is busy is most of what this process costs: a perf profile of a headless
+    // render put 85% of its CPU samples inside cuStreamSynchronize and another
+    // 11% in the clock_gettime that spin calls, against 0.5% in Strelka's own
+    // code. Blocking instead took 4096 spp of iso_bathroom from 10.8 s of CPU to
+    // 1.5 s, and the editor's 600 frame benchmark from 4.0 s to 0.9 s.
+    //
+    // It is not free: the host has to be woken after each synchronise, and that
+    // latency sits in the frame's serial chain. At one sample per launch it cost
+    // 10% of the render; it is why RenderConfig::sppPerLaunch defaults to a
+    // batch rather than to 1, which amortises the wake-up and brings the wall
+    // clock back to the spinning figure. The editor still submits one frame at a
+    // time and pays about 0.16 ms of it per frame, which is what a frame in
+    // flight would remove.
+    //
+    // Before any CUDA call that would create the context, or it is ignored.
+    CUDA_CHECK(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync));
+
     // Initialize CUDA
     CUDA_CHECK(cudaFree(nullptr));
     CUDA_CHECK(cudaGetDevice(&mCudaDeviceOrdinal));

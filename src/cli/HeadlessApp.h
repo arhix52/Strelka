@@ -25,7 +25,17 @@ struct RenderConfig
     // Kept so harness tomls with integrator = "pt"|"bdpt"|"vcm" still parse.
     uint32_t integrator = 0;
     uint32_t spp = 256;
-    uint32_t sppPerLaunch = 1;
+    // One launch per sample means one synchronise per sample, and with the
+    // blocking wait OptiXRender::createContext() asks for, each of those costs a
+    // wake-up in the serial chain of the render -- 10% of a 4096 spp run. A
+    // batch amortises it: the same run measures 25.3 s at 1 sample per launch
+    // and 23.9 s at 16, with the CPU it burns down from 25 s to 0.8 s. The
+    // accumulated image differs by 1.3e-7 relative, which is the order the
+    // sample sums land in and nothing else.
+    //
+    // The progress bar and its ms/sample now step by this much at a time, which
+    // is the only thing a reader sees change.
+    uint32_t sppPerLaunch = 16;
     uint32_t maxDepth = 8;
     // Extra wavefront iterations reserved for subsurface random walks. The
     // conservative default preserves the reference image; performance runs can
