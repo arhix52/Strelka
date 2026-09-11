@@ -10,6 +10,9 @@
 #include <postprocessing/Tonemappers.h>
 #include <paths.h>
 
+#include <cstdlib>
+#include <filesystem>
+
 #if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
@@ -92,6 +95,28 @@ void GlfwDisplay::init(int width, int height, SettingsManager *settings)
     mWindowWidth = width;
     mWindowHeight = height;
     mSettings = settings;
+
+#if defined(__linux__)
+    // Point libxkbcommon at the system's compose tables before GLFW loads it.
+    //
+    // We link Conan's libxkbcommon, which has XLOCALEDIR compiled in as its own
+    // package prefix -- and that package ships no share/X11/locale at all. The
+    // first keyboard event then prints
+    //
+    //     xkbcommon: ERROR: couldn't find a Compose file for locale "en_US.UTF-8"
+    //
+    // on a machine that has the file, at the distribution's path, the whole
+    // time. It is not only a line of noise: without a compose table, dead keys
+    // and Multi_key sequences produce nothing, so an accented character cannot
+    // be typed into any of the editor's text fields.
+    //
+    // Only when the variable is unset, so anyone pointing it somewhere on
+    // purpose keeps their choice, and only when the directory is really there.
+    if (std::getenv("XLOCALEDIR") == nullptr && std::filesystem::is_directory("/usr/share/X11/locale"))
+    {
+        setenv("XLOCALEDIR", "/usr/share/X11/locale", 0);
+    }
+#endif
 
     if (!glfwInit())
     {
