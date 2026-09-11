@@ -829,6 +829,25 @@ void EditorApp::loadAnimSettings()
 
 void EditorApp::initializeRendererForCurrentScene()
 {
+    // Motion blur is a capability, not a per-frame switch: both backends read
+    // this once in init() and it decides the shape of the pipeline and of the
+    // acceleration structures -- a motion GAS rebuilt rather than refit, a
+    // three-level traversable graph, a static TLAS instead of a refittable one.
+    //
+    // The editor used to ask for it on every scene. On iso_bathroom, which has
+    // nothing that moves, that was 5.91 ms per frame against 4.11 ms without,
+    // plus a second 30 s pipeline build the CLI had already paid for the
+    // motion-free variant. A scene with no animations and no skinning has no
+    // motion to blur -- only instance and skeletal motion is interpolated over
+    // the shutter, camera movement is not -- so asking for the capability buys
+    // nothing there.
+    bool sceneHasMotion = !m_scene->getAnimations().empty();
+    for (const oka::Mesh& mesh : m_scene->getMeshes())
+    {
+        sceneHasMotion = sceneHasMotion || mesh.isSkeletal;
+    }
+    m_settingsManager->setAs<bool>("render/enableMotionBlur", sceneHasMotion);
+
     m_render = std::unique_ptr<Render>(RenderFactory::createRender());
     m_render->setSettingsManager(m_settingsManager.get());
     m_render->setSharedContext(m_sharedCtx.get());
