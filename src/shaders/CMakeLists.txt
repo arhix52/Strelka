@@ -4,6 +4,29 @@ set(SHADER_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/common)
 
 if(WIN32 OR LINUX)
     find_package(CUDA REQUIRED)
+
+    # nvcc through ccache, when there is one.
+    #
+    # The device half of an edit-build cycle is one nvcc invocation and 14.6 s of
+    # it: OptixRender_closest_hit.cu is the megakernel and its OPTIXIR is 14.9 MB.
+    # An A/B measurement pays that again for the flip back, and ccache does cache
+    # an --optix-ir compilation -- measured on a two-line probe, 0.183 s cold and
+    # 0.003 s warm -- so the flip back costs nothing.
+    #
+    # A wrapper script rather than a launcher variable: this file drives nvcc
+    # through FindCUDA's run_nvcc.cmake, which executes CUDA_NVCC_EXECUTABLE as a
+    # single program and has no notion of a launcher. UNIX only for the same
+    # reason -- a shell script is not what Windows would execute.
+    if(UNIX AND STRELKA_CCACHE AND NOT CUDA_NVCC_EXECUTABLE MATCHES "ccache-nvcc$")
+        set(STRELKA_CCACHE_NVCC "${CMAKE_BINARY_DIR}/ccache-nvcc")
+        file(WRITE "${STRELKA_CCACHE_NVCC}"
+             "#!/bin/sh\nexec \"${STRELKA_CCACHE}\" \"${CUDA_NVCC_EXECUTABLE}\" \"$@\"\n")
+        file(CHMOD "${STRELKA_CCACHE_NVCC}" PERMISSIONS
+             OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+        set(CUDA_NVCC_EXECUTABLE "${STRELKA_CCACHE_NVCC}" CACHE FILEPATH "" FORCE)
+        message(STATUS "nvcc through ccache: ${STRELKA_CCACHE_NVCC}")
+    endif()
+
     set(OptiX_INSTALL_DIR $ENV{OPTIX_DIR})
     find_package(OptiX REQUIRED)
 
@@ -58,8 +81,19 @@ if(WIN32 OR LINUX)
     # rather than to an address. It adds a debug section and changes no code:
     # measured on kids_room, 22.2 ms/sample either way. Without it the PC
     # samples land on SASS and the question "which line stalls" has no answer.
+    # -c is here for ccache and for nothing else. FindCUDA spells the OPTIXIR
+    # rule `nvcc file.cu -optix-ir -o out`, with no -c, and ccache reads a
+    # command line without one as a link step and refuses to cache it ("No -c
+    # option found" in its log). The device half of an edit-build cycle is one
+    # nvcc invocation and 14.6 s of it -- OptixRender_closest_hit.cu is the
+    # megakernel, its OPTIXIR is 14.9 MB -- so an A/B measurement paid that twice
+    # and a revert paid it again.
+    #
+    # It changes nothing about the output: the OPTIXIR compiled with it is byte
+    # for byte the one compiled without, checked on this file at equal output
+    # paths. --optix-ir is already a device-only compilation; -c only says so.
     set(OPTIX_NVCC_FLAGS --gpu-architecture=compute_89 --use_fast_math --relocatable-device-code=true
-        --expt-relaxed-constexpr --generate-line-info)
+        --expt-relaxed-constexpr --generate-line-info -c)
 
     # NDEBUG outside a Debug build, which is what compiles openpbr's ~40
     # OPENPBR_ASSERTs out of device code. They are preconditions on quantities a
