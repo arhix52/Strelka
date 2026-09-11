@@ -130,6 +130,18 @@ void GlfwDisplay::init(int width, int height, SettingsManager *settings)
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    // What the desktop calls this window in a task bar, an alt-tab list or a
+    // dock. Unset, GLFW leaves the Wayland app_id and the X11 WM_CLASS empty and
+    // the compositor has nothing to show but "unknown" and a placeholder icon.
+    //
+    // The window title is not that name: it carries the scene path and a dirty
+    // marker and changes as the session goes, which is exactly what an
+    // identifier must not do. Both spellings are set because which one is read
+    // depends on the platform GLFW picked, and it picks Wayland where there is
+    // one.
+    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "Strelka");
+    glfwWindowHintString(GLFW_X11_CLASS_NAME, "Strelka");
+    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "Strelka");
     mWindow = glfwCreateWindow(mWindowWidth, mWindowHeight, "Strelka", nullptr, nullptr);
     if (mWindow == nullptr)
     {
