@@ -91,7 +91,11 @@ public:
     /// loop does not need this -- it just draws whatever is ready -- but anything
     /// measuring a frame has to know when that frame is actually there, and
     /// sleeping a guessed interval instead makes the measurement a race.
-    virtual bool isRenderBusy() const
+    ///
+    /// Not const, and deliberately: a backend that leaves the frame in flight
+    /// rather than waiting for it reaps the finished one here, which is the only
+    /// place the harnesses' "submit once, spin until not busy" loops ever ask.
+    virtual bool isRenderBusy()
     {
         return false;
     }

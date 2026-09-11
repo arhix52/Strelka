@@ -540,6 +540,11 @@ private:
     // around render() measures how long it took to *enqueue* them, which on this
     // backend is microseconds however long the GPU then works. Events are the
     // only thing that answers the question the editor's title bar is asking.
+    /// The output slot of the frame that has been submitted and not yet
+    /// published, and -1 when nothing is in flight. Only one frame is ever
+    /// outstanding: the other slot is the one being displayed.
+    int mSubmittedIndex = -1;
+
     cudaEvent_t mFrameStartEvent = nullptr;
     cudaEvent_t mFrameStopEvent = nullptr;
     /// A pair of events has been recorded and not yet read back.
@@ -704,12 +709,25 @@ public:
         return mScenePrep.isBuilding();
     }
 
-    bool isRenderBusy() const override
+    bool isRenderBusy() override
     {
+        // Poll, do not wait: this is what the audit harnesses spin on after
+        // submitting one frame, and the frame they are waiting for is only
+        // published when somebody notices it has landed.
+        reapSubmittedFrame(false);
         return mRenderBusy.load(std::memory_order_acquire);
     }
 
     void triggerRenderIfIdle() override;
+
+    /// Publish the frame that is in flight, if it has landed.
+    ///
+    /// With `wait` the caller is prepared to block for it; without, a frame that
+    /// is still running is left alone and the previous one stays on screen. The
+    /// editor submits a frame and then draws its UI, so by the time it asks
+    /// again the trace has been running for the whole of that UI rather than
+    /// starting after it.
+    void reapSubmittedFrame(bool wait);
     Buffer* getReadyBuffer() override;
     ReadyFrame getReadyFrame() override;
     int activeCudaDeviceOrdinal() const override

@@ -48,7 +48,7 @@ public:
     Buffer* createBuffer(const BufferDesc& desc) override;
 
     void triggerRenderIfIdle() override;
-    bool isRenderBusy() const override
+    bool isRenderBusy() override
     {
         return mRenderBusy.load(std::memory_order_acquire);
     }

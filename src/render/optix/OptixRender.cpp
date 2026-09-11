@@ -544,6 +544,9 @@ OptiXRender::~OptiXRender()
         mState.pinnedParams = nullptr;
     }
 
+    // Nothing may still be writing the buffers destroyed below.
+    reapSubmittedFrame(true);
+
     // Destroy texture objects and arrays
     destroyTextures();
 
@@ -4862,6 +4865,8 @@ void OptiXRender::renderSync(Buffer* output)
 // the interactive samples-per-launch this path uses is milliseconds.
 void OptiXRender::triggerRenderIfIdle()
 {
+    // Last call's frame, waited for here rather than where it was submitted.
+    reapSubmittedFrame(true);
     if (mRenderBusy.load(std::memory_order_acquire) || deviceError())
     {
         return;
@@ -4898,20 +4903,50 @@ void OptiXRender::triggerRenderIfIdle()
     // this frame never wrote.
     if (mRenderBusy.load(std::memory_order_acquire))
     {
-        syncFrameAndLatchErrors();
-        collectFrameTiming(true);
-        // A failed frame is not published. Its buffer holds whatever was in it
-        // before, and showing that is how a GPU fault comes out looking like a
-        // lighting bug; the last good frame stays on screen and the editor's
-        // alert says why it stopped moving.
-        if (!mDeviceError)
-        {
-            mFramePresentation[mWriteIndex] = mPendingPresentation;
-            mFrameSerials[mWriteIndex] = mNextFrameSerial++;
-            mReadyIndex.store(mWriteIndex, std::memory_order_release);
-        }
-        mRenderBusy.store(false, std::memory_order_release);
+        // Left in flight. The wait for it happens at the top of the next call,
+        // by which time the editor has drawn a whole UI frame against the
+        // picture that is already on screen -- work that used to run after the
+        // trace had finished, with the device idle for the whole of it.
+        mSubmittedIndex = mWriteIndex;
     }
+}
+
+void OptiXRender::reapSubmittedFrame(bool wait)
+{
+    if (mSubmittedIndex < 0)
+    {
+        return;
+    }
+    // The stop event is recorded on the legacy stream after everything this
+    // frame enqueued, so it is the frame's fence as well as its clock. Without
+    // one there is no way to ask, and the only honest answer is to wait.
+    if (!wait && mFrameStopEvent)
+    {
+        const cudaError_t query = cudaEventQuery(mFrameStopEvent);
+        if (query == cudaErrorNotReady)
+        {
+            return;
+        }
+        if (query != cudaSuccess)
+        {
+            latchCudaError(query, "poll this frame");
+        }
+    }
+
+    syncFrameAndLatchErrors();
+    collectFrameTiming(true);
+    // A failed frame is not published. Its buffer holds whatever was in it
+    // before, and showing that is how a GPU fault comes out looking like a
+    // lighting bug; the last good frame stays on screen and the editor's
+    // alert says why it stopped moving.
+    if (!mDeviceError)
+    {
+        mFramePresentation[mSubmittedIndex] = mPendingPresentation;
+        mFrameSerials[mSubmittedIndex] = mNextFrameSerial++;
+        mReadyIndex.store(mSubmittedIndex, std::memory_order_release);
+    }
+    mSubmittedIndex = -1;
+    mRenderBusy.store(false, std::memory_order_release);
 }
 
 Buffer* OptiXRender::getReadyBuffer()
