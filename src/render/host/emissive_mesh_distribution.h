@@ -81,13 +81,21 @@ inline std::vector<double> emissiveTrianglePowers(std::span<const Scene::Vertex>
                                                   const glm::mat4& objectToWorld,
                                                   bool preservePotentialMotionSupport = false)
 {
-    const size_t triangleCount = mesh.mCount / 3u;
-    std::vector<double> powers(triangleCount, 0.0);
+    // The luminance decides whether this mesh has any proposal at all, so it is
+    // read before the per-triangle vector exists. A forest scene is ~47 M
+    // triangles across instances of which none emit: allocating and zeroing a
+    // double per triangle for each of them cost 12 s of the 25 s pine load and
+    // most of its 42 GB peak RSS, all of it thrown away one call later when the
+    // alias table came out with zero power. An empty vector is the same signal
+    // -- buildEmissiveMeshDistribution drops a mesh whose table has no power,
+    // and it reads triangleCount only after that test.
     const double radiance = emissiveMaterialLuminance(material);
     if (!(radiance > 0.0))
     {
-        return powers;
+        return {};
     }
+    const size_t triangleCount = mesh.mCount / 3u;
+    std::vector<double> powers(triangleCount, 0.0);
 
     for (size_t triangle = 0; triangle < triangleCount; ++triangle)
     {
