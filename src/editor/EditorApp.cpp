@@ -73,8 +73,15 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     // The scene used to be parsed here, before the window existed, so the five
     // seconds a large scene takes were five seconds of an application that had
     // not drawn anything and could not be closed. Render::init() is only the
-    // device and the pipelines -- some twenty milliseconds -- so there is nothing
-    // stopping the window from coming up first and the scene arriving into it.
+    // device and the pipelines, so there is nothing stopping the window from
+    // coming up first and the scene arriving into it.
+    //
+    // "Only" is relative: a perf profile of an empty start puts createContext()
+    // at 36% of it, some 240 ms of cuInit and cuDevicePrimaryCtxRetain against
+    // roughly 280 ms for the display below, out of ~700 ms in total. Almost none
+    // of an empty start is our own code. The two are serialised because Vulkan
+    // picks the physical device matching the renderer's CUDA device; overlapping
+    // them means splitting GlfwDisplay::init() around that one dependency.
     loadSettings();
     m_render->init();
 #ifdef __APPLE__
