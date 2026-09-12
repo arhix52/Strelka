@@ -1483,14 +1483,17 @@ static void extendImpl(uint gid,
     r.origin = float3(pr.origin);
     r.direction = float3(pr.direction);
 
-    // Never hand NaN, infinity, or a collapsed direction to the ray tracing
-    // unit. Such a path cannot produce a finite contribution, while curve
-    // traversal on malformed rays can fail to make progress and trip the GPU
-    // watchdog instead of merely returning no intersection.
-    const float directionLength2 = dot(r.direction, r.direction);
-    if (!all(isfinite(r.origin)) || !all(isfinite(r.direction)) || !(directionLength2 > 0.25f && directionLength2 < 4.0f))
+    // Triangle traversal turns a malformed ray into a miss. Curve traversal can
+    // fail to make progress and trip the watchdog, so only its specialization
+    // pays for the defensive finite/range checks.
+    if (SPEC_CURVES)
     {
-        return;
+        const float directionLength2 = dot(r.direction, r.direction);
+        if (!all(isfinite(r.origin)) || !all(isfinite(r.direction)) ||
+            !(directionLength2 > 0.25f && directionLength2 < 4.0f))
+        {
+            return;
+        }
     }
 
     // Draw a participating-medium event before traversal and use it as the

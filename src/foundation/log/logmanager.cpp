@@ -21,10 +21,12 @@ std::vector<std::filesystem::path> logFileCandidates()
     // $XDG_STATE_HOME, or the default the spec gives for it. State is the right
     // category for a log: not configuration, not a cache, and not something the
     // user opens.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     if (const char* stateHome = std::getenv("XDG_STATE_HOME"); stateHome != nullptr && *stateHome != '\0')
     {
         candidates.emplace_back(std::filesystem::path(stateHome) / "strelka" / "strelka.log");
     }
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
     else if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
     {
         candidates.emplace_back(std::filesystem::path(home) / ".local" / "state" / "strelka" / "strelka.log");
@@ -80,6 +82,7 @@ void oka::Logmanager::initialize()
                 sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(candidate.string()));
                 break;
             }
+            // NOLINTNEXTLINE(bugprone-empty-catch)
             catch (const spdlog::spdlog_ex&)
             {
                 // Next candidate; the console sink already holds the session.

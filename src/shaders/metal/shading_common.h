@@ -1499,12 +1499,9 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     const bool hasAnalytic = SPEC_LIGHTS && numLights > 0u;
     const bool hasMesh = SPEC_LIGHTS && SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0u;
     const bool hasLocal = hasAnalytic || hasMesh;
-    // Keep the categorical emitter choice coherent within a SIMD-group. Each
-    // lane still has the same marginal distribution and draws its own light
-    // point below, but env and local sampling no longer serialize as divergent
-    // branches for almost every group.
-    const uint32_t emitterWord =
-        simd_broadcast_first(randomBits<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType));
+    // Keep categorical choices per path. Sharing one word across a SIMD-group
+    // preserves the expectation but turns finite-spp error into visible bands.
+    const uint32_t emitterWord = randomBits<SampleDimension::eLightId>(samplerRnd, uniforms.samplerType);
     float localSelectionPdf = 1.0f;
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
@@ -1528,8 +1525,7 @@ LightConnection connectToLight(constant Uniforms& uniforms,
     bool chooseMesh = hasMesh && !hasAnalytic;
     if (hasMesh && hasAnalytic)
     {
-        const uint32_t classWord =
-            simd_broadcast_first(randomBits<SampleDimension::eLightClass>(samplerRnd, uniforms.samplerType));
+        const uint32_t classWord = randomBits<SampleDimension::eLightClass>(samplerRnd, uniforms.samplerType);
         chooseMesh = discreteBernoulli(classWord, meshSelectionPdf);
     }
     if (chooseMesh)
