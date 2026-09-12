@@ -895,7 +895,10 @@ void MetalRender::init()
     static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(offsetof(Uniforms, baseLightConnections) == 1032);
     static_assert(offsetof(Uniforms, geometryTransformBase) == 1040);
-    static_assert(sizeof(Uniforms) == 1056, "Uniforms host/Metal ABI changed");
+    static_assert(offsetof(Uniforms, cameraRayRight) == 1056);
+    static_assert(offsetof(Uniforms, cameraRayUp) == 1072);
+    static_assert(offsetof(Uniforms, cameraRayForward) == 1088);
+    static_assert(sizeof(Uniforms) == 1104, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium

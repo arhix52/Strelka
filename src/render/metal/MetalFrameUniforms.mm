@@ -2,6 +2,7 @@
 
 #include "MetalAccelStructure.h"
 
+#include <host/camera_ray_basis.h>
 #include "sharc_grid_size.h"
 
 #include <host/light_selection.h>
@@ -566,6 +567,11 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     const glm::float4x4 invView = glm::inverse(camera.matrices.view);
     std::memcpy(&pUniformData->viewToWorld, glm::value_ptr(invView), sizeof(float4x4));
     std::memcpy(&pUniformData->clipToView, glm::value_ptr(camera.matrices.invPerspective), sizeof(float4x4));
+    const PerspectiveCameraRayBasis cameraRayBasis = perspectiveCameraRayBasis(invView, camera.matrices.invPerspective);
+    pUniformData->cameraRayRight = float3{ cameraRayBasis.right.x, cameraRayBasis.right.y, cameraRayBasis.right.z };
+    pUniformData->cameraRayUp = float3{ cameraRayBasis.up.x, cameraRayBasis.up.y, cameraRayBasis.up.z };
+    pUniformData->cameraRayForward =
+        float3{ cameraRayBasis.forward.x, cameraRayBasis.forward.y, cameraRayBasis.forward.z };
 
     {
         const glm::float4x4 prevInvView = glm::inverse(in.prevMotionBlurView->mCamMatrices.view);

@@ -502,8 +502,13 @@ struct Uniforms
     /// First transform-only record after the real TLAS instance descriptors.
     /// A world-space baked geometry indexes this tail by GeometryEntry id.
     uint32_t geometryTransformBase;
+    // Perspective camera unprojection expanded on the CPU. Appended so the
+    // existing pointer offsets above remain stable across the shared ABI.
+    vector_float3 cameraRayRight;
+    vector_float3 cameraRayUp;
+    vector_float3 cameraRayForward;
 };
-static_assert(sizeof(Uniforms) == 1056, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1104, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {

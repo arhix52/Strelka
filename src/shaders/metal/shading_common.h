@@ -507,12 +507,13 @@ void generateCameraRay(uint2 pixelIndex,
     pixelNDC.x += params.shiftX * 2.0f;
     pixelNDC.y += params.shiftY * 2.0f;
 
-    // Interpolate camera matrices for camera motion blur
-    float4x4 clipToView = params.clipToView;
+    // Camera motion retains the matrix path because interpolating two expanded
+    // endpoint bases would not equal the existing product of interpolated
+    // projection and view matrices.
     float4x4 viewToWorld = params.viewToWorld;
-    if (SPEC_MOTION_BLUR && motionTime < 1.0f && params.enableCameraMotionBlur)
+    const bool interpolateCamera = SPEC_MOTION_BLUR && motionTime < 1.0f && params.enableCameraMotionBlur;
+    if (interpolateCamera)
     {
-        clipToView = lerpMatrix(params.prevClipToView, params.clipToView, motionTime);
         viewToWorld = lerpMatrix(params.prevViewToWorld, params.viewToWorld, motionTime);
     }
 
@@ -528,13 +529,18 @@ void generateCameraRay(uint2 pixelIndex,
     }
     else
     {
-        float4 clip{ pixelNDC.x, pixelNDC.y, 1.0f, 1.0f };
-        float4 viewSpace = clipToView * clip;
-
-        float4 wdir = viewToWorld * float4(viewSpace.x, viewSpace.y, viewSpace.z, 0.0f);
-
-        origin = (viewToWorld * float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
-        direction = normalize(wdir.xyz);
+        if (interpolateCamera)
+        {
+            const float4x4 clipToView = lerpMatrix(params.prevClipToView, params.clipToView, motionTime);
+            const float4 viewSpace = clipToView * float4(pixelNDC.x, pixelNDC.y, 1.0f, 1.0f);
+            direction = normalize((viewToWorld * float4(viewSpace.xyz, 0.0f)).xyz);
+        }
+        else
+        {
+            direction = normalize(float3(params.cameraRayForward) + pixelNDC.x * float3(params.cameraRayRight) +
+                                  pixelNDC.y * float3(params.cameraRayUp));
+        }
+        origin = viewToWorld[3].xyz;
     }
 
     // Thin lens depth of field

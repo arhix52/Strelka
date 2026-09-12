@@ -73,6 +73,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ibl_alias_table.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_env_alias_sampling.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_env_map_math.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_camera_ray_basis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_buffer_sizes.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_render_resolution.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_metal_temporal_history.cpp
