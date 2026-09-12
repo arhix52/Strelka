@@ -447,6 +447,7 @@ void MetalWavefrontIntegrator::reportStageTimestampValues(const uint64_t* timest
     double totals[kStageCount] = {};
     uint32_t counts[kStageCount] = {};
     double primaryExtendMs = 0.0;
+    double primaryShadowMs = 0.0;
     // Per-bounce durations of the three traversal-heavy stages. The cost of a
     // bounce says more than the total does: bounce 0 is a coherent primary pass
     // and the later ones are not, which is what decides whether sorting rays is
@@ -467,6 +468,10 @@ void MetalWavefrontIntegrator::reportStageTimestampValues(const uint64_t* timest
         if (kind == kStageExtend && i < mStageBounces.size() && mStageBounces[i] == 0)
         {
             primaryExtendMs += ms;
+        }
+        if (kind == kStageShadow && i < mStageBounces.size() && mStageBounces[i] == 0)
+        {
+            primaryShadowMs += ms;
         }
         if (kind == kStageExtend || kind == kStageSssWalk || kind == kStageConnect || kind == kStageShade ||
             kind == kStageShadeBase || kind == kStageShadeLayer || kind == kStageShadeTranslucent ||
@@ -496,6 +501,11 @@ void MetalWavefrontIntegrator::reportStageTimestampValues(const uint64_t* timest
     {
         STRELKA_INFO("STAGES primary extend {:.2f}ms ({:.1f}% of extend)", primaryExtendMs,
                      100.0 * primaryExtendMs / totals[kStageExtend]);
+    }
+    if (totals[kStageShadow] > 0.0)
+    {
+        STRELKA_INFO("STAGES primary shadow {:.2f}ms ({:.1f}% of shadow)", primaryShadowMs,
+                     100.0 * primaryShadowMs / totals[kStageShadow]);
     }
     STRELKA_INFO(
         "STAGES per dispatch: extend [{}] sss [{}] connect [{}] base [{}] layer [{}] translucent [{}] tail [{}] "
@@ -2111,6 +2121,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&uniformRectLightSampling, MTL::DataTypeBool, (NS::UInteger)27);
     const bool splitBaseNee = (features & WavefrontFeatures::kSplitBaseNee) != 0;
     values->setConstantValue(&splitBaseNee, MTL::DataTypeBool, (NS::UInteger)28);
+    const bool stochasticAlphaVisibility = !envFlag("STRELKA_DETERMINISTIC_ALPHA_VISIBILITY");
+    values->setConstantValue(&stochasticAlphaVisibility, MTL::DataTypeBool, (NS::UInteger)29);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };

@@ -1057,9 +1057,9 @@ struct ShadowRay
     packed_float3 weight; // radiance already divided by pdf and multiplied by the BSDF
     float maxDistance;
     uint32_t pixelIndex;
-    // Threshold at which traversal may give up on this ray, drawn where the ray
-    // was created because that is where the sampler knows the path's depth.
-    float rrCutoff;
+    // Uniform random threshold for stochastic alpha visibility, drawn where
+    // the ray was created because that is where the sampler knows the path's depth.
+    float alphaThreshold;
     /// Which bounded medium the ray starts inside, material index + 1, or 0.
     ///
     /// Carried rather than re-derived: the shadow stage can find where the ray
@@ -1083,7 +1083,7 @@ struct CompactShadowRay
     packed_float3 weight;
     float maxDistance;
     uint32_t pixelIndex;
-    float rrCutoff;
+    float alphaThreshold;
     uint32_t medium;
 };
 static_assert(sizeof(CompactShadowRay) == 52, "CompactShadowRay ABI changed");
@@ -1223,11 +1223,13 @@ struct Material
     packed_float3 attenuation_color; // 12 bytes (KHR_materials_volume)
     float attenuation_distance; //  4 bytes -- 112
 
-    // KHR_texture_transform, one per material; see material_params.h.
+    // KHR_texture_transform, one per material; see material_params.h. The CPU
+    // folds scale and rotation into two rows so every texture lookup avoids
+    // recomputing sin/cos. Together with the offset this keeps the old 24-byte
+    // layout and the Material ABI unchanged.
     vector_float2 uv_offset; //  8 bytes
-    vector_float2 uv_scale; //  8 bytes
-    float uv_rotation; //  4 bytes
-    float _pad_uv; //  4 bytes -- 136
+    vector_float2 uv_transform_x; //  8 bytes
+    vector_float2 uv_transform_y; //  8 bytes -- 136
 
     // KHR_materials_diffuse_transmission; see material_params.h.
     packed_float3 diffuse_transmission_color; // 12 bytes

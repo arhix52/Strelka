@@ -3003,7 +3003,7 @@ static inline void storeShadowRay(device char* data, uint32_t index, thread cons
     compact.weight = ray.weight;
     compact.maxDistance = ray.maxDistance;
     compact.pixelIndex = ray.pixelIndex;
-    compact.rrCutoff = ray.rrCutoff;
+    compact.alphaThreshold = ray.alphaThreshold;
     compact.medium = ray.medium;
     ((device CompactShadowRay*)data)[index] = compact;
 }
@@ -3021,7 +3021,7 @@ static inline ShadowRay loadShadowRay(device const char* data, uint32_t index)
     ray.weight = compact.weight;
     ray.maxDistance = compact.maxDistance;
     ray.pixelIndex = compact.pixelIndex;
-    ray.rrCutoff = compact.rrCutoff;
+    ray.alphaThreshold = compact.alphaThreshold;
     ray.medium = compact.medium;
     ray.sharcRadiance = packed_float3(float3(0.0f));
     ray.sharcPathIndex = compact.pixelIndex;
@@ -3372,8 +3372,7 @@ static inline void wavefrontShadeImpl(uint gid,
                     sr.sharcRadiance =
                         packed_float3(SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
                     sr.sharcPathIndex = tid;
-                    sr.rrCutoff =
-                        random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                    sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
                     const uint32_t slot = allocateShadowSlot(shadowCounter);
                     auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                     storeShadowRay(shadowRays, slot, sr);
@@ -3526,8 +3525,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.sharcRadiance = packed_float3(
                             SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * phase : float3(0.0f));
                         sr.sharcPathIndex = tid;
-                        sr.rrCutoff =
-                            random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                        sr.alphaThreshold = random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         storeShadowRay(shadowRays, slot, sr);
@@ -3985,8 +3983,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.sharcRadiance = packed_float3(
                             SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * M_1_PI_F : float3(0.0f));
                         sr.sharcPathIndex = tid;
-                        sr.rrCutoff =
-                            random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                        sr.alphaThreshold = random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         storeShadowRay(shadowRays, slot, sr);
@@ -4732,8 +4729,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                         sr.sharcRadiance = packed_float3(float3(0.0f));
                         sr.sharcPathIndex = tid;
-                        sr.rrCutoff =
-                            random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                        sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         storeShadowRay(shadowRays, slot, sr);
@@ -5208,8 +5204,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
                         sr.sharcRadiance = packed_float3(SPEC_SHARC_UPDATE ? bestF * W : float3(0.0f));
                         sr.sharcPathIndex = tid;
-                        sr.rrCutoff =
-                            random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+                        sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
                         storeShadowRay(shadowRays, slot, sr);
@@ -6181,7 +6176,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     }
     sr.sharcPathIndex = tid | (SPEC_RENDER_WORK_AUDIT && selectedHistory ? RESTIR_AUDIT_HISTORY_BIT : 0u) |
                         (updateVisibilityCache ? RESTIR_VISIBILITY_UPDATE_BIT : 0u);
-    sr.rrCutoff = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType) * kShadowTransmittanceCutoff;
+    sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
     storeShadowRay(shadowRays, slot, sr);
     auditWork(uniforms, WORK_RESTIR_FINAL_VISIBILITY_RAYS);
@@ -6764,15 +6759,14 @@ static float3 mediumTransmittance(typename T::structure accelerationStructure,
 //     any shadow ray needs to resolve.
 //
 // Returns false when the ray is blocked; `transmittance` is what survived.
-// One cutout candidate's contribution to the shadow ray, and the roulette that
-// ends the walk. Shared by both specialisations below: the compensation applied
-// to the survivors in `shadowImpl` assumes exactly this termination rule, so the
-// two must not drift apart.
-static inline bool cutoutRouletteDone(thread float3& transmittance, float opacity, float cutoff)
+// Alpha is scalar for every material path, so carrying float3 here only raises
+// register pressure. A fully opaque hit, numerical zero, or threshold rejection
+// ends the walk. Shared by both specialisations below so both traversal paths
+// implement identical alpha visibility.
+static inline bool cutoutRouletteDone(thread float& transmittance, float opacity, float cutoff)
 {
     transmittance *= (1.0f - opacity);
-    const float left = max(max(transmittance.x, transmittance.y), transmittance.z);
-    return left <= cutoff || all(transmittance <= 1e-6f);
+    return transmittance <= cutoff || transmittance <= 1e-6f;
 }
 
 // How many cutout crossings the restart walk below may take before it gives up
@@ -6793,9 +6787,9 @@ struct CutoutShadowWalk
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
                     typename T::table functionTable,
-                    thread float3& transmittance)
+                    thread float& transmittance)
     {
-        transmittance = float3(1.0f);
+        transmittance = 1.0f;
         ray probe = shadowRay;
         // Only probe.min_distance changes between restarts, so the intersector is
         // configured once. Closest hit, because the walk has to meet the cutouts
@@ -6819,10 +6813,9 @@ struct CutoutShadowWalk
             float opacity = 1.0f;
             if (hit.type == intersection_type::triangle)
             {
-                opacity =
-                    cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.user_instance_id,
-                                    hit.triangle_barycentric_coord, materials, geometryEntries, vertexBuffer,
-                                    indexBuffer);
+                opacity = cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.user_instance_id,
+                                          hit.triangle_barycentric_coord, materials, geometryEntries, vertexBuffer,
+                                          indexBuffer);
             }
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
@@ -6853,10 +6846,10 @@ struct CutoutShadowWalk<T, true>
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
-                    typename T::table functionTable,
-                    thread float3& transmittance)
+                    typename T::table,
+                    thread float& transmittance)
     {
-        transmittance = float3(1.0f);
+        transmittance = 1.0f;
         // Accept any hit and restrict geometry to avoid nearest-hit work and irrelevant bounding-box candidates.
         intersection_params params;
         params.accept_any_intersection(true);
@@ -6874,17 +6867,9 @@ struct CutoutShadowWalk<T, true>
             // loop. Getting that wrong drops every opaque shadow caster in the
             // scene: the ground keeps its dappled canopy shade and loses the
             // trunks and rocks entirely, at 156 of this scene's 300 geometries.
-            if (q.get_candidate_intersection_type() != intersection_type::triangle)
-            {
-                // A curve candidate carries no cutout -- curve geometry is built
-                // opaque -- so it blocks.
-                q.abort();
-                return false;
-            }
-            const float opacity = cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
-                                                  q.get_candidate_user_instance_id(),
-                                                  q.get_candidate_triangle_barycentric_coord(), materials,
-                                                  geometryEntries, vertexBuffer, indexBuffer);
+            const float opacity = cutoutOpacityAt(
+                q.get_candidate_primitive_id(), q.get_candidate_geometry_id(), q.get_candidate_user_instance_id(),
+                q.get_candidate_triangle_barycentric_coord(), materials, geometryEntries, vertexBuffer, indexBuffer);
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
                 q.abort();
@@ -6929,11 +6914,11 @@ static bool restirDiagnosticVisible(constant Uniforms& uniforms,
         return CurveStaticTraversal::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, 0.0f, functionTable)
                    .type == intersection_type::none;
     }
-    float3 alphaTransmittance;
+    float alphaTransmittance;
     const bool visible = CutoutShadowWalk<CurveStaticTraversal, false>::run(
         uniforms, accelerationStructure, shadowRay, 0.0f, 0.0f, materials, geometryEntries, vertexBuffer, indexBuffer,
         functionTable, alphaTransmittance);
-    transmittance = alphaTransmittance.x;
+    transmittance = alphaTransmittance;
     return visible;
 }
 
@@ -7060,26 +7045,37 @@ static void shadowImpl(uint gid,
     // The walk itself is in CutoutShadowWalk -- inline intersection_query where
     // the tags allow it, a bounded restart otherwise. See the note there for why
     // this cannot be an any-hit intersection function on Metal 4.
-    float3 transmittance;
+    float transmittance;
+    // Sample the binary visibility of the entire alpha stack with the random
+    // number already carried by every shadow ray. For BLEND foliage this can
+    // reject at the first partially covered texel instead of visiting every
+    // layer to evaluate their product. MASK materials remain exact because
+    // their resolved opacity is either zero or one.
+    const float alphaCutoff =
+        SPEC_STOCHASTIC_ALPHA_VISIBILITY ? sr.alphaThreshold : sr.alphaThreshold * kShadowTransmittanceCutoff;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(uniforms, accelerationStructure, shadowRay, motionTime,
-                                                        sr.rrCutoff, materials, geometryEntries, vertexBuffer,
+                                                        alphaCutoff, materials, geometryEntries, vertexBuffer,
                                                         indexBuffer, functionTable, transmittance))
     {
         if (restirVisibilityUpdate)
             restirStoreFinalVisibility(uniforms, sr.pixelIndex, 0.0f);
         return; // fully blocked
     }
-    // The survivors of the roulette carry the weight of the ones it killed. A
-    // ray ends below the cutoff only if it passed the test, which it does with
-    // probability (its transmittance / cutoff), so scaling by the inverse of
-    // that puts the expectation back where it was.
-    const float m = max(max(transmittance.x, transmittance.y), transmittance.z);
-    if (m < kShadowTransmittanceCutoff)
+    // The stochastic path returns binary visibility; its survival probability
+    // already carries the alpha product. The compatibility path instead keeps
+    // the old 5% Russian-roulette compensation for deep transparent stacks.
+    if (SPEC_STOCHASTIC_ALPHA_VISIBILITY)
     {
-        transmittance *= kShadowTransmittanceCutoff / max(m, 1e-20f);
+        // P(roulette < product(1 - opacity)) equals that product, so a surviving
+        // ray carries unit visibility. This is unbiased and adds no RNG work.
+        transmittance = 1.0f;
+    }
+    else if (transmittance < kShadowTransmittanceCutoff)
+    {
+        transmittance = kShadowTransmittanceCutoff;
     }
     if (restirVisibilityUpdate)
-        restirStoreFinalVisibility(uniforms, sr.pixelIndex, transmittance.x);
+        restirStoreFinalVisibility(uniforms, sr.pixelIndex, transmittance);
     weight *= transmittance;
     sharcRadiance *= transmittance;
     if (all(weight <= 1e-6f))

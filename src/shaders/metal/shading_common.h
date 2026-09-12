@@ -66,8 +66,11 @@ constant bool kFcEmissiveMeshLights [[function_constant(25)]];
 constant bool kFcAllAnalyticLightsRect [[function_constant(26)]];
 constant bool kFcUniformRectLightSampling [[function_constant(27)]];
 constant bool kFcSplitBaseNee [[function_constant(28)]];
+constant bool kFcStochasticAlphaVisibility [[function_constant(29)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
+constant bool SPEC_STOCHASTIC_ALPHA_VISIBILITY =
+    is_function_constant_defined(kFcStochasticAlphaVisibility) ? kFcStochasticAlphaVisibility : true;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
 constant bool SPEC_SSS = is_function_constant_defined(kFcSubsurface) ? kFcSubsurface : false;
 constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;
@@ -313,10 +316,7 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
 
 static float2 applyTextureTransform(float2 uv, device const Material& m)
 {
-    const float c = cos(m.uv_rotation);
-    const float s = sin(m.uv_rotation);
-    const float2 k = float2(m.uv_scale);
-    return float2(uv.x * k.x * c - uv.y * k.y * s, uv.x * k.x * s + uv.y * k.y * c) + float2(m.uv_offset);
+    return float2(dot(uv, float2(m.uv_transform_x)), dot(uv, float2(m.uv_transform_y))) + float2(m.uv_offset);
 }
 
 // Coverage of a surface at a given uv. MASK is a binary predicate, BLEND passes

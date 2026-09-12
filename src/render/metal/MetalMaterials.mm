@@ -6,6 +6,7 @@
 #include <strelka/material/openpbr/openpbr_from_gltf.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <unordered_map>
@@ -147,8 +148,10 @@ Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
         packed_float3(simd_make_float3(p.attenuation_color.x, p.attenuation_color.y, p.attenuation_color.z));
     material.attenuation_distance = p.attenuation_distance;
     material.uv_offset = simd_make_float2(p.uv_offset_x, p.uv_offset_y);
-    material.uv_scale = simd_make_float2(p.uv_scale_x, p.uv_scale_y);
-    material.uv_rotation = p.uv_rotation;
+    const float uvCos = std::cos(p.uv_rotation);
+    const float uvSin = std::sin(p.uv_rotation);
+    material.uv_transform_x = simd_make_float2(p.uv_scale_x * uvCos, -p.uv_scale_y * uvSin);
+    material.uv_transform_y = simd_make_float2(p.uv_scale_x * uvSin, p.uv_scale_y * uvCos);
     material.material_type = p.material_type;
     material.thin_walled = p.thin_walled;
     material.dielectric_priority = p.dielectric_priority;
