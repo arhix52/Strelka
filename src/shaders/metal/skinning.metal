@@ -6,11 +6,7 @@ using namespace metal;
 // Pack normal into 10:10:10+2 bit format (matching Scene::Vertex encoding)
 static uint32_t packNormal(float3 normal)
 {
-    constexpr float scale = 256.0f;
-    uint32_t x = (uint32_t)((normal.x + 1.0f) * scale);
-    uint32_t y = (uint32_t)((normal.y + 1.0f) * scale);
-    uint32_t z = (uint32_t)((normal.z + 1.0f) * scale);
-    return (z << 20) | (y << 10) | x;
+    return pack_float_to_unorm10a2(float4(normal * 0.5f + 0.5f, 0.0f));
 }
 
 // Skin data layout per vertex (64 bytes):
@@ -59,11 +55,7 @@ kernel void skinningKernel(
     float3 skinnedNormal = normalize(normalMat * restNorm);
 
     // Unpack rest-pose tangent and transform
-    constexpr float invScale = 1.0f / 256.0f;
-    float3 restTangent = float3(
-        float(sd.tangent & 0x3FFu) * invScale - 1.0f,
-        float((sd.tangent >> 10) & 0x3FFu) * invScale - 1.0f,
-        float((sd.tangent >> 20) & 0x3FFu) * invScale - 1.0f);
+    float3 restTangent = unpack_unorm10a2_to_float(sd.tangent).xyz * 2.0f - 1.0f;
     float3 skinnedTangent = normalize(normalMat * restTangent);
 
     // Write to vertex buffer: stride = 32 bytes per vertex (matching Scene::Vertex)

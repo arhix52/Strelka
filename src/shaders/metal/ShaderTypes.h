@@ -131,11 +131,10 @@ struct Vertex
 static_assert(sizeof(Vertex) == 32, "Vertex must match Scene::Vertex");
 
 // Geometry reconstructed by extend and streamed once to shade. The packed
-// representation deliberately matches the formats already used by Vertex, so
-// moving the work across the wavefront boundary costs one compact sequential
-// write/read instead of carrying another large float structure per path.
-// Bit 31 of tangent marks records produced by extend; bit 30 remains the glTF
-// tangent handedness bit.
+// representation uses the same 32-bit budget per attribute as Vertex, but the
+// transient world-space directions use octahedral snorm16 rather than the
+// vertex buffer's RGB10A2 encoding. The unused colour alpha byte carries
+// validity and tangent handedness, leaving all 32 tangent bits for direction.
 struct SurfaceGeometryPayload
 {
     uint32_t shadingNormal;
@@ -168,6 +167,7 @@ static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection p
 #define BASE_LIGHT_CONNECTION_DELTA (1u << 2)
 
 #define SURFACE_GEOMETRY_VALID (1u << 31)
+#define SURFACE_GEOMETRY_TANGENT_NEGATIVE (1u << 30)
 
 // Instance-independent triangle attributes copied into the acceleration
 // structure. Positions stay in Metal's native triangle payload; this record
@@ -760,6 +760,7 @@ struct GeometryEntry
 #define GEOM_SHADE_BUCKET_MASK (3u << GEOM_SHADE_BUCKET_SHIFT)
 #define GEOM_FLAG_PRIMITIVE_SURFACE_DATA (1u << 27)
 #define GEOM_FLAG_BAKED_TRANSFORM (1u << 26)
+#define GEOM_FLAG_SURFACE_UV (1u << 25)
 #define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
 // Wavefront path state is memory-traffic critical and fixed at 24 bytes; feature-specific state uses side tables.

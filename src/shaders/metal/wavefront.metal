@@ -46,13 +46,13 @@ static void applyOpenPBRBaseTextures(thread OpenPBR_BaseParams& p,
                                      device const OpenPBRTextures& t,
                                      thread SurfaceInteraction& si,
                                      float2 uv,
-                                     float lodBase = -1e30f)
+                                     float lodBase = -1e30f,
+                                     bool uvPretransformed = false)
 {
-    const float c = cos(source.uv_rotation);
-    const float sn = sin(source.uv_rotation);
-    const float2 k = float2(source.uv_scale_x, source.uv_scale_y);
-    const float2 tuv = float2(uv.x * k.x * c - uv.y * k.y * sn, uv.x * k.x * sn + uv.y * k.y * c) +
-                       float2(source.uv_offset_x, source.uv_offset_y);
+    const float2 tuv = uvPretransformed ? uv :
+                                          applyOpenPBRTextureTransform(uv, source.uv_rotation,
+                                                                       float2(source.uv_scale_x, source.uv_scale_y),
+                                                                       float2(source.uv_offset_x, source.uv_offset_y));
     const bool hasLod = lodBase > -1e29f;
     constexpr sampler openpbrSampler(mag_filter::linear, min_filter::linear, mip_filter::linear, address::repeat);
 #define SAMPLE_OPENPBR_BASE_TEXTURE(slot)                                                                              \
@@ -570,21 +570,46 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
 
 static inline uint32_t packSurfaceNormal(float3 normal)
 {
-    constexpr float scale = 256.0f;
-    const uint3 q = uint3(clamp((normal + 1.0f) * scale, 0.0f, 1023.0f));
-    return (q.z << 20) | (q.y << 10) | q.x;
+    const float l1 = max(abs(normal.x) + abs(normal.y) + abs(normal.z), 1e-20f);
+    const float3 n = normal / l1;
+    const float2 signNotZero = float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
+    const float2 oct = n.z >= 0.0f ? n.xy : (1.0f - abs(n.yx)) * signNotZero;
+    return pack_float_to_snorm2x16(oct);
 }
 
 static inline uint32_t packSurfaceUv(float2 uv)
 {
-    const uint2 q = uint2(clamp((uv + 10.0f) * (16383.99999f / 20.0f), 0.0f, 65535.0f));
-    return (q.y << 16) | q.x;
+    return pack_float_to_unorm2x16(fract(uv));
 }
 
-static inline uint32_t packSurfaceColor(float3 color)
+static inline uint32_t packSurfaceColor(float3 color, float tangentSign)
 {
-    const uint3 q = uint3(round(saturate(color) * 255.0f));
-    return q.x | (q.y << 8) | (q.z << 16) | 0xff000000u;
+    // The alpha byte is not shaded. 0x80 marks a valid compact record and
+    // 0x40 carries glTF TANGENT.w, leaving RGB exactly RGBA8-unorm encoded.
+    const uint32_t flags = 0x80u | (tangentSign < 0.0f ? 0x40u : 0u);
+    return pack_float_to_unorm4x8(float4(color, float(flags) * (1.0f / 255.0f)));
+}
+
+static inline float3 unpackSurfaceNormal(uint32_t packed)
+{
+    const float2 oct = unpack_snorm2x16_to_float(packed);
+    float3 normal = float3(oct, 1.0f - abs(oct.x) - abs(oct.y));
+    if (normal.z < 0.0f)
+    {
+        const float2 signNotZero = float2(normal.x >= 0.0f ? 1.0f : -1.0f, normal.y >= 0.0f ? 1.0f : -1.0f);
+        normal.xy = (1.0f - abs(normal.yx)) * signNotZero;
+    }
+    return normalize(normal);
+}
+
+static inline float2 unpackSurfaceUv(uint32_t packed)
+{
+    return unpack_unorm2x16_to_float(packed);
+}
+
+static inline float unpackSurfaceTangentSign(uint32_t packedColor)
+{
+    return (packedColor & SURFACE_GEOMETRY_TANGENT_NEGATIVE) != 0u ? -1.0f : 1.0f;
 }
 
 #define SURFACE_GEOMETRY_PAYLOAD_ENABLED true
@@ -1305,7 +1330,7 @@ static void sssWalkImpl(uint gid,
             // This surface was produced by the fused SSS traversal, not by the
             // regular extend path that prepares compact geometry. Force shade
             // onto its exact vertex-buffer fallback for this uncommon exit.
-            uniforms.surfaceGeometry[tid].tangent = 0u;
+            uniforms.surfaceGeometry[tid].color = 0u;
             enqueueExtendSurfaceResult(uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue,
                                        missCounter, control, geometryEntries, true);
             return;
@@ -1371,6 +1396,7 @@ WF_SSS_WALK_ENTRY(wavefrontSssWalkStatic, StaticTraversal)
 static bool storeSurfaceGeometry(constant Uniforms& uniforms,
                                  constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                  device const GeometryEntry* geometryEntries,
+                                 device const Material* materials,
                                  device const char* vertexBuffer,
                                  device const char* prevVertexBuffer,
                                  device const uint32_t* indexBuffer,
@@ -1431,6 +1457,36 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
                              objectGeomNormal, uvArea2);
     }
 
+    // Every material texture sampler is repeat-addressed, but fract(rawUv) is
+    // not equivalent when KHR_texture_transform is applied afterwards. Apply
+    // the material's shared affine transform first, then retain only the
+    // periodic coordinate. Geometries without maps avoid the material read.
+    if ((entry.flags & GEOM_FLAG_SURFACE_UV) != 0u)
+    {
+        if (SPEC_ALL_NATIVE_OPENPBR)
+        {
+            device const OpenPBRParams& p = uniforms.openpbrParams[entry.materialId];
+            const float2 scale = float2(p.uv_scale_x, p.uv_scale_y);
+            uv = applyOpenPBRTextureTransform(uv, p.uv_rotation, scale, float2(p.uv_offset_x, p.uv_offset_y));
+        }
+        else
+        {
+            device const Material& material = materials[entry.materialId];
+            const bool nativeOpenPBR = SPEC_OPENPBR && material.material_type == MATERIAL_TYPE_OPENPBR &&
+                                       (material.features & MATERIAL_FEATURE_NATIVE_OPENPBR) != 0u;
+            if (nativeOpenPBR)
+            {
+                device const OpenPBRParams& p = uniforms.openpbrParams[entry.materialId];
+                const float2 scale = float2(p.uv_scale_x, p.uv_scale_y);
+                uv = applyOpenPBRTextureTransform(uv, p.uv_rotation, scale, float2(p.uv_offset_x, p.uv_offset_y));
+            }
+            else
+            {
+                uv = applyTextureTransform(uv, material);
+            }
+        }
+    }
+
     const float4x4 objectToWorld = geometryObjectToWorld(uniforms, instances, hit.instanceId, geometryEntryIndex, entry);
     const float3 axisX = objectToWorld[0].xyz;
     const float3 axisY = objectToWorld[1].xyz;
@@ -1471,9 +1527,9 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
 
     payload.shadingNormal = packSurfaceNormal(shadingNormal);
     payload.geometryNormal = packSurfaceNormal(geometryNormal);
-    payload.tangent = packSurfaceNormal(tangent) | (tangentSign < 0.0f ? (1u << 30) : 0u) | SURFACE_GEOMETRY_VALID;
+    payload.tangent = packSurfaceNormal(tangent);
     payload.uv = packSurfaceUv(uv);
-    payload.color = packSurfaceColor(vertexColor);
+    payload.color = packSurfaceColor(vertexColor, tangentSign);
     uniforms.surfaceGeometry[tid] = payload;
     return true;
 }
@@ -1674,8 +1730,8 @@ static void extendImpl(uint gid,
     }
 
     const bool hasSurfaceGeometry =
-        storeSurfaceGeometry(uniforms, instances, geometryEntries, vertexBuffer, prevVertexBuffer, indexBuffer, hit,
-                             tid, pathFlags, motionTime, r.direction);
+        storeSurfaceGeometry(uniforms, instances, geometryEntries, materials, vertexBuffer, prevVertexBuffer,
+                             indexBuffer, hit, tid, pathFlags, motionTime, r.direction);
     enqueueExtendSurfaceResult(uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter,
                                control, geometryEntries, !hasSurfaceGeometry);
 }
@@ -1749,7 +1805,8 @@ static void fetchTriangle(device const char* vertexBuffer,
         const float3 pos = float3(*(device const packed_float3*)v);
         const float3 nrm = unpackNormal(*(device const uint32_t*)(v + normalOff));
         const uint32_t tanPacked = *(device const uint32_t*)(v + tangentOff);
-        const float3 tan = unpackNormal(tanPacked);
+        const float4 tanUnorm = unpack_unorm10a2_to_float(tanPacked);
+        const float3 tan = tanUnorm.xyz * 2.0f - 1.0f;
         uv[k] = unpackUV(*(device const uint32_t*)(v + uvOff));
         // Vertex colour is not skinned and does not animate, so it is read from
         // the current frame even when the rest is motion-interpolated.
@@ -1758,7 +1815,7 @@ static void fetchTriangle(device const char* vertexBuffer,
         // Handedness is a per-mesh property in every exporter that writes it, so
         // one vertex settles it -- there is nothing sensible to interpolate.
         if (k == 0)
-            tangentSign = unpackTangentSign(tanPacked);
+            tangentSign = tanUnorm.w > 0.25f ? -1.0f : 1.0f;
 
         if (interpolateMotion)
         {
@@ -1945,11 +2002,12 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
         float3 pos = float3(*(device const packed_float3*)v);
         float3 nrm = unpackNormal(*(device const uint32_t*)(v + normalOff));
         const uint32_t tanPacked = *(device const uint32_t*)(v + tangentOff);
-        float3 tan = unpackNormal(tanPacked);
+        const float4 tanUnorm = unpack_unorm10a2_to_float(tanPacked);
+        float3 tan = tanUnorm.xyz * 2.0f - 1.0f;
 
         if (k == 0)
         {
-            tangentSign = unpackTangentSign(tanPacked);
+            tangentSign = tanUnorm.w > 0.25f ? -1.0f : 1.0f;
         }
 
         if (interpolateMotion)
@@ -2917,7 +2975,7 @@ kernel void wavefrontConnectBase(uint gid [[thread_position_in_grid]],
     }
     const uint32_t tid = queue[bucketedHitIndex<WF_SHADE_BASE>(gid, queue, control)];
     const SurfaceGeometryPayload geometry = uniforms.surfaceGeometry[tid];
-    if ((geometry.tangent & SURFACE_GEOMETRY_VALID) == 0u)
+    if ((geometry.color & SURFACE_GEOMETRY_VALID) == 0u)
     {
         const LightConnection empty = makeEmptyConnection();
         uniforms.baseLightConnections[tid] = packBaseLightConnection(empty);
@@ -2929,8 +2987,8 @@ kernel void wavefrontConnectBase(uint gid [[thread_position_in_grid]],
     const HitRecord hit = *wavefrontHitRecord(hits, tid);
     SurfaceInteraction lightSurface = {};
     lightSurface.position = float3(pathRay.origin) + rayDirection * hit.distance;
-    lightSurface.shading_normal = normalize(unpackNormal(geometry.shadingNormal));
-    lightSurface.geometry_normal = normalize(unpackNormal(geometry.geometryNormal));
+    lightSurface.shading_normal = unpackSurfaceNormal(geometry.shadingNormal);
+    lightSurface.geometry_normal = unpackSurfaceNormal(geometry.geometryNormal);
     lightSurface.wo = -rayDirection;
     lightSurface.front_face = dot(lightSurface.geometry_normal, lightSurface.wo) > 0.0f;
     lightSurface.material_type = MATERIAL_TYPE_OPENPBR;
@@ -3504,6 +3562,7 @@ static inline void wavefrontShadeImpl(uint gid,
     const bool isCurve = SPEC_CURVES && (entry.flags & GEOM_FLAG_CURVE) != 0u;
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
     float2 uv;
+    bool uvPretransformed = false;
     float tangentSign = 1.0f;
     float lodBase = -1e30f;
     // Only a curve hit has one, and only the fibre paths below read it.
@@ -3536,13 +3595,14 @@ static inline void wavefrontShadeImpl(uint gid,
         // vertex-fetch fallback and its peak live range; Tail retains the exact
         // path for fused SSS exits, curves and degenerate transforms.
         if (!kHandlesSpecialHits ||
-            (SURFACE_GEOMETRY_PAYLOAD_ENABLED && (preparedGeometry.tangent & SURFACE_GEOMETRY_VALID) != 0u))
+            (SURFACE_GEOMETRY_PAYLOAD_ENABLED && (preparedGeometry.color & SURFACE_GEOMETRY_VALID) != 0u))
         {
-            shadingNormal = normalize(unpackNormal(preparedGeometry.shadingNormal));
-            shadingGeomNormal = normalize(unpackNormal(preparedGeometry.geometryNormal));
-            shadingTangent = orthonormalizeTangent(shadingNormal, unpackNormal(preparedGeometry.tangent));
-            tangentSign = unpackTangentSign(preparedGeometry.tangent);
-            uv = unpackUV(preparedGeometry.uv);
+            shadingNormal = unpackSurfaceNormal(preparedGeometry.shadingNormal);
+            shadingGeomNormal = unpackSurfaceNormal(preparedGeometry.geometryNormal);
+            shadingTangent = orthonormalizeTangent(shadingNormal, unpackSurfaceNormal(preparedGeometry.tangent));
+            tangentSign = unpackSurfaceTangentSign(preparedGeometry.color);
+            uv = unpackSurfaceUv(preparedGeometry.uv);
+            uvPretransformed = (entry.flags & GEOM_FLAG_SURFACE_UV) != 0u;
             vertexColor = unpackVertexColor(preparedGeometry.color);
             lodBase = preparedGeometry.lodBase;
         }
@@ -3828,7 +3888,7 @@ static inline void wavefrontShadeImpl(uint gid,
     else
     {
         initSurfaceInteraction(si, hitMaterial, worldPosition, worldNormal, geomNormal, worldTangent, worldBinormal, uv,
-                               rayDir, vertexColor, lodBase);
+                               rayDir, vertexColor, lodBase, uvPretransformed);
     }
 
     // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
@@ -3930,8 +3990,8 @@ static inline void wavefrontShadeImpl(uint gid,
             loadOpenPBRBaseParams(source, openpbrBaseMat);
             if (source.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
             {
-                applyOpenPBRBaseTextures(
-                    openpbrBaseMat, source, uniforms.openpbrTextures[entry.materialId], si, uv, lodBase);
+                applyOpenPBRBaseTextures(openpbrBaseMat, source, uniforms.openpbrTextures[entry.materialId], si, uv,
+                                         lodBase, uvPretransformed);
             }
         }
         else
@@ -3939,7 +3999,8 @@ static inline void wavefrontShadeImpl(uint gid,
             openpbrMat = source;
             if (openpbrMat.texture_mask != 0u && uniforms.openpbrTextures != nullptr)
             {
-                applyOpenPBRTextures(openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv, lodBase);
+                applyOpenPBRTextures(
+                    openpbrMat, uniforms.openpbrTextures[entry.materialId], si, uv, lodBase, uvPretransformed);
             }
         }
     }

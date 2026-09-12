@@ -1,13 +1,14 @@
 #include "skinning.h"
 #include <sutil/vec_math.h>
 
-//  valid range of coordinates [-1; 1]
+// Shared RGB10A2-unorm vertex direction. A2 stays clear here so tangent
+// handedness can be copied into bit 30 below.
 __device__ const uint32_t packNormal(float3 normal)
 {
-    constexpr float scale = 256.0f;
-    auto x = (uint32_t)((normal.x + 1.0f) * scale);
-    auto y = (uint32_t)((normal.y + 1.0f) * scale);
-    auto z = (uint32_t)((normal.z + 1.0f) * scale);
+    constexpr float scale = 511.5f;
+    const uint32_t x = __float2uint_rn((fminf(fmaxf(normal.x, -1.0f), 1.0f) + 1.0f) * scale);
+    const uint32_t y = __float2uint_rn((fminf(fmaxf(normal.y, -1.0f), 1.0f) + 1.0f) * scale);
+    const uint32_t z = __float2uint_rn((fminf(fmaxf(normal.z, -1.0f), 1.0f) + 1.0f) * scale);
     return (z << 20) | (y << 10) | x;
 }
 
@@ -58,14 +59,12 @@ __global__ void skinningKernel(
     *vertexNorm = packNormal(normalize(skinMat3x3 * (*initialNorm)));
 
     // Transform tangent by the same 3x3 matrix
-    constexpr float invScale = 1.0f / 256.0f;
+    constexpr float scale = 2.0f / 1023.0f;
     uint32_t tp = *initialTangentPacked;
-    float3 initialTangent = make_float3(
-        float(tp & 0x3FFu) * invScale - 1.0f,
-        float((tp >> 10) & 0x3FFu) * invScale - 1.0f,
-        float((tp >> 20) & 0x3FFu) * invScale - 1.0f);
+    float3 initialTangent = make_float3(float(tp & 0x3FFu) * scale - 1.0f, float((tp >> 10) & 0x3FFu) * scale - 1.0f,
+                                        float((tp >> 20) & 0x3FFu) * scale - 1.0f);
     uint32_t* vertexTangent = reinterpret_cast<uint32_t*>(vertexBase + (vbOffset + idx) * 32 + 12);
-    *vertexTangent = packNormal(normalize(skinMat3x3 * initialTangent));
+    *vertexTangent = packNormal(normalize(skinMat3x3 * initialTangent)) | (tp & (1u << 30));
 }
 
 void cuApplySkinning(

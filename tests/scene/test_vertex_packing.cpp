@@ -27,10 +27,9 @@ using oka::unpackUV;
 namespace
 {
 
-// packNormal biases by +1 and scales by 256, so one quantisation step is 1/256
-// of the [-1, 1] range. The conversion truncates, so the unpacked value is at
-// or below the original, up to one step away.
-constexpr float kNormalStep = 1.0f / 256.0f;
+// RGB10 spans all 1024 codes across [-1, 1]. Packing rounds to nearest, so the
+// reconstruction error is at most half a quantisation step in either direction.
+constexpr float kNormalStep = 2.0f / 1023.0f;
 // (n + 1.0f) is rounded once in float before the scale; that can nudge a value
 // across an integer boundary by ~1.5e-5 packed units. Slack for exactly that.
 constexpr float kFloatSlack = 1.0e-4f;
@@ -70,11 +69,7 @@ std::vector<glm::float3> unitVectors()
 
 void checkComponentRoundTrip(float original, float unpacked)
 {
-    const float err = original - unpacked;
-    // truncation: never overshoot (beyond float slack)...
-    CHECK(err >= -kFloatSlack);
-    // ...and never fall more than one quantisation step short
-    CHECK(err <= kNormalStep + kFloatSlack);
+    CHECK(std::abs(original - unpacked) <= 0.5f * kNormalStep + kFloatSlack);
     // and stay inside the representable range
     CHECK(unpacked >= -1.0f);
     CHECK(unpacked <= 1.0f);
@@ -96,9 +91,10 @@ TEST_CASE("packNormal/unpackNormal round-trips within 10-bit quantisation error"
     }
 }
 
-TEST_CASE("packNormal round-trips axis-aligned vectors exactly")
+TEST_CASE("packNormal round-trips axis-aligned vectors at RGB10 precision")
 {
-    // +-1 and 0 land on exact multiples of 1/256, so no error at all is allowed.
+    // The endpoints are exact. Zero lies halfway between the two centre codes,
+    // because RGB10 has an even number of representable values.
     const glm::float3 axes[] = {
         { 1.0f, 0.0f, 0.0f },  { -1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f },
         { 0.0f, -1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f },  { 0.0f, 0.0f, -1.0f },
@@ -106,10 +102,21 @@ TEST_CASE("packNormal round-trips axis-aligned vectors exactly")
     for (const glm::float3& n : axes)
     {
         const glm::float3 r = unpackNormal(packNormal(n));
-        CHECK(r.x == n.x);
-        CHECK(r.y == n.y);
-        CHECK(r.z == n.z);
+        CHECK(std::abs(r.x - n.x) <= 0.5f * kNormalStep + kFloatSlack);
+        CHECK(std::abs(r.y - n.y) <= 0.5f * kNormalStep + kFloatSlack);
+        CHECK(std::abs(r.z - n.z) <= 0.5f * kNormalStep + kFloatSlack);
     }
+}
+
+TEST_CASE("packNormal uses the full RGB10 code range")
+{
+    CHECK(packNormal(glm::float3(-1.0f)) == 0u);
+    CHECK(packNormal(glm::float3(1.0f)) == 0x3fffffffu);
+
+    const uint32_t midpoint = packNormal(glm::float3(0.0f));
+    CHECK((midpoint & 0x3ffu) == 512u);
+    CHECK(((midpoint >> 10) & 0x3ffu) == 512u);
+    CHECK(((midpoint >> 20) & 0x3ffu) == 512u);
 }
 
 TEST_CASE("packNormal never sets bit 30 or bit 31")
@@ -125,10 +132,9 @@ TEST_CASE("packNormal never sets bit 30 or bit 31")
         CAPTURE(n.z);
         CHECK((p & 0xc0000000u) == 0u);
         CHECK((p & kTangentSignBit) == 0u);
-        // each 10-bit field tops out at 512 == (1 + 1) * 256
-        CHECK(((p >> 20) & 0x3ffu) <= 512u);
-        CHECK(((p >> 10) & 0x3ffu) <= 512u);
-        CHECK((p & 0x3ffu) <= 512u);
+        CHECK(((p >> 20) & 0x3ffu) <= 1023u);
+        CHECK(((p >> 10) & 0x3ffu) <= 1023u);
+        CHECK((p & 0x3ffu) <= 1023u);
     }
 }
 
@@ -193,7 +199,7 @@ TEST_CASE("packTangent treats zero handedness as positive")
 TEST_CASE("the tangent sign bit does not perturb the unpacked z component")
 {
     // The regression: a 12-bit z mask (0xfff00000) folds bit 30 into z, adding
-    // 1024 * (1/256) == 4.0 to it. The mask must be 0x3ff00000.
+    // one A2 bit as another 1024 RGB codes. The mask must be 0x3ff00000.
     for (const glm::float3& n : unitVectors())
     {
         const uint32_t plain = packNormal(n);
@@ -209,8 +215,8 @@ TEST_CASE("the tangent sign bit does not perturb the unpacked z component")
 
         // spell out what the old wide mask would have produced, so that
         // re-widening the mask fails here loudly
-        const float wideZ = float((signed_ & 0xfff00000u) >> 20) * (1.0f / 256.0f) - 1.0f;
-        CHECK(wideZ == doctest::Approx(unpackNormal(signed_).z + 4.0f));
+        const float wideZ = float((signed_ & 0xfff00000u) >> 20) * (2.0f / 1023.0f) - 1.0f;
+        CHECK(wideZ == doctest::Approx(unpackNormal(signed_).z + 2048.0f / 1023.0f));
     }
 }
 

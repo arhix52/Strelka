@@ -66,11 +66,11 @@ static __forceinline__ __device__ float2 interpolateAttrib(const float2 attr1,
 
 // ---- Vertex attribute unpacking --------------------------------------------
 
-// Unpack normal from uint32_t. Valid range: [-1, 1]
-// Packing: 10 bits per component (x in low bits, z in high bits), biased by +1.0 and scaled by 256
+// Unpack the shared RGB10A2-unorm vertex direction. A2 carries tangent
+// handedness and is deliberately excluded from z.
 static __forceinline__ __device__ float3 unpackNormal(uint32_t val)
 {
-    constexpr float scale = 1.0f / 256.0f;
+    constexpr float scale = 2.0f / 1023.0f;
     float3 normal;
     // 10 bits for z, not 12: bit 30 holds the tangent handedness sign written
     // by packTangent(), and must not leak into the coordinate.

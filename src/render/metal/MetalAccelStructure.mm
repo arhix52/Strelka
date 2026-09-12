@@ -419,6 +419,10 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         {
             entry.flags |= GEOM_FLAG_PRIMITIVE_SURFACE_DATA;
         }
+        if (materialNeedsUv)
+        {
+            entry.flags |= GEOM_FLAG_SURFACE_UV;
+        }
         if (bakedTransform)
         {
             entry.flags |= GEOM_FLAG_BAKED_TRANSFORM;

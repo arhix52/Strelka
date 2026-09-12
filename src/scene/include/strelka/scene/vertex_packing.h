@@ -10,25 +10,27 @@
 namespace oka
 {
 
-// Pack normal to uint32_t. Valid range: [-1, 1]
-// Format: 10 bits per component (x in low bits, z in high bits), bias +1.0, scale 256
+// Pack normal as RGB10A2-unorm. The A2 field stays clear for packTangent() to
+// carry handedness. Rounding matches Metal's pack_float_to_unorm10a2.
 inline uint32_t packNormal(const glm::float3& normal)
 {
-    constexpr float scale = 256.0f;
-    auto x = (uint32_t)((normal.x + 1.0f) * scale);
-    auto y = (uint32_t)((normal.y + 1.0f) * scale);
-    auto z = (uint32_t)((normal.z + 1.0f) * scale);
+    auto quantize = [](float value) -> uint32_t {
+        const float clamped = value < -1.0f ? -1.0f : (value > 1.0f ? 1.0f : value);
+        return static_cast<uint32_t>(std::lround((clamped + 1.0f) * 511.5f));
+    };
+    const uint32_t x = quantize(normal.x);
+    const uint32_t y = quantize(normal.y);
+    const uint32_t z = quantize(normal.z);
     return (z << 20) | (y << 10) | x;
 }
 
 // Unpack normal from uint32_t.
 //
-// The z mask is 10 bits, not 12: packNormal only ever fills bits 0..29, and
-// bit 30 now carries the tangent handedness sign (see packTangent). A wider
-// mask would fold that sign into z.
+// The z mask is 10 bits, not 12: bits 30..31 are RGB10A2's alpha field and bit
+// 30 carries tangent handedness (see packTangent).
 inline glm::float3 unpackNormal(uint32_t val)
 {
-    constexpr float scale = 1.0f / 256.0f;
+    constexpr float scale = 2.0f / 1023.0f;
     glm::float3 normal;
     normal.z = static_cast<float>((val & 0x3ff00000u) >> 20) * scale - 1.0f;
     normal.y = static_cast<float>((val & 0x000ffc00u) >> 10) * scale - 1.0f;

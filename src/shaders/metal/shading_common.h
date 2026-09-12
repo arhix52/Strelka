@@ -150,18 +150,11 @@ transformNormalFast(float3 n, float3 cofactorX, float3 cofactorY, float3 cofacto
     return orientation * normalize(cofactorNormal);
 }
 
-//  valid range of coordinates [-1; 1]
-//
-// z is 10 bits wide, not 12: bit 30 carries the tangent handedness sign that
-// packTangent() writes, and folding it into z would warp the shading frame.
+// Vertex directions are RGB10A2-unorm. Metal extracts all four fields in one
+// operation; the A2 field is metadata and never leaks into z.
 static float3 unpackNormal(uint32_t val)
 {
-    constexpr float scale = 1.0f / 256.0f;
-    float3 normal;
-    normal.z = ((val & 0x3ff00000) >> 20) * scale - 1.0f;
-    normal.y = ((val & 0x000ffc00) >> 10) * scale - 1.0f;
-    normal.x = (val & 0x000003ff) * scale - 1.0f;
-    return normal;
+    return unpack_unorm10a2_to_float(val).xyz * 2.0f - 1.0f;
 }
 
 // KHR_texture_transform. The spec composes it as a row-vector multiply,
@@ -208,17 +201,24 @@ inline float texLod(Tex2D tex, float lodBase, bool hasLod)
     return max(0.0f, lodBase + 0.5f * log2(max(dim, 1.0f)));
 }
 
+static float2 applyOpenPBRTextureTransform(float2 uv, float rotation, float2 scale, float2 offset)
+{
+    const float c = cos(rotation);
+    const float sn = sin(rotation);
+    return float2(uv.x * scale.x * c - uv.y * scale.y * sn, uv.x * scale.x * sn + uv.y * scale.y * c) + offset;
+}
+
 static void applyOpenPBRTextures(thread OpenPBRParams& p,
                                  device const OpenPBRTextures& t,
                                  thread SurfaceInteraction& si,
                                  float2 uv,
-                                 float lodBase = -1e30f)
+                                 float lodBase = -1e30f,
+                                 bool uvPretransformed = false)
 {
-    const float c = cos(p.uv_rotation);
-    const float sn = sin(p.uv_rotation);
-    const float2 k = float2(p.uv_scale_x, p.uv_scale_y);
-    const float2 tuv = float2(uv.x * k.x * c - uv.y * k.y * sn, uv.x * k.x * sn + uv.y * k.y * c) +
-                       float2(p.uv_offset_x, p.uv_offset_y);
+    const float2 tuv = uvPretransformed ?
+                           uv :
+                           applyOpenPBRTextureTransform(uv, p.uv_rotation, float2(p.uv_scale_x, p.uv_scale_y),
+                                                        float2(p.uv_offset_x, p.uv_offset_y));
     const bool hasLod = lodBase > -1e29f;
     constexpr sampler openpbrSampler(mag_filter::linear, min_filter::linear, mip_filter::linear, address::repeat);
 #define SAMPLE_OPENPBR_TEXTURE(slot)                                                                                   \
@@ -322,7 +322,7 @@ static float2 applyTextureTransform(float2 uv, device const Material& m)
 // Coverage of a surface at a given uv. MASK is a binary predicate, BLEND passes
 // the alpha through, OPAQUE is always 1 -- so callers only ever see a float in
 // [0,1] and never need to branch on the mode themselves.
-static float resolveOpacity(device const Material& material, float2 uv)
+static float resolveOpacity(device const Material& material, float2 uv, bool uvPretransformed = false)
 {
     if (material.alpha_mode == ALPHA_MODE_OPAQUE)
         return 1.0f;
@@ -331,7 +331,10 @@ static float resolveOpacity(device const Material& material, float2 uv)
     float alpha = material.base_color_alpha;
     if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
     {
-        uv = applyTextureTransform(uv, material);
+        if (!uvPretransformed)
+        {
+            uv = applyTextureTransform(uv, material);
+        }
         // RGBA8Unorm_sRGB puts only RGB through the transfer function, so the
         // alpha channel read here is already linear.
         alpha *= material.baseColorTexture.sample(alphaSampler, uv).a;
@@ -345,14 +348,7 @@ static float resolveOpacity(device const Material& material, float2 uv)
 // unlike a base-colour texture, so nothing is decoded here.
 static float3 unpackVertexColor(uint32_t val)
 {
-    constexpr float s = 1.0f / 255.0f;
-    return float3((val & 0xffu) * s, ((val >> 8) & 0xffu) * s, ((val >> 16) & 0xffu) * s);
-}
-
-// glTF TANGENT.w: +1 or -1, deciding which way the bitangent points.
-static float unpackTangentSign(uint32_t val)
-{
-    return (val & (1u << 30)) ? -1.0f : 1.0f;
+    return unpack_unorm4x8_to_float(val).rgb;
 }
 
 //  valid range of coordinates [-10; 10]
@@ -638,7 +634,8 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
                             // texture's own resolution is folded in -- each texture adds its own, since
                             // the slots of one material are rarely the same size. FLT_MAX_10_EXP as the
                             // sentinel would be cute; -1e30 says "no cone, use level 0" and is checked once.
-                            float lodBase = -1e30f)
+                            float lodBase = -1e30f,
+                            bool uvPretransformed = false)
 {
     // Keep a non-mip sampler so disabling LOD preserves explicit level-zero filtering; glTF wrapping remains REPEAT.
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear, address::repeat);
@@ -657,7 +654,8 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     // One transform for every slot of the material -- see readTextureTransform()
     // in the loader for why that is not a compromise in practice.
     const uint32_t materialFeatures = material.features;
-    const float2 tuv = (materialFeatures & MATERIAL_TEXTURE_MASK) != 0u ? applyTextureTransform(uv, material) : uv;
+    const bool transformUv = (materialFeatures & MATERIAL_TEXTURE_MASK) != 0u && !uvPretransformed;
+    const float2 tuv = transformUv ? applyTextureTransform(uv, material) : uv;
     si.wo = -rayDir;
     si.front_face = dot(geomNormal, -rayDir) > 0.0f;
     // Initialize every field because callers may pass an uninitialized SurfaceInteraction.
@@ -675,7 +673,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
                          .rgb;
     }
     si.albedo = baseColor;
-    si.opacity = resolveOpacity(material, uv); // applies the transform itself
+    si.opacity = resolveOpacity(material, uv, uvPretransformed);
 
     // Sample metallic-roughness texture (glTF: G = roughness, B = metallic)
     float resolvedRoughness = material.roughness;
