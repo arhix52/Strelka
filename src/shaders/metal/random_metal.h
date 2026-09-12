@@ -211,6 +211,27 @@ static SamplerState initSampler(uint32_t linearPixelIndex,
     return sampler;
 }
 
+// The primary blue-noise prefix deliberately shares one Sobol sequence across
+// the screen. Pixel decorrelation comes from bn, so no per-pixel scramble seed
+// is constructed on this path.
+static SamplerState initPrimaryBlueNoiseSampler(uint32_t linearPixelIndex,
+                                                uint32_t pixelSampleIndex,
+                                                uint32_t width,
+                                                uint32_t bnSwitch)
+{
+    SamplerState sampler{};
+    sampler.seed = 0u;
+    sampler.sampleIdx = pixelSampleIndex;
+    sampler.depth = 0u;
+    const uint32_t safeWidth = max(width, 1u);
+    const uint32_t px = linearPixelIndex % safeWidth;
+    const uint32_t py = linearPixelIndex / safeWidth;
+    const uint32_t cell = (py % kBlueNoiseTile) * kBlueNoiseTile + (px % kBlueNoiseTile);
+    sampler.bn = (float(kBlueNoiseRank[cell]) + 0.5f) / float(kBlueNoiseTile * kBlueNoiseTile);
+    sampler.bnSwitch = bnSwitch;
+    return sampler;
+}
+
 template <SampleDimension Dim>
 static float randomHalton(thread SamplerState& state)
 {

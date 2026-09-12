@@ -627,7 +627,7 @@ static inline uint32_t pathDepth(uint32_t depthAndFlags)
 
 // The sampler is never stored in the bandwidth-critical path queues. Rebuild it
 // once per stage and reuse that register state for alternate depths locally.
-static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx, uint32_t depth)
+static inline uint32_t sampleSequenceIndex(constant Uniforms& uniforms, uint32_t sampleIdx)
 {
     // Ordinary accumulation advances subframeIndex by the number of samples
     // already folded into the estimate. Temporal reconstruction instead follows
@@ -637,9 +637,36 @@ static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixe
     const uint32_t sequenceBase = restirSampleSequenceBase(
         uniforms.useFrameJitter != 0u, uniforms.enableAccumulation != 0u, uniforms.restirDIEnabled != 0u,
         uniforms.frameIndex, uniforms.samples_per_launch, uniforms.subframeIndex);
-    const uint32_t sequenceIndex = SPEC_SHARC_UPDATE ? uniforms.sharcFrameIndex : sequenceBase + sampleIdx;
+    return SPEC_SHARC_UPDATE ? uniforms.sharcFrameIndex : sequenceBase + sampleIdx;
+}
+
+static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx, uint32_t depth)
+{
+    const uint32_t sequenceIndex = sampleSequenceIndex(uniforms, sampleIdx);
     SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp,
                                  uniforms.sobolSampleBlockBits, uniforms.samplerType);
+    s.depth = depth;
+    return s;
+}
+
+// Use only where the returned state is consumed at this depth. SSS/volume
+// walkers intentionally retarget one sampler to later dimensions and must keep
+// the per-pixel seed even when they start at the primary vertex.
+static inline SamplerState samplerForFixedDepth(constant Uniforms& uniforms,
+                                                uint32_t pixelIndex,
+                                                uint32_t sampleIdx,
+                                                uint32_t depth)
+{
+    const uint32_t sequenceIndex = sampleSequenceIndex(uniforms, sampleIdx);
+    const uint32_t samplerType = FIXED_SAMPLER_TYPE != 0xffffffffu ? FIXED_SAMPLER_TYPE : uniforms.samplerType;
+    const bool blueNoisePrimary =
+        depth == 0u && (samplerType == 3u || (samplerType == 4u && sequenceIndex < uniforms.blueNoiseSwitchSpp));
+    if (blueNoisePrimary)
+    {
+        return initPrimaryBlueNoiseSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp);
+    }
+    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp,
+                                 uniforms.sobolSampleBlockBits, samplerType);
     s.depth = depth;
     return s;
 }
@@ -884,7 +911,7 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
     }
 
     const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
-    SamplerState rng = samplerFor(uniforms, pixelIndex, sampleIdx, 0u);
+    SamplerState rng = samplerForFixedDepth(uniforms, pixelIndex, sampleIdx, 0u);
     const float motionTime = motionTimeFor(uniforms, pixelIndex, sampleIdx);
 
     float3 origin, direction;
@@ -2867,7 +2894,7 @@ kernel void wavefrontConnectBase(uint gid [[thread_position_in_grid]],
     lightSurface.material_type = MATERIAL_TYPE_OPENPBR;
 
     const uint32_t depth = pathDepth(paths[tid].depthAndFlags);
-    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
+    SamplerState rng = samplerForFixedDepth(uniforms, tid, sampleIdx, depth);
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
     const LightConnection connection =
         connectToLight(uniforms, uniforms.numLights, lights, instances, materials, vertexBuffer, prevVertexBuffer,
@@ -3772,7 +3799,7 @@ static inline void wavefrontShadeImpl(uint gid,
     // None of the surface setup above consumes randomness. Keep these five
     // registers out of triangle reconstruction and material initialisation;
     // the fog and volume exits construct their own branch-local sampler state.
-    SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
+    SamplerState rng = samplerForFixedDepth(uniforms, tid, sampleIdx, depth);
 
     // Coverage. A MASK surface resolves to 0 or 1 and a BLEND one to its alpha,
     // so one stochastic test covers both: with probability (1 - opacity) the
