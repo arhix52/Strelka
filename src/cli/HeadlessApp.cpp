@@ -1008,6 +1008,13 @@ int HeadlessApp::run()
                 // constants, not on how much geometry it traverses, so a small
                 // scene with the same constants answers the same question for a few
                 // megabytes.
+                //
+                // The render above consumed sample 0. With --spp 1, another call
+                // would therefore be a post-only frame and the trace would contain
+                // nothing but the tonemapper. Rewind the accumulation index so the
+                // captured frame executes exactly one real sample and overwrites the
+                // warm-up result instead of accumulating it twice.
+                m_sharedCtx->mSubframeIndex = 0;
                 m_render->beginGpuCapture(m_config.capturePath);
                 m_render->renderSync(outputBuf.get());
                 m_render->endGpuCapture();
