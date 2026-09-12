@@ -59,8 +59,12 @@ public:
         MTL::Buffer* mGeometryTransformBuffer = nullptr;
         // Metal 4 motion descriptors read BufferRange arrays from GPU memory.
         std::vector<MTL::Buffer*> mMotionVertexRangeBuffers;
+        // Driver-reported allocation before optional compaction. Retained only
+        // for the scene-build memory summary; mAs->size() is the resident size.
+        size_t mBuildSize = 0;
         size_t mRefitScratchSize = 0;
         size_t mBuildScratchSize = 0;
+        bool mCompacted = false;
         bool mIsSkeletal = false;
         uint32_t mGeometryBase = 0; // first index into GeometryEntry table
     };

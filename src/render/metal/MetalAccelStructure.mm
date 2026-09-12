@@ -133,23 +133,12 @@ void MetalAccelStructure::flushAccelerationStructureGroup()
 MTL::AccelerationStructure* MetalAccelStructure::createAccelerationStructureNoCompact(
     MTL::AccelerationStructureDescriptor* descriptor)
 {
-    const auto tSizes = std::chrono::steady_clock::now();
     addDescriptorResidency();
     if (mPath)
     {
         mPath->commitResidency();
     }
-    const auto tAlloc = std::chrono::steady_clock::now();
-    MTL::AccelerationStructure* accelerationStructure = mPath ? mPath->createNoCompact(descriptor) : nullptr;
-    const auto tEnd = std::chrono::steady_clock::now();
-    if (accelerationStructure)
-    {
-        using ms = std::chrono::duration<double, std::milli>;
-        mBlasEncodeMs += ms(tEnd - tAlloc).count();
-        ++mBlasCount;
-        (void)tSizes;
-    }
-    return accelerationStructure;
+    return mPath ? mPath->createNoCompact(descriptor) : nullptr;
 }
 
 MTL::AccelerationStructureUsage MetalAccelStructure::tlasUsage() const
@@ -166,6 +155,12 @@ MTL::AccelerationStructureUsage blasExtraUsage()
 {
     static const bool disabled = envFlag("STRELKA_NO_PREFER_FAST_INTERSECTION");
     return disabled ? MTL::AccelerationStructureUsageNone : MTL::AccelerationStructureUsagePreferFastIntersection;
+}
+
+bool staticBlasCompactionEnabled()
+{
+    static const bool disabled = envFlag("STRELKA_NO_STATIC_BLAS_COMPACTION");
+    return !disabled;
 }
 } // namespace
 
@@ -432,14 +427,20 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     }
 
     NS::Array* geomArray = NS::Array::array(geomDescriptors.data(), geomDescriptors.size());
+    // A reused rigid mesh moves only through its TLAS descriptor. Its vertices
+    // never change, so marking its BLAS refittable merely forces Metal to retain
+    // a larger mutable layout. Only skeletal geometry is actually refitted.
     const MTL::AccelerationStructureUsage refitUsage =
-        bakedTransform ? MTL::AccelerationStructureUsageNone : MTL::AccelerationStructureUsageRefit;
+        skeletal ? MTL::AccelerationStructureUsageRefit : MTL::AccelerationStructureUsageNone;
     MTL::AccelerationStructureDescriptor* primDescriptor =
         mPath->makePrimitiveDescriptor(geomArray, skeletal, skeletal && mBuildMotionBlas, refitUsage | blasExtraUsage());
 
+    const MTL::AccelerationStructureSizes sizes = mPath->sizes(primDescriptor);
+    blas.mBuildSize = sizes.accelerationStructureSize;
+    const auto buildStart = std::chrono::steady_clock::now();
+
     if (skeletal)
     {
-        const MTL::AccelerationStructureSizes sizes = mPath->sizes(primDescriptor);
         blas.mRefitScratchSize = sizes.refitScratchBufferSize;
         blas.mBuildScratchSize = sizes.buildScratchBufferSize;
         ensureScratchBuffer(blas.mScratch, std::max(blas.mBuildScratchSize, blas.mRefitScratchSize));
@@ -450,17 +451,20 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     }
     else
     {
-        // World-space baked geometry is immutable: unlike shared/refittable
-        // mesh BLASes it never pays for keeping the build layout around. A
-        // compacted structure reduces the BVH footprint competing with the
-        // vertex/index fetches in wavefrontExtend. Keep an escape hatch for
-        // profiling and for devices with a problematic compaction driver.
-        static const bool disableStaticCompaction = envFlag("STRELKA_NO_STATIC_BLAS_COMPACTION");
-        blas.mAs = bakedTransform && !disableStaticCompaction ? createAccelerationStructure(primDescriptor) :
-                                                                createAccelerationStructureNoCompact(primDescriptor);
+        // Every rigid BLAS is immutable, including a mesh reused by many TLAS
+        // instances. Prefer the compact representation to reduce both memory
+        // use and the BVH footprint competing with vertex/index fetches. Keep
+        // the escape hatch solely for driver/performance A/B diagnosis.
+        blas.mCompacted = staticBlasCompactionEnabled();
+        blas.mAs = blas.mCompacted ? createAccelerationStructure(primDescriptor) :
+                                     createAccelerationStructureNoCompact(primDescriptor);
+        blas.mCompacted = blas.mCompacted && blas.mAs != nullptr;
         ++mAuditCounts.blasBuilds;
         primDescriptor->release();
     }
+    using BuildMilliseconds = std::chrono::duration<double, std::milli>;
+    mBlasEncodeMs += BuildMilliseconds(std::chrono::steady_clock::now() - buildStart).count();
+    ++mBlasCount;
 
     for (const NS::Object* g : geomDescriptors)
     {
@@ -513,9 +517,17 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
     mGeometryTransformSceneInstances.push_back(kInvalidIndex);
 
     const NS::Object* const geoms[] = { geom };
-    MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
-        NS::Array::array(geoms, 1), false, false, MTL::AccelerationStructureUsageRefit | blasExtraUsage());
-    blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
+    MTL::AccelerationStructureDescriptor* primDescriptor =
+        mPath->makePrimitiveDescriptor(NS::Array::array(geoms, 1), false, false, blasExtraUsage());
+    blas.mBuildSize = mPath->sizes(primDescriptor).accelerationStructureSize;
+    const auto buildStart = std::chrono::steady_clock::now();
+    blas.mCompacted = staticBlasCompactionEnabled();
+    blas.mAs = blas.mCompacted ? createAccelerationStructure(primDescriptor) :
+                                 createAccelerationStructureNoCompact(primDescriptor);
+    blas.mCompacted = blas.mCompacted && blas.mAs != nullptr;
+    using BuildMilliseconds = std::chrono::duration<double, std::milli>;
+    mBlasEncodeMs += BuildMilliseconds(std::chrono::steady_clock::now() - buildStart).count();
+    ++mBlasCount;
     ++mAuditCounts.blasBuilds;
     primDescriptor->release();
     geom->release();
@@ -545,10 +557,18 @@ size_t MetalAccelStructure::buildAnalyticLightBlas(uint32_t intersectionFunction
     NS::Object* geom = mPath->makeBoundingBoxGeometry(mAnalyticLightBoundsBuffer, offset, intersectionFunctionOffset);
     const NS::Object* const geoms[] = { geom };
     MTL::AccelerationStructureDescriptor* descriptor =
-        mPath->makePrimitiveDescriptor(NS::Array::array(geoms, 1), false, false, MTL::AccelerationStructureUsageNone);
+        mPath->makePrimitiveDescriptor(NS::Array::array(geoms, 1), false, false, blasExtraUsage());
 
     Blas blas;
-    blas.mAs = createAccelerationStructureNoCompact(descriptor);
+    blas.mBuildSize = mPath->sizes(descriptor).accelerationStructureSize;
+    const auto buildStart = std::chrono::steady_clock::now();
+    blas.mCompacted = staticBlasCompactionEnabled();
+    blas.mAs =
+        blas.mCompacted ? createAccelerationStructure(descriptor) : createAccelerationStructureNoCompact(descriptor);
+    blas.mCompacted = blas.mCompacted && blas.mAs != nullptr;
+    using BuildMilliseconds = std::chrono::duration<double, std::milli>;
+    mBlasEncodeMs += BuildMilliseconds(std::chrono::steady_clock::now() - buildStart).count();
+    ++mBlasCount;
     ++mAuditCounts.blasBuilds;
     descriptor->release();
     geom->release();
@@ -1433,10 +1453,27 @@ bool MetalAccelStructure::step(double budgetMs)
         size_t asBytes = 0;
         size_t analyticLightAsBytes = 0;
         size_t nullAs = 0;
+        size_t compactedStaticCount = 0;
+        size_t uncompactedStaticCount = 0;
+        size_t refittableCount = 0;
+        size_t staticBuildBytes = 0;
+        size_t staticResidentBytes = 0;
         for (const Blas& b : mBlasList)
         {
             if (b.mAs)
+            {
                 asBytes += b.mAs->size();
+                if (b.mIsSkeletal)
+                {
+                    ++refittableCount;
+                }
+                else
+                {
+                    (b.mCompacted ? compactedStaticCount : uncompactedStaticCount)++;
+                    staticBuildBytes += b.mBuildSize;
+                    staticResidentBytes += b.mAs->size();
+                }
+            }
             else
                 ++nullAs;
         }
@@ -1463,6 +1500,14 @@ bool MetalAccelStructure::step(double budgetMs)
             }
         }
         STRELKA_INFO("BLAS build CPU: encode {:.0f} ms ({} structures)", mBlasEncodeMs, mBlasCount);
+        const double compactedPercent =
+            staticBuildBytes > 0 ? 100.0 * (1.0 - double(staticResidentBytes) / double(staticBuildBytes)) : 0.0;
+        STRELKA_INFO(
+            "BLAS storage: {} static compacted, {} static uncompacted, {} refittable; "
+            "static {:.2f} -> {:.2f} GB ({:.1f}% saved), PreferFastIntersection={}",
+            compactedStaticCount, uncompactedStaticCount, refittableCount, staticBuildBytes / 1e9,
+            staticResidentBytes / 1e9, compactedPercent,
+            blasExtraUsage() == MTL::AccelerationStructureUsagePreferFastIntersection ? "on" : "off");
         STRELKA_INFO("Procedural light AS: BLAS {} bytes, bounds {} bytes", analyticLightAsBytes,
                      mAnalyticLightBoundsBuffer ? mAnalyticLightBoundsBuffer->length() : 0);
         STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB", asBytes / 1e9,
