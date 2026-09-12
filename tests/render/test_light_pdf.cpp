@@ -506,7 +506,10 @@ TEST_CASE("selected sphere light keeps near-side self-occlusion")
     REQUIRE(shaderFile.good());
     const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
     CHECK(shader.find("ignoredLightId") == std::string::npos);
-    CHECK(shader.find("if (shadowLightProxy") != std::string::npos);
+    // Analytic lights were removed from RAY_MASK_SHADOW to match Cycles, so a
+    // descriptor-table probe for a light candidate is both unreachable and an
+    // expensive random load in the shadow hot path.
+    CHECK(shader.find("shadowLightProxy") == std::string::npos);
 }
 
 TEST_CASE("continuous light samples use interior finite-lattice representatives")

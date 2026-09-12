@@ -395,16 +395,14 @@ constant float kShadowTransmittanceCutoff = 0.05f;
 // Coverage is callable from the restart walk because Metal 4 cannot run its intersection function.
 static inline float cutoutOpacityAt(uint primitive_id,
                                     uint geometry_id,
-                                    uint instance_id,
+                                    uint geometry_entry_base,
                                     float2 barycentric_coord,
-                                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                     device const Material* materials,
                                     device const GeometryEntry* geometryEntries,
                                     device const char* vertexBuffer,
                                     device const uint32_t* indexBuffer)
 {
-    const auto inst = instances[instance_id];
-    const GeometryEntry entry = geometryEntries[inst.userID + geometry_id];
+    const GeometryEntry entry = geometryEntries[geometry_entry_base + geometry_id];
     device const Material& mat = materials[entry.materialId];
 
     if (mat.alpha_mode == ALPHA_MODE_OPAQUE)
@@ -472,7 +470,7 @@ struct StaticTraversal
     using query = intersection_query<triangle_data, instancing>;
     enum
     {
-        kInlineQuery = 0,
+        kInlineQuery = 1,
         kDirect = 0
     };
     using volume_isect = isect;
@@ -6782,12 +6780,6 @@ static inline bool cutoutRouletteDone(thread float3& transmittance, float opacit
 // bound, because it answers the whole ray in one traversal.
 constant uint32_t kMaxCutoutCrossings = 16u;
 
-static inline bool shadowLightProxy(uint32_t instanceId,
-                                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances)
-{
-    return (instances[instanceId].mask & (GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)) != 0u;
-}
-
 template <typename T, bool Inline>
 struct CutoutShadowWalk
 {
@@ -6796,7 +6788,6 @@ struct CutoutShadowWalk
                     ray shadowRay,
                     float motionTime,
                     float cutoff,
-                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                     device const Material* materials,
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
@@ -6823,18 +6814,15 @@ struct CutoutShadowWalk
             {
                 return true; // nothing else in the way
             }
-            if (shadowLightProxy(hit.instance_id, instances))
-            {
-                return false;
-            }
             // Curve geometry is built opaque and carries no cutout, so a strand
             // blocks outright rather than being alpha tested.
             float opacity = 1.0f;
             if (hit.type == intersection_type::triangle)
             {
                 opacity =
-                    cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.instance_id, hit.triangle_barycentric_coord,
-                                    instances, materials, geometryEntries, vertexBuffer, indexBuffer);
+                    cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.user_instance_id,
+                                    hit.triangle_barycentric_coord, materials, geometryEntries, vertexBuffer,
+                                    indexBuffer);
             }
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
@@ -6861,7 +6849,6 @@ struct CutoutShadowWalk<T, true>
                     ray shadowRay,
                     float,
                     float cutoff,
-                    constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                     device const Material* materials,
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
@@ -6873,17 +6860,14 @@ struct CutoutShadowWalk<T, true>
         // Accept any hit and restrict geometry to avoid nearest-hit work and irrelevant bounding-box candidates.
         intersection_params params;
         params.accept_any_intersection(true);
-        params.assume_geometry_type(T::geometryTypes());
+        // RAY_MASK_SHADOW excludes the procedural light instances. StaticTraversal's
+        // query is triangle-only, so neither a bounding-box type nor an
+        // intersection-function table belongs on this path.
+        params.assume_geometry_type(geometry_type::triangle);
         typename T::query q;
-        q.reset(shadowRay, as, RAY_MASK_SHADOW, params, functionTable);
+        q.reset(shadowRay, as, RAY_MASK_SHADOW, params);
         while (q.next())
         {
-            const uint32_t instanceId = q.get_candidate_instance_id();
-            if (shadowLightProxy(instanceId, instances))
-            {
-                q.abort();
-                return false;
-            }
             // Only geometry the builder left non-opaque surfaces as a candidate.
             // Opaque geometry is committed by traversal itself and is never seen
             // here -- which is why the committed result has to be read after the
@@ -6898,8 +6882,9 @@ struct CutoutShadowWalk<T, true>
                 return false;
             }
             const float opacity = cutoutOpacityAt(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(),
-                                                  instanceId, q.get_candidate_triangle_barycentric_coord(), instances,
-                                                  materials, geometryEntries, vertexBuffer, indexBuffer);
+                                                  q.get_candidate_user_instance_id(),
+                                                  q.get_candidate_triangle_barycentric_coord(), materials,
+                                                  geometryEntries, vertexBuffer, indexBuffer);
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
                 q.abort();
@@ -6946,8 +6931,8 @@ static bool restirDiagnosticVisible(constant Uniforms& uniforms,
     }
     float3 alphaTransmittance;
     const bool visible = CutoutShadowWalk<CurveStaticTraversal, false>::run(
-        uniforms, accelerationStructure, shadowRay, 0.0f, 0.0f, instances, materials, geometryEntries, vertexBuffer,
-        indexBuffer, functionTable, alphaTransmittance);
+        uniforms, accelerationStructure, shadowRay, 0.0f, 0.0f, materials, geometryEntries, vertexBuffer, indexBuffer,
+        functionTable, alphaTransmittance);
     transmittance = alphaTransmittance.x;
     return visible;
 }
@@ -7077,8 +7062,8 @@ static void shadowImpl(uint gid,
     // this cannot be an any-hit intersection function on Metal 4.
     float3 transmittance;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(uniforms, accelerationStructure, shadowRay, motionTime,
-                                                        sr.rrCutoff, instances, materials, geometryEntries,
-                                                        vertexBuffer, indexBuffer, functionTable, transmittance))
+                                                        sr.rrCutoff, materials, geometryEntries, vertexBuffer,
+                                                        indexBuffer, functionTable, transmittance))
     {
         if (restirVisibilityUpdate)
             restirStoreFinalVisibility(uniforms, sr.pixelIndex, 0.0f);
