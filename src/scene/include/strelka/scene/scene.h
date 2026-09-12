@@ -48,9 +48,10 @@ struct Mesh
 
     // Large static primitives are spatially ordered and cut into ranges of at
     // most this many triangles while the source geometry is still available to
-    // the loader. Metal consumes the ranges as separate BLASes. Other backends
-    // may keep treating the mesh as one primitive.
-    static constexpr uint32_t kMaxStaticBlasTriangles = 1u << 24;
+    // the loader. Metal enables ExtendedLimits above its standard 2^28-
+    // primitive ceiling; 2^29 remains below Metal's extended 2^30 ceiling and
+    // matches the practical DXR/Vulkan budget used by the other backends.
+    static constexpr uint32_t kMaxStaticBlasTriangles = 1u << 29;
 
     uint32_t mIndex = 0; // Index of 1st index in index buffer
     uint32_t mCount = 0; // amount of indices in mesh

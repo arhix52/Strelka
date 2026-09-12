@@ -162,6 +162,25 @@ bool staticBlasCompactionEnabled()
     static const bool disabled = envFlag("STRELKA_NO_STATIC_BLAS_COMPACTION");
     return !disabled;
 }
+
+constexpr uint64_t kMetalStandardMaxPrimitives = uint64_t{ 1 } << 28u;
+constexpr size_t kMetalStandardMaxGeometries = size_t{ 1 } << 24u;
+
+bool primitiveSurfaceDataEligible(const MetalGeometry::Mesh* mesh,
+                                  const MetalMaterials* materials,
+                                  uint32_t materialId,
+                                  bool skeletal)
+{
+    static const bool disabled = envFlag("STRELKA_NO_PRIMITIVE_SURFACE_DATA");
+    if (disabled || !mesh || !materials || skeletal || mesh->mHasVertexColor)
+    {
+        return false;
+    }
+    const bool needsTangent =
+        materialId < materials->needsAuthoredTangent().size() && materials->needsAuthoredTangent()[materialId] != 0u;
+    const bool needsUv = materialId < materials->needsSurfaceUv().size() && materials->needsSurfaceUv()[materialId] != 0u;
+    return !needsTangent && !needsUv;
+}
 } // namespace
 
 void MetalAccelStructure::prepareEmissiveMeshInputs()
@@ -292,6 +311,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     // to protecting malformed scene data, this keeps a partially prepared mesh
     // table from becoming an out-of-bounds pointer read if a staged build ever
     // regresses again.
+    uint64_t blasTriangleCount = 0u;
     for (const AsBuildGeometry& geometry : geometries)
     {
         if (geometry.sceneInstanceId >= instances.size())
@@ -300,6 +320,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
                           geometry.sceneInstanceId, instances.size());
             return ~size_t{ 0 };
         }
+        blasTriangleCount += geometry.triangleCount;
         const oka::Instance& inst = instances[geometry.sceneInstanceId];
         const uint32_t meshId = inst.mMeshId;
         if (meshId >= meshes.size() || meshId >= mGeometry->meshes().size() || mGeometry->meshes()[meshId] == nullptr)
@@ -364,13 +385,13 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         mesh.mCount = geometry.triangleCount * 3u;
         mesh.mStaticBlasPartitions.clear();
         const MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
-        const bool materialNeedsTangent = inst.mMaterialId < mMaterials->needsAuthoredTangent().size() &&
-                                          mMaterials->needsAuthoredTangent()[inst.mMaterialId] != 0u;
         const bool materialNeedsUv = inst.mMaterialId < mMaterials->needsSurfaceUv().size() &&
                                      mMaterials->needsSurfaceUv()[inst.mMaterialId] != 0u;
-        static const bool disablePrimitiveSurfaceData = envFlag("STRELKA_NO_PRIMITIVE_SURFACE_DATA");
-        const bool usePrimitiveSurfaceData = !disablePrimitiveSurfaceData && !skeletal && !meshData->mHasVertexColor &&
-                                             !materialNeedsTangent && !materialNeedsUv;
+        const size_t primitiveDataOffset =
+            primitiveSurfaceDataEligible(meshData, mMaterials, inst.mMaterialId, skeletal) ?
+                mGeometry->primitiveDataOffset(meshId, geometry.firstTriangle) :
+                MetalGeometry::kNoPrimitiveDataOffset;
+        const bool usePrimitiveSurfaceData = primitiveDataOffset != MetalGeometry::kNoPrimitiveDataOffset;
         if (usePrimitiveSurfaceData)
         {
             ++mPrimitiveSurfaceGeometryCount;
@@ -391,7 +412,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         else
         {
             geom =
-                mPath->makeTriangleGeometry(mGeometry, mesh, geometry.triangleCount, usePrimitiveSurfaceData,
+                mPath->makeTriangleGeometry(mGeometry, mesh, geometry.triangleCount, primitiveDataOffset,
                                             blas.mGeometryTransformBuffer, geometryIndex * sizeof(MTL::PackedFloat4x3));
         }
         static const bool leaveDefault = envFlag("STRELKA_NO_SET_OPAQUE");
@@ -432,8 +453,13 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     // a larger mutable layout. Only skeletal geometry is actually refitted.
     const MTL::AccelerationStructureUsage refitUsage =
         skeletal ? MTL::AccelerationStructureUsageRefit : MTL::AccelerationStructureUsageNone;
-    MTL::AccelerationStructureDescriptor* primDescriptor =
-        mPath->makePrimitiveDescriptor(geomArray, skeletal, skeletal && mBuildMotionBlas, refitUsage | blasExtraUsage());
+    const bool needsExtendedLimits =
+        blasTriangleCount > kMetalStandardMaxPrimitives || geometries.size() > kMetalStandardMaxGeometries;
+    const MTL::AccelerationStructureUsage limitUsage =
+        needsExtendedLimits ? MTL::AccelerationStructureUsageExtendedLimits : MTL::AccelerationStructureUsageNone;
+    mExtendedLimitBlasCount += needsExtendedLimits ? 1u : 0u;
+    MTL::AccelerationStructureDescriptor* primDescriptor = mPath->makePrimitiveDescriptor(
+        geomArray, skeletal, skeletal && mBuildMotionBlas, refitUsage | blasExtraUsage() | limitUsage);
 
     const MTL::AccelerationStructureSizes sizes = mPath->sizes(primDescriptor);
     blas.mBuildSize = sizes.accelerationStructureSize;
@@ -688,6 +714,7 @@ bool MetalAccelStructure::step(double budgetMs)
         mCutoutGeometryCount = 0;
         mPrimitiveSurfaceGeometryCount = 0;
         mPrimitiveSurfaceTriangleCount = 0;
+        mExtendedLimitBlasCount = 0;
         // Per build, not per process: as file-scope counters these accumulated
         // across every scene the session opened, so the second load reported the
         // first one's structures as well as its own.
@@ -766,12 +793,28 @@ bool MetalAccelStructure::step(double budgetMs)
         }
 
         std::vector<uint32_t> meshUseCount(meshes.size(), 0u);
+        std::vector<uint8_t> primitiveSurfaceMeshes(meshes.size(), 0u);
         for (const Instance& instance : instances)
         {
             if (instance.type == Instance::Type::eMesh && instance.mMeshId < meshUseCount.size())
             {
                 ++meshUseCount[instance.mMeshId];
+                if (primitiveSurfaceDataEligible(mGeometry->meshes()[instance.mMeshId], mMaterials,
+                                                 instance.mMaterialId, meshes[instance.mMeshId].isSkeletal))
+                {
+                    primitiveSurfaceMeshes[instance.mMeshId] = 1u;
+                }
             }
+        }
+        if (mMetal4)
+        {
+            mMetal4->removeResident(mGeometry->primitiveDataBuffer());
+        }
+        mGeometry->buildPrimitiveData(mScene, primitiveSurfaceMeshes);
+        if (mMetal4)
+        {
+            mMetal4->addResident(mGeometry->primitiveDataBuffer());
+            mMetal4->commitResidency();
         }
         std::vector<uint8_t> potentiallyAnimatedNode(nodes.size(), 0u);
         std::vector<int> animatedNodeStack;
@@ -1504,10 +1547,11 @@ bool MetalAccelStructure::step(double budgetMs)
             staticBuildBytes > 0 ? 100.0 * (1.0 - double(staticResidentBytes) / double(staticBuildBytes)) : 0.0;
         STRELKA_INFO(
             "BLAS storage: {} static compacted, {} static uncompacted, {} refittable; "
-            "static {:.2f} -> {:.2f} GB ({:.1f}% saved), PreferFastIntersection={}",
+            "static {:.2f} -> {:.2f} GB ({:.1f}% saved), PreferFastIntersection={}, ExtendedLimits={}",
             compactedStaticCount, uncompactedStaticCount, refittableCount, staticBuildBytes / 1e9,
             staticResidentBytes / 1e9, compactedPercent,
-            blasExtraUsage() == MTL::AccelerationStructureUsagePreferFastIntersection ? "on" : "off");
+            blasExtraUsage() == MTL::AccelerationStructureUsagePreferFastIntersection ? "on" : "off",
+            mExtendedLimitBlasCount);
         STRELKA_INFO("Procedural light AS: BLAS {} bytes, bounds {} bytes", analyticLightAsBytes,
                      mAnalyticLightBoundsBuffer ? mAnalyticLightBoundsBuffer->length() : 0);
         STRELKA_INFO("Structures: BLAS {:.2f} GB ({} failed), TLAS {:.3f} GB, device max buffer {:.2f} GB", asBytes / 1e9,

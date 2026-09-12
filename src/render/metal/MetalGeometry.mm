@@ -55,12 +55,18 @@ MTL::Buffer* makeSharedBuffer(
                                                 });
         if (buffer != nullptr)
         {
+            buffer->setLabel(NS::String::string(name, NS::UTF8StringEncoding));
             wrapped = true;
             STRELKA_INFO("Metal geometry {}: wrapped {:.2f} GB without copy", name, bytes / 1e9);
             return buffer;
         }
     }
-    return device->newBuffer(data, bytes, MTL::ResourceStorageModeShared);
+    MTL::Buffer* buffer = device->newBuffer(data, bytes, MTL::ResourceStorageModeShared);
+    if (buffer)
+    {
+        buffer->setLabel(NS::String::string(name, NS::UTF8StringEncoding));
+    }
+    return buffer;
 }
 } // namespace
 
@@ -135,6 +141,7 @@ void MetalGeometry::release()
         mPrevVertexBuffer = nullptr;
     safeRelease(mVertexBuffer);
     safeRelease(mPrimitiveDataBuffer);
+    mPrimitiveDataOffsets.clear();
     mOwnsPrevVertexBuffer = false;
     mVertexBufferAliased = false;
     mWrappedVertices = false;
@@ -179,6 +186,7 @@ void MetalGeometry::buildBuffers(Scene* scene)
             safeRelease(mPrevVertexBuffer);
         safeRelease(mVertexBuffer);
         safeRelease(mPrimitiveDataBuffer);
+        mPrimitiveDataOffsets.clear();
         mOwnsPrevVertexBuffer = false;
         mPrevVertexBuffer = nullptr;
     }
@@ -233,6 +241,10 @@ void MetalGeometry::buildBuffers(Scene* scene)
     if (vertexDataSize > 0 && anySkeletal)
     {
         mPrevVertexBuffer = mDevice->newBuffer(vertices.data(), vertexDataSize, MTL::ResourceStorageModeShared);
+        if (mPrevVertexBuffer)
+        {
+            mPrevVertexBuffer->setLabel(NS::String::string("vertices previous", NS::UTF8StringEncoding));
+        }
         mOwnsPrevVertexBuffer = true;
     }
     else
@@ -241,18 +253,63 @@ void MetalGeometry::buildBuffers(Scene* scene)
         mOwnsPrevVertexBuffer = false;
     }
 
-    // Metal can copy a small application record next to each primitive in the
-    // acceleration structure. Build one dense array in the same global
-    // triangle order as the index buffer; individual geometry descriptors bind
-    // the range that starts at mesh.mIndex / 3.
-    std::vector<PrimitiveSurfaceData> primitiveData(indices.size() / 3u);
-    for (const oka::Mesh& mesh : scene->getMeshes())
+    buildCurveBuffers(scene);
+}
+
+void MetalGeometry::buildPrimitiveData(const Scene* scene, std::span<const uint8_t> enabledMeshes)
+{
+    if (mPrimitiveDataBuffer)
     {
-        const uint32_t triangleCount = mesh.mCount / 3u;
-        const size_t firstTriangle = mesh.mIndex / 3u;
-        for (uint32_t triangle = 0; triangle < triangleCount; ++triangle)
+        mPrimitiveDataBuffer->release();
+        mPrimitiveDataBuffer = nullptr;
+    }
+    mPrimitiveDataOffsets.assign(scene ? scene->getMeshes().size() : 0u, kNoPrimitiveDataOffset);
+    if (!scene || !mVertexBuffer || !mIndexBuffer || enabledMeshes.size() != scene->getMeshes().size())
+    {
+        return;
+    }
+
+    size_t triangleCount = 0u;
+    size_t enabledMeshCount = 0u;
+    for (size_t meshIndex = 0; meshIndex < enabledMeshes.size(); ++meshIndex)
+    {
+        if (enabledMeshes[meshIndex] == 0u)
         {
-            PrimitiveSurfaceData& dst = primitiveData[firstTriangle + triangle];
+            continue;
+        }
+        triangleCount += scene->getMeshes()[meshIndex].mCount / 3u;
+        ++enabledMeshCount;
+    }
+    if (triangleCount == 0u)
+    {
+        return;
+    }
+
+    // Geometry uploads use shared storage on both the copied and the no-copy
+    // path, so rebuilds can regenerate this compact source even after the
+    // headless loader has released its Scene vectors.
+    const auto* vertices = static_cast<const Scene::Vertex*>(mVertexBuffer->contents());
+    const auto* indices = static_cast<const uint32_t*>(mIndexBuffer->contents());
+    if (!vertices || !indices)
+    {
+        STRELKA_ERROR("Cannot build compact primitive surface data: geometry buffers are not CPU-visible");
+        return;
+    }
+
+    std::vector<PrimitiveSurfaceData> primitiveData(triangleCount);
+    size_t dstTriangle = 0u;
+    for (size_t meshIndex = 0; meshIndex < enabledMeshes.size(); ++meshIndex)
+    {
+        if (enabledMeshes[meshIndex] == 0u)
+        {
+            continue;
+        }
+        const oka::Mesh& mesh = scene->getMeshes()[meshIndex];
+        const uint32_t meshTriangleCount = mesh.mCount / 3u;
+        mPrimitiveDataOffsets[meshIndex] = dstTriangle * sizeof(PrimitiveSurfaceData);
+        for (uint32_t triangle = 0; triangle < meshTriangleCount; ++triangle)
+        {
+            PrimitiveSurfaceData& dst = primitiveData[dstTriangle++];
             const size_t firstIndex = static_cast<size_t>(mesh.mIndex) + static_cast<size_t>(triangle) * 3u;
             const Scene::Vertex* v[3];
             for (uint32_t k = 0; k < 3u; ++k)
@@ -268,15 +325,29 @@ void MetalGeometry::buildBuffers(Scene* scene)
             dst.geometryNormal = packNormal(objectArea2 > 1e-20f ? geometricNormal / objectArea2 : glm::float3(0, 0, 1));
         }
     }
-    if (!primitiveData.empty())
-    {
-        mPrimitiveDataBuffer = mDevice->newBuffer(
-            primitiveData.data(), primitiveData.size() * sizeof(PrimitiveSurfaceData), MTL::ResourceStorageModeShared);
-        STRELKA_INFO("Metal primitive surface data: {} triangles, {:.1f} MB", primitiveData.size(),
-                     primitiveData.size() * sizeof(PrimitiveSurfaceData) / (1024.0 * 1024.0));
-    }
 
-    buildCurveBuffers(scene);
+    mPrimitiveDataBuffer = mDevice->newBuffer(
+        primitiveData.data(), primitiveData.size() * sizeof(PrimitiveSurfaceData), MTL::ResourceStorageModeShared);
+    if (!mPrimitiveDataBuffer)
+    {
+        STRELKA_ERROR("Cannot allocate {:.1f} MB of compact primitive surface data",
+                      primitiveData.size() * sizeof(PrimitiveSurfaceData) / (1024.0 * 1024.0));
+        std::ranges::fill(mPrimitiveDataOffsets, kNoPrimitiveDataOffset);
+        return;
+    }
+    mPrimitiveDataBuffer->setLabel(NS::String::string("primitive surface build data", NS::UTF8StringEncoding));
+    STRELKA_INFO("Metal primitive surface data: {} meshes, {} triangles, {:.1f} MB compact source", enabledMeshCount,
+                 primitiveData.size(), primitiveData.size() * sizeof(PrimitiveSurfaceData) / (1024.0 * 1024.0));
+}
+
+size_t MetalGeometry::primitiveDataOffset(size_t meshIndex, uint32_t firstTriangle) const
+{
+    if (!mPrimitiveDataBuffer || meshIndex >= mPrimitiveDataOffsets.size() ||
+        mPrimitiveDataOffsets[meshIndex] == kNoPrimitiveDataOffset)
+    {
+        return kNoPrimitiveDataOffset;
+    }
+    return mPrimitiveDataOffsets[meshIndex] + static_cast<size_t>(firstTriangle) * sizeof(PrimitiveSurfaceData);
 }
 
 void MetalGeometry::adoptAliasedHost(Scene* scene)

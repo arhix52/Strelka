@@ -6,6 +6,8 @@
 #include <strelka/scene/scene.h>
 
 #include <cstdint>
+#include <limits>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -46,6 +48,14 @@ public:
     // Upload VB/IB, optional prev-VB for skeletal scenes, and curve buffers.
     // Does not upload lights or frame uniforms (those are other domains).
     void buildBuffers(Scene* scene);
+
+    // Build only the per-primitive records that at least one BLAS descriptor
+    // will consume. Metal copies these records into the AS during its build;
+    // keeping a scene-wide sparse source buffer wastes hundreds of megabytes on
+    // meshes whose materials still require the regular vertex path.
+    void buildPrimitiveData(const Scene* scene, std::span<const uint8_t> enabledMeshes);
+    static constexpr size_t kNoPrimitiveDataOffset = std::numeric_limits<size_t>::max();
+    size_t primitiveDataOffset(size_t meshIndex, uint32_t firstTriangle = 0u) const;
 
     /// Take the scene arrays that a no-copy wrap is already using as backing store.
     void adoptAliasedHost(Scene* scene);
@@ -155,6 +165,9 @@ private:
     MTL::Buffer* mIndexBuffer = nullptr;
     MTL::Buffer* mPrevVertexBuffer = nullptr;
     MTL::Buffer* mPrimitiveDataBuffer = nullptr;
+    // Byte offset of each mesh's first record in mPrimitiveDataBuffer, or
+    // kNoPrimitiveDataOffset when that mesh uses the regular vertex path.
+    std::vector<size_t> mPrimitiveDataOffsets;
     bool mOwnsPrevVertexBuffer = false;
     // Scene arrays taken so a no-copy wrap can keep them alive after the scene
     // has dropped its own copy. Empty when the wrap aliased the scene, or when
