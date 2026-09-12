@@ -671,20 +671,56 @@ static inline SamplerState samplerForFixedDepth(constant Uniforms& uniforms,
     return s;
 }
 
+// Camera generation already receives a 2D grid position. Keep it all the way
+// into the primary blue-noise lookup instead of recovering x/y with two integer
+// divisions from the linear path index.
+static inline SamplerState samplerForFixedDepth(
+    constant Uniforms& uniforms, uint32_t pixelIndex, uint2 pixel, uint32_t sampleIdx, uint32_t depth)
+{
+    const uint32_t sequenceIndex = sampleSequenceIndex(uniforms, sampleIdx);
+    const uint32_t samplerType = FIXED_SAMPLER_TYPE != 0xffffffffu ? FIXED_SAMPLER_TYPE : uniforms.samplerType;
+    const bool blueNoisePrimary =
+        depth == 0u && (samplerType == 3u || (samplerType == 4u && sequenceIndex < uniforms.blueNoiseSwitchSpp));
+    if (blueNoisePrimary)
+    {
+        return initPrimaryBlueNoiseSampler(pixel, sequenceIndex, uniforms.blueNoiseSwitchSpp);
+    }
+    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp,
+                                 uniforms.sobolSampleBlockBits, samplerType);
+    s.depth = depth;
+    return s;
+}
+
 // A path has one time, sampled once when its camera ray is generated. The
 // sampler is stateless, so every later stage can recover that exact value by
 // drawing eTime at depth 0 again -- drawing it at the current depth would give a
 // different time on every bounce and smear the path across the shutter.
+static inline float motionTimeFromSampler(constant Uniforms& uniforms, uint32_t sampleIdx, thread SamplerState& sampler)
+{
+    if (!SPEC_MOTION_BLUR || !uniforms.enableMotionBlur)
+    {
+        return 0.0f;
+    }
+    if (!uniforms.isMotionBlurVisible)
+    {
+        return 1.0f;
+    }
+    const uint32_t sampleCount = max(uniforms.samples_per_launch, 1u);
+    return ((float)sampleIdx + random<SampleDimension::eTime>(sampler, uniforms.samplerType)) / (float)sampleCount;
+}
+
 static inline float motionTimeFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx)
 {
     if (!SPEC_MOTION_BLUR || !uniforms.enableMotionBlur)
     {
         return 0.0f;
     }
+    if (!uniforms.isMotionBlurVisible)
+    {
+        return 1.0f;
+    }
     SamplerState s = samplerFor(uniforms, pixelIndex, sampleIdx, 0u);
-    const uint32_t sampleCount = max(uniforms.samples_per_launch, 1u);
-    const float t = ((float)sampleIdx + random<SampleDimension::eTime>(s, uniforms.samplerType)) / (float)sampleCount;
-    return uniforms.isMotionBlurVisible ? t : 1.0f;
+    return motionTimeFromSampler(uniforms, sampleIdx, s);
 }
 
 static inline bool shouldWriteAov(constant Uniforms& uniforms, uint32_t sampleIdx)
@@ -832,7 +868,7 @@ static MediumProps mediumPropsFor(constant Uniforms& uniforms,
     return out;
 }
 
-kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
+kernel void wavefrontGenerate(uint2 gridPosition [[thread_position_in_grid]],
                               constant Uniforms& uniforms [[buffer(0)]],
                               device PathState* paths [[buffer(1)]],
                               device PathRay* rays [[buffer(8)]],
@@ -850,6 +886,14 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
                               device MediumPathState* mediumPaths [[buffer(11)]])
 {
     const uint32_t pixelCount = uniforms.width * uniforms.height;
+    const uint32_t scale = SPEC_SHARC_UPDATE ? max(uniforms.sharcUpdateDownscale, 1u) : 1u;
+    const uint32_t gridWidth = (uniforms.width + scale - 1u) / scale;
+    const uint32_t gridHeight = (uniforms.height + scale - 1u) / scale;
+    if (gridPosition.x >= gridWidth || gridPosition.y >= gridHeight)
+    {
+        return;
+    }
+    const uint32_t tid = gridPosition.y * gridWidth + gridPosition.x;
     const uint32_t pathCount = SPEC_SHARC_UPDATE ? uniforms.sharcUpdatePathCount : pixelCount;
     if (tid == 0u)
     {
@@ -866,26 +910,25 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
         iorStats[IOR_STAT_OVERFLOW] = 0u;
         iorStats[IOR_STAT_UNMATCHED] = 0u;
         iorStats[IOR_STAT_ESCAPED_INSIDE] = 0u;
+        if (!SPEC_SHARC_UPDATE)
+        {
+            // The primary queue size is known before launch; audit mode needs
+            // one counter update, not one contended atomic per camera ray.
+            auditWork(uniforms, WORK_PRIMARY_RAYS, pathCount);
+        }
     }
     if (tid >= pathCount)
     {
         return;
     }
 
-    if (!SPEC_SHARC_UPDATE)
-    {
-        auditWork(uniforms, WORK_PRIMARY_RAYS);
-    }
-
-    uint32_t pixelIndex = tid;
+    uint2 pixel = gridPosition;
+    uint32_t pixelIndex = pixel.y * uniforms.width + pixel.x;
     if (SPEC_SHARC_UPDATE)
     {
-        const uint32_t scale = max(uniforms.sharcUpdateDownscale, 1u);
-        const uint32_t tileWidth = (uniforms.width + scale - 1u) / scale;
-        const uint2 tile = uint2(tid % tileWidth, tid / tileWidth);
         const uint32_t scramble = sharcHash(tid ^ (uniforms.sharcFrameIndex * 0x9e3779b9u));
         const uint2 offset = uint2(scramble % scale, (scramble / scale) % scale);
-        const uint2 pixel = min(tile * scale + offset, uint2(uniforms.width - 1u, uniforms.height - 1u));
+        pixel = min(gridPosition * scale + offset, uint2(uniforms.width - 1u, uniforms.height - 1u));
         pixelIndex = pixel.y * uniforms.width + pixel.x;
         SharcUpdateState updateState;
         sharcInitUpdateState(updateState, pixelIndex);
@@ -900,7 +943,7 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
     {
         radianceOut[pixelIndex] = float4(0.0f);
     }
-    if (uniforms.restirDIEnabled != 0u && !SPEC_SHARC_UPDATE)
+    if (SPEC_RESTIR && uniforms.restirDIEnabled != 0u && !SPEC_SHARC_UPDATE)
     {
         device RestirReservoir* currentReservoirs =
             (uniforms.frameIndex & 1u) != 0u ? uniforms.restirReservoir1 : uniforms.restirReservoir0;
@@ -910,9 +953,8 @@ kernel void wavefrontGenerate(uint tid [[thread_position_in_grid]],
         currentHistory[pixelIndex] = {};
     }
 
-    const uint2 pixel = uint2(pixelIndex % uniforms.width, pixelIndex / uniforms.width);
-    SamplerState rng = samplerForFixedDepth(uniforms, pixelIndex, sampleIdx, 0u);
-    const float motionTime = motionTimeFor(uniforms, pixelIndex, sampleIdx);
+    SamplerState rng = samplerForFixedDepth(uniforms, pixelIndex, pixel, sampleIdx, 0u);
+    const float motionTime = motionTimeFromSampler(uniforms, sampleIdx, rng);
 
     float3 origin, direction;
     generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime);

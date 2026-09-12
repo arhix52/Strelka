@@ -730,6 +730,13 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const uint32_t kThreadsPerGroup = 64;
     const MTL::Size tg = MTL::Size(kThreadsPerGroup, 1, 1);
     const MTL::Size fullGrid = MTL::Size((pixels + kThreadsPerGroup - 1) / kThreadsPerGroup, 1, 1);
+    const bool sharcUpdatePass = (features & WavefrontFeatures::kSharcUpdate) != 0u;
+    const uint32_t generateScale = sharcUpdatePass && uniforms ? std::max(uniforms->sharcUpdateDownscale, 1u) : 1u;
+    const uint32_t generateWidth = (width + generateScale - 1u) / generateScale;
+    const uint32_t generateHeight = (height + generateScale - 1u) / generateScale;
+    const MTL::Size generateTg = MTL::Size(32, 8, 1);
+    const MTL::Size generateGrid = MTL::Size((generateWidth + generateTg.width - 1) / generateTg.width,
+                                             (generateHeight + generateTg.height - 1) / generateTg.height, 1);
     const MTL::GPUAddress control = mControlBuffer->gpuAddress();
     const MTL::GPUAddress traversalDispatches = mTraversalDispatchBuffer->gpuAddress();
     const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
@@ -756,8 +763,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     // A terminal camera hit never samples a BSDF and therefore cannot enter an
     // SSS medium. Keep the SSS-specialised shade variant, but do not scan the
     // full camera queue or encode the empty SSS walk for a depth-1 capture.
-    const bool fusedSss = uniforms && uniforms->maxDepth > 1u &&
-                          (features & WavefrontFeatures::kSubsurface) != 0u &&
+    const bool fusedSss = uniforms && uniforms->maxDepth > 1u && (features & WavefrontFeatures::kSubsurface) != 0u &&
                           (features & WavefrontFeatures::kSharcUpdate) == 0u && variant->sssWalkMotion &&
                           variant->sssWalkStatic;
 
@@ -874,7 +880,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(mIorStatsBuffer, 0, 9);
         bind(mSharcUpdateStateBuffer, 0, 10);
         bind(mMediumPathStateBuffer, 0, 11);
-        enc->dispatchThreadgroups(fullGrid, tg);
+        enc->dispatchThreadgroups(generateGrid, generateTg);
         barrier();
         endStage(stage);
     }
@@ -1531,6 +1537,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const MTL::Size grid = MTL::Size(pixels, 1, 1);
     const uint32_t kThreadsPerGroup = 64;
     const MTL::Size tg = MTL::Size(kThreadsPerGroup, 1, 1);
+    const uint32_t generateScale = sharcUpdatePass && uniforms ? std::max(uniforms->sharcUpdateDownscale, 1u) : 1u;
+    const MTL::Size generateGrid =
+        MTL::Size((width + generateScale - 1u) / generateScale, (height + generateScale - 1u) / generateScale, 1);
+    const MTL::Size generateTg = MTL::Size(32, 8, 1);
     // Byte offset of the indirect dispatch arguments inside the control buffer.
     const NS::UInteger kDispatchArgsOffset = 2 * sizeof(uint32_t);
     const NS::UInteger kShadowArgsOffset = 8 * sizeof(uint32_t);
@@ -1558,9 +1568,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     }
     // See the Metal 4 path above: depth 1 cannot produce an SSS continuation,
     // even when alpha pass-through headroom keeps the host iteration loop alive.
-    const bool fusedSss = uniforms && uniforms->maxDepth > 1u &&
-                          (features & WavefrontFeatures::kSubsurface) != 0u && !sharcUpdatePass &&
-                          variant->sssWalkMotion && variant->sssWalkStatic;
+    const bool fusedSss = uniforms && uniforms->maxDepth > 1u && (features & WavefrontFeatures::kSubsurface) != 0u &&
+                          !sharcUpdatePass && variant->sssWalkMotion && variant->sssWalkStatic;
 
     // Profiling gives each stage its own encoder, because this hardware samples
     // counters only at encoder boundaries. That costs encoder overhead, so it is
@@ -1606,7 +1615,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         enc->setBuffer(mIorStatsBuffer, 0, 9);
         enc->setBuffer(mSharcUpdateStateBuffer, 0, 10);
         enc->setBuffer(mMediumPathStateBuffer, 0, 11);
-        enc->dispatchThreads(grid, tg);
+        enc->dispatchThreads(generateGrid, generateTg);
 
         for (uint32_t bounce = 0; bounce < bounceIterations; ++bounce)
         {
