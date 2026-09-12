@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+using oka::metal::buildDownsampledSolidAngleIblAliasTable;
 using oka::metal::buildSolidAngleIblAliasTable;
 using oka::metal::EnvAliasEntry;
 using oka::metal::IblAliasTableResult;
@@ -119,8 +120,8 @@ TEST_CASE("positive extreme-dynamic-range texels retain discrete support")
     for (size_t bucket = 0; bucket < result.alias.size(); ++bucket)
     {
         const EnvAliasEntry& entry = result.alias[bucket];
-        const double bucketMass = double(discreteBucketStateCount(uint32_t(result.alias.size()), uint32_t(bucket))) /
-                                  integerStateCount;
+        const double bucketMass =
+            double(discreteBucketStateCount(uint32_t(result.alias.size()), uint32_t(bucket))) / integerStateCount;
         const double own = entry.alias == bucket ? 1.0 : double(entry.threshold) / integerStateCount;
         represented[bucket] += bucketMass * own;
         represented[entry.alias] += bucketMass * (1.0 - own);
@@ -165,8 +166,7 @@ TEST_CASE("a finite positive channel retains support beside negative channels")
 
 TEST_CASE("finite radiance channels survive invalid neighbours in the same texel")
 {
-    const float pixels[] = { std::numeric_limits<float>::quiet_NaN(), 1.0f,
-                             std::numeric_limits<float>::infinity(), 1.0f };
+    const float pixels[] = { std::numeric_limits<float>::quiet_NaN(), 1.0f, std::numeric_limits<float>::infinity(), 1.0f };
     const IblAliasTableResult result = buildSolidAngleIblAliasTable(pixels, 1, 1);
     CHECK(result.totalPower > 0.0);
     CHECK(result.alias[0].solidAnglePdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
@@ -229,9 +229,14 @@ TEST_CASE("subnormal environment power keeps a finite sampling representation")
 
 TEST_CASE("environment upload sanitization leaves no invalid radiance")
 {
-    float pixels[] = { std::numeric_limits<float>::quiet_NaN(), -1.0f,
-                       std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN(),
-                       0.25f, 0.5f, 1.0f, 1.0f };
+    float pixels[] = { std::numeric_limits<float>::quiet_NaN(),
+                       -1.0f,
+                       std::numeric_limits<float>::infinity(),
+                       std::numeric_limits<float>::quiet_NaN(),
+                       0.25f,
+                       0.5f,
+                       1.0f,
+                       1.0f };
     oka::metal::sanitizeEnvironmentPixels(pixels, 2, 1);
     for (const float value : pixels)
     {
@@ -242,4 +247,52 @@ TEST_CASE("environment upload sanitization leaves no invalid radiance")
     CHECK(pixels[2] == 0.0f);
     CHECK(pixels[3] == 1.0f);
     CHECK(pixels[4] == 0.25f);
+}
+
+TEST_CASE("downsampled alias table preserves source energy statistics")
+{
+    constexpr int sourceWidth = 7;
+    constexpr int sourceHeight = 5;
+    constexpr int tableWidth = 3;
+    constexpr int tableHeight = 2;
+    std::vector<float> pixels(static_cast<size_t>(sourceWidth) * sourceHeight * 4u, 1.0f);
+    for (int y = 0; y < sourceHeight; ++y)
+    {
+        for (int x = 0; x < sourceWidth; ++x)
+        {
+            float* pixel = pixels.data() + 4u * (static_cast<size_t>(y) * sourceWidth + x);
+            pixel[0] = static_cast<float>(1 + x);
+            pixel[1] = static_cast<float>(1 + y);
+            pixel[2] = static_cast<float>(1 + x + y);
+        }
+    }
+
+    const IblAliasTableResult full = buildSolidAngleIblAliasTable(pixels.data(), sourceWidth, sourceHeight);
+    const IblAliasTableResult downsampled =
+        buildDownsampledSolidAngleIblAliasTable(pixels.data(), sourceWidth, sourceHeight, tableWidth, tableHeight);
+
+    REQUIRE(downsampled.alias.size() == static_cast<size_t>(tableWidth * tableHeight));
+    CHECK(downsampled.totalPower == doctest::Approx(full.totalPower).epsilon(1e-13));
+    CHECK(downsampled.averageWeightedLuminance == doctest::Approx(full.averageWeightedLuminance).epsilon(1e-13));
+    for (const EnvAliasEntry& entry : downsampled.alias)
+    {
+        CHECK(entry.alias < downsampled.alias.size());
+        CHECK(entry.solidAnglePdf > 0.0f);
+    }
+}
+
+TEST_CASE("downsampled constant environment remains uniform over the sphere")
+{
+    constexpr int sourceWidth = 8;
+    constexpr int sourceHeight = 4;
+    std::vector<float> pixels(static_cast<size_t>(sourceWidth) * sourceHeight * 4u, 1.0f);
+    const IblAliasTableResult result =
+        buildDownsampledSolidAngleIblAliasTable(pixels.data(), sourceWidth, sourceHeight, 4, 2);
+
+    REQUIRE(result.alias.size() == 8u);
+    CHECK(result.totalPower == doctest::Approx(4.0 * M_PI).epsilon(1e-13));
+    for (const EnvAliasEntry& entry : result.alias)
+    {
+        CHECK(entry.solidAnglePdf == doctest::Approx(1.0 / (4.0 * M_PI)).epsilon(2e-7));
+    }
 }

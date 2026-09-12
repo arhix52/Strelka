@@ -1204,12 +1204,10 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
                 SampleDimension::eLightPointY>(samplerRnd, uniforms.samplerType);
     const uint2 aliasWords = envRandom.bits.xy;
     const float2 jitter = envRandom.value.zw;
-    const uint2 retryWords =
-        random2<SampleDimension::eLightRetryU, SampleDimension::eLightRetryV>(samplerRnd, uniforms.samplerType).bits;
 
     float envPdf = 0.0f;
-    float3 dir = sampleEnvMap(aliasWords, jitter, retryWords, envAliasTable, uniforms.envMapWidth,
-                              uniforms.envMapHeight, uniforms.envMapRotation, envPdf);
+    float3 dir = sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
+                              uniforms.envMapRotation, envPdf);
 
     return connectEnvDirection(uniforms, dir, envPdf, si, envMapTexture, volumeEvent);
 }

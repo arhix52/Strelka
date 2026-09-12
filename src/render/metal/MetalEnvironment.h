@@ -16,6 +16,10 @@ struct EnvMapState
     MTL::Buffer* aliasBuffer = nullptr;
     double totalPower = 0.0;
     float autoScale = 1.0f;
+    float mapDecodeScale = 1.0f;
+    float backgroundDecodeScale = 1.0f;
+    uint32_t aliasWidth = 0;
+    uint32_t aliasHeight = 0;
     bool loaded = false;
 };
 

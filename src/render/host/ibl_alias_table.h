@@ -10,7 +10,6 @@
 #include <numbers>
 #include <vector>
 
-
 namespace oka::metal
 {
 
@@ -57,6 +56,58 @@ inline void sanitizeEnvironmentPixels(float* pixelRgba, int width, int height)
     }
 }
 
+namespace detail
+{
+struct IblMapStatistics
+{
+    double totalPower = 0.0;
+    double averageWeightedLuminance = 0.0;
+};
+
+inline double environmentLuminance(const float* pixel)
+{
+    return 0.2126 * sanitizeEnvironmentChannel(pixel[0]) + 0.7152 * sanitizeEnvironmentChannel(pixel[1]) +
+           0.0722 * sanitizeEnvironmentChannel(pixel[2]);
+}
+
+inline IblMapStatistics measureIblMap(const float* pixelRgba, int width, int height, std::vector<double>* luminance = nullptr)
+{
+    IblMapStatistics statistics;
+    if (!pixelRgba || width <= 0 || height <= 0)
+    {
+        return statistics;
+    }
+
+    const size_t texelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (luminance)
+    {
+        luminance->resize(texelCount);
+    }
+
+    double calibrationPower = 0.0;
+    const double deltaPhi = 2.0 * std::numbers::pi_v<double> / static_cast<double>(width);
+    for (int y = 0; y < height; ++y)
+    {
+        const double theta0 = std::numbers::pi_v<double> * static_cast<double>(y) / static_cast<double>(height);
+        const double theta1 = std::numbers::pi_v<double> * static_cast<double>(y + 1) / static_cast<double>(height);
+        const double rowSolidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
+        for (int x = 0; x < width; ++x)
+        {
+            const size_t i = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
+            const double clean = environmentLuminance(pixelRgba + i * 4u);
+            if (luminance)
+            {
+                (*luminance)[i] = clean;
+            }
+            statistics.totalPower += clean * rowSolidAngle;
+            calibrationPower += clean * std::sin(0.5 * (theta0 + theta1));
+        }
+    }
+    statistics.averageWeightedLuminance = calibrationPower / static_cast<double>(texelCount);
+    return statistics;
+}
+} // namespace detail
+
 // Walker/Vose alias table for a piecewise-constant lat-long environment in the
 // continuous solid-angle measure. Texel i receives mass
 //
@@ -75,29 +126,10 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
     }
 
     const size_t texelCount = (size_t)width * (size_t)height;
-    std::vector<double> luminance(texelCount);
+    std::vector<double> luminance;
     std::vector<double> weights(texelCount);
-    double calibrationPower = 0.0;
-    double radianceIntegral = 0.0;
+    const detail::IblMapStatistics statistics = detail::measureIblMap(pixelRgba, width, height, &luminance);
     const double deltaPhi = 2.0 * std::numbers::pi_v<double> / (double)width;
-
-    for (int y = 0; y < height; ++y)
-    {
-        const double theta0 = std::numbers::pi_v<double> * (double)y / (double)height;
-        const double theta1 = std::numbers::pi_v<double> * (double)(y + 1) / (double)height;
-        const double rowSolidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
-        for (int x = 0; x < width; ++x)
-        {
-            const size_t i = (size_t)y * (size_t)width + (size_t)x;
-            const float* px = pixelRgba + i * 4;
-            const double clean = 0.2126 * sanitizeEnvironmentChannel(px[0]) +
-                                 0.7152 * sanitizeEnvironmentChannel(px[1]) +
-                                 0.0722 * sanitizeEnvironmentChannel(px[2]);
-            luminance[i] = clean;
-            radianceIntegral += clean * rowSolidAngle;
-            calibrationPower += clean * std::sin(0.5 * (theta0 + theta1));
-        }
-    }
 
     // A normalized linear texture lookup from inside texel bin (x,y) can use
     // x-1/x/x+1 and y-1/y/y+1 because texel centres are half a pixel from the
@@ -128,8 +160,8 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
 
     const LightSelectionTable selection = buildLightSelectionAlias(weights);
     out.alias.resize(texelCount);
-    out.totalPower = radianceIntegral;
-    out.averageWeightedLuminance = calibrationPower / (double)texelCount;
+    out.totalPower = statistics.totalPower;
+    out.averageWeightedLuminance = statistics.averageWeightedLuminance;
 
     if (selection.totalPower > 0.0)
     {
@@ -138,8 +170,7 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
             const LightSelectionEntry& entry = selection.entries[i];
             const int y = static_cast<int>(i / static_cast<size_t>(width));
             const double theta0 = std::numbers::pi_v<double> * static_cast<double>(y) / static_cast<double>(height);
-            const double theta1 =
-                std::numbers::pi_v<double> * static_cast<double>(y + 1) / static_cast<double>(height);
+            const double theta1 = std::numbers::pi_v<double> * static_cast<double>(y + 1) / static_cast<double>(height);
             const double solidAngle = deltaPhi * (std::cos(theta0) - std::cos(theta1));
             out.alias[i].threshold = entry.aliasThreshold;
             out.alias[i].alias = entry.alias;
@@ -161,6 +192,60 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
             std::min(1.0 / selection.totalPower, static_cast<double>(std::numeric_limits<float>::max())));
     }
 
+    return out;
+}
+
+// Build a smaller Metal sampling table without changing the environment
+// texture or its energy calibration. Each proposal texel stores the maximum
+// source luminance in its footprint; buildSolidAngleIblAliasTable then expands
+// that by the neighboring bilinear footprint. This keeps positive texture
+// reconstruction supported while reducing the random alias-table working set.
+inline IblAliasTableResult buildDownsampledSolidAngleIblAliasTable(
+    const float* pixelRgba, int sourceWidth, int sourceHeight, int requestedWidth, int requestedHeight)
+{
+    if (!pixelRgba || sourceWidth <= 0 || sourceHeight <= 0 || requestedWidth <= 0 || requestedHeight <= 0)
+    {
+        return {};
+    }
+
+    const int tableWidth = std::min(sourceWidth, requestedWidth);
+    const int tableHeight = std::min(sourceHeight, requestedHeight);
+    if (tableWidth == sourceWidth && tableHeight == sourceHeight)
+    {
+        return buildSolidAngleIblAliasTable(pixelRgba, sourceWidth, sourceHeight);
+    }
+
+    std::vector<float> proxy(static_cast<size_t>(tableWidth) * static_cast<size_t>(tableHeight) * 4u, 0.0f);
+    for (int y = 0; y < tableHeight; ++y)
+    {
+        const int sourceY0 = static_cast<int>(static_cast<int64_t>(y) * sourceHeight / tableHeight);
+        const int sourceY1 = static_cast<int>(static_cast<int64_t>(y + 1) * sourceHeight / tableHeight);
+        for (int x = 0; x < tableWidth; ++x)
+        {
+            const int sourceX0 = static_cast<int>(static_cast<int64_t>(x) * sourceWidth / tableWidth);
+            const int sourceX1 = static_cast<int>(static_cast<int64_t>(x + 1) * sourceWidth / tableWidth);
+            double envelope = 0.0;
+            for (int sourceY = sourceY0; sourceY < sourceY1; ++sourceY)
+            {
+                for (int sourceX = sourceX0; sourceX < sourceX1; ++sourceX)
+                {
+                    const size_t sourceIndex =
+                        static_cast<size_t>(sourceY) * static_cast<size_t>(sourceWidth) + static_cast<size_t>(sourceX);
+                    envelope = std::max(envelope, detail::environmentLuminance(pixelRgba + sourceIndex * 4u));
+                }
+            }
+
+            float* destination =
+                proxy.data() + 4u * (static_cast<size_t>(y) * static_cast<size_t>(tableWidth) + static_cast<size_t>(x));
+            destination[0] = destination[1] = destination[2] = static_cast<float>(envelope);
+            destination[3] = 1.0f;
+        }
+    }
+
+    IblAliasTableResult out = buildSolidAngleIblAliasTable(proxy.data(), tableWidth, tableHeight);
+    const detail::IblMapStatistics sourceStatistics = detail::measureIblMap(pixelRgba, sourceWidth, sourceHeight);
+    out.totalPower = sourceStatistics.totalPower;
+    out.averageWeightedLuminance = sourceStatistics.averageWeightedLuminance;
     return out;
 }
 

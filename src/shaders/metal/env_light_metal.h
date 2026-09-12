@@ -18,7 +18,6 @@ using namespace metal;
 // independently jitter within the selected texel.
 static inline float3 sampleEnvMap(const uint2 aliasWords,
                                   const float2 jitter,
-                                  const uint2 retryWords,
                                   device const EnvAliasEntry* aliasTable,
                                   uint32_t envMapWidth,
                                   uint32_t envMapHeight,
@@ -35,8 +34,15 @@ static inline float3 sampleEnvMap(const uint2 aliasWords,
     const uint32_t x = draw.texel % w;
     const uint32_t y = draw.texel / w;
 
-    const float3 dir = envSampleTexelDirection(
-        (int)x, (int)y, (int)w, (int)h, jitter.x, jitter.y, retryWords.x, retryWords.y, envMapRotation);
+    // The host sanitizes the map and Metal textures already constrain the
+    // dimensions. Generate the selected texel's first, ordinary sample
+    // directly. The shared cross-backend helper performs a direction->UV
+    // round trip and up to eight randomized retries to defend representational
+    // boundary cases; paying those atan2/sqrt operations on every production
+    // ray is substantially more expensive than the alias-table loads.
+    const float u = envSampleTexelU((int)x, (int)w, jitter.x);
+    const float v = envSampleSolidAngleV((int)y, (int)h, jitter.y);
+    const float3 dir = envUVToDir(float2(u, v), envMapRotation);
 
     pdf = aliasTable[draw.texel].solidAnglePdf;
 

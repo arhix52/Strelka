@@ -419,15 +419,19 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     {
         const auto& envLight = in.scene->getEnvLight();
         pUniformData->hasEnvMap = 1;
-        pUniformData->envMapWidth = (uint32_t)in.environment->state().mapTexture->width();
-        pUniformData->envMapHeight = (uint32_t)in.environment->state().mapTexture->height();
+        pUniformData->envMapWidth = in.environment->state().aliasWidth;
+        pUniformData->envMapHeight = in.environment->state().aliasHeight;
         const float userIntensity = envLight.has_value() ? envLight->intensity : 1.0f;
-        pUniformData->envMapIntensity = in.environment->state().autoScale * userIntensity;
+        const float physicalEnvIntensity = in.environment->state().autoScale * userIntensity;
+        pUniformData->envMapIntensity = physicalEnvIntensity * in.environment->state().mapDecodeScale;
         pUniformData->envMapRotation =
             envLight.has_value() ? envLight->rotationY * static_cast<float>(M_PI / 180.0) : 0.0f;
         const bool hasBackdrop = in.environment->state().backgroundTexture != nullptr;
         pUniformData->hasEnvBackground = hasBackdrop ? 1u : 0u;
-        pUniformData->envBackgroundIntensity = hasBackdrop && envLight.has_value() ? envLight->backgroundIntensity : 1.0f;
+        const float physicalBackgroundIntensity =
+            hasBackdrop && envLight.has_value() ? envLight->backgroundIntensity : 1.0f;
+        pUniformData->envBackgroundIntensity =
+            physicalBackgroundIntensity * in.environment->state().backgroundDecodeScale;
         const glm::float3 tint = envLight.has_value() ? envLight->color : glm::float3(1.0f);
         float envSelectionPdf = 1.0f;
         if (pUniformData->numLights > 0 || pUniformData->numEmissiveMeshes > 0)
@@ -437,8 +441,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             // the same units as the emitted power MetalLights accumulated.
             const double tintLuminance =
                 0.2126 * std::max(tint.r, 0.0f) + 0.7152 * std::max(tint.g, 0.0f) + 0.0722 * std::max(tint.b, 0.0f);
-            const double envPower = environmentLightPower(in.environment->state().totalPower, pUniformData->sceneExtent,
-                                                          pUniformData->envMapIntensity, tintLuminance);
+            const double envPower = environmentLightPower(
+                in.environment->state().totalPower, pUniformData->sceneExtent, physicalEnvIntensity, tintLuminance);
             envSelectionPdf = emitterSelectionProbabilities(true, envPower, pUniformData->numLights > 0u, analyticPower,
                                                             pUniformData->numEmissiveMeshes > 0u, meshPower)
                                   .environment;
