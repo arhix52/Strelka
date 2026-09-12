@@ -24,6 +24,7 @@ namespace oka::metal
 {
 
 struct AsBuildState;
+struct AsBuildGeometry;
 
 // BLAS/TLAS domain: build, grouping, motion geometry, skeletal refit, instance buffer.
 // Reads Geometry mesh records / VB offsets and Materials cutout/medium flags; fills
@@ -41,8 +42,9 @@ public:
         uint64_t tlasBuilds = 0;
         uint64_t tlasRefits = 0;
     };
-    // One acceleration structure covering N geometries that always move together
-    // (in practice: every primitive of one glTF mesh node).
+    // One acceleration structure covering N geometries that always move together.
+    // A large static glTF primitive may contribute only one spatial index range;
+    // the remaining ranges live in sibling BLASes with the same transform.
     struct Blas
     {
         MTL::AccelerationStructure* mAs = nullptr;
@@ -66,10 +68,16 @@ public:
         uint32_t asIndex;
         uint32_t userID;
         uint32_t mask;
+        struct Geometry
+        {
+            uint32_t sceneInstanceId = 0;
+            uint32_t firstTriangle = 0;
+            uint32_t triangleCount = 0;
+        };
         // Geometry order in this emitted BLAS. Needed by emissive-mesh NEE:
         // shared BLAS records describe geometry, while the emitted instance
         // supplies the transform and therefore owns a distinct light source.
-        std::vector<uint32_t> geometrySceneInstanceIds;
+        std::vector<Geometry> geometries;
     };
 
     MetalAccelStructure() = default;
@@ -251,7 +259,7 @@ private:
     MTL::AccelerationStructure* createAccelerationStructure(MTL::AccelerationStructureDescriptor* descriptor);
     void flushAccelerationStructureGroup();
     MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
-    size_t buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal);
+    size_t buildBlas(const std::vector<AsBuildGeometry>& geometries, bool skeletal);
     /// What buildCurveBlas returns for a set it could not build: an empty one,
     /// or one whose points never got uploaded. Named because the caller has to
     /// test for it, and `(size_t)-1` at both ends said nothing about which end

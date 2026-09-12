@@ -5,6 +5,7 @@
 #include <strelka/sceneloader/light_json.h>
 #include <strelka/sceneloader/material_sidecar.h>
 #include <strelka/sceneloader/materialx_loader.h>
+#include <strelka/sceneloader/static_blas_partition.h>
 
 #include <strelka/scene/camera.h>
 #include <strelka/scene/vertex_packing.h>
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <span>
 #include <thread>
 #include <unordered_map>
 
@@ -167,8 +169,9 @@ void parallelFor(size_t count, Fn&& body)
     // faster.
     constexpr size_t kSerialBelow = size_t{ 64 } * 1024;
     const unsigned hardware = std::thread::hardware_concurrency();
-    const size_t threads =
-        count < kSerialBelow ? 1u : std::min<size_t>(hardware == 0u ? 1u : hardware, (count + kSerialBelow - 1u) / kSerialBelow);
+    const size_t threads = count < kSerialBelow ? 1u :
+                                                  std::min<size_t>(hardware == 0u ? 1u : hardware,
+                                                                   (count + kSerialBelow - 1u) / kSerialBelow);
     if (threads <= 1u)
     {
         body(size_t{ 0 }, count);
@@ -382,47 +385,47 @@ void processPrimitive(const tinygltf::Model& model,
     // unpacked, and packing is lossy.
     const auto buildVertex = [&](size_t v, glm::float3& outPos, glm::float3& outNorm) -> oka::Scene::Vertex {
         oka::Scene::Vertex vertex{};
-            const glm::float3 vPos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
-            const glm::float3 vNorm =
-                glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f));
-            vertex.pos = vPos;
-            vertex.normal = packNormal(glm::normalize(vNorm));
-            vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
-            if (colorData)
+        const glm::float3 vPos = glm::make_vec3(&positionData[v * posStride]) * globalScale;
+        const glm::float3 vNorm =
+            glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f));
+        vertex.pos = vPos;
+        vertex.normal = packNormal(glm::normalize(vNorm));
+        vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
+        if (colorData)
+        {
+            glm::float4 c(1.0f);
+            switch (colorComponentType)
             {
-                glm::float4 c(1.0f);
-                switch (colorComponentType)
-                {
-                case TINYGLTF_COMPONENT_TYPE_FLOAT: {
-                    const float* src = static_cast<const float*>(colorData) + v * colorStride;
-                    for (int k = 0; k < colorComponents; ++k)
-                        c[k] = src[k];
-                    break;
-                }
-                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
-                    const uint8_t* src = static_cast<const uint8_t*>(colorData) + v * colorStride;
-                    for (int k = 0; k < colorComponents; ++k)
-                        c[k] = static_cast<float>(src[k]) / 255.0f;
-                    break;
-                }
-                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
-                    const uint16_t* src = static_cast<const uint16_t*>(colorData) + v * colorStride;
-                    for (int k = 0; k < colorComponents; ++k)
-                        c[k] = static_cast<float>(src[k]) / 65535.0f;
-                    break;
-                }
-                default:
-                    break; // leave white
-                }
-                vertex.color = packColor(c);
+            case TINYGLTF_COMPONENT_TYPE_FLOAT: {
+                const float* src = static_cast<const float*>(colorData) + v * colorStride;
+                for (int k = 0; k < colorComponents; ++k)
+                    c[k] = src[k];
+                break;
             }
-            if (tangentData)
-            {
-                const float* t = &tangentData[v * tangentStride];
-                const glm::float3 tan{ t[0], t[1], t[2] };
-                const float lenSq = glm::dot(tan, tan);
-                vertex.tangent = packTangent(lenSq > 1e-12f ? tan * glm::inversesqrt(lenSq) : glm::float3(0, 0, 1), t[3]);
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
+                const uint8_t* src = static_cast<const uint8_t*>(colorData) + v * colorStride;
+                for (int k = 0; k < colorComponents; ++k)
+                    c[k] = static_cast<float>(src[k]) / 255.0f;
+                break;
             }
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+                const uint16_t* src = static_cast<const uint16_t*>(colorData) + v * colorStride;
+                for (int k = 0; k < colorComponents; ++k)
+                    c[k] = static_cast<float>(src[k]) / 65535.0f;
+                break;
+            }
+            default:
+                break; // leave white
+            }
+            vertex.color = packColor(c);
+        }
+        if (tangentData)
+        {
+            const float* t = &tangentData[v * tangentStride];
+            const glm::float3 tan{ t[0], t[1], t[2] };
+            const float lenSq = glm::dot(tan, tan);
+            vertex.tangent = packTangent(lenSq > 1e-12f ? tan * glm::inversesqrt(lenSq) : glm::float3(0, 0, 1), t[3]);
+        }
         outPos = vPos;
         outNorm = vNorm;
         return vertex;
@@ -551,6 +554,18 @@ void processPrimitive(const tinygltf::Model& model,
         skinOut.insert(skinOut.end(), sb.begin(), sb.end());
     }
 
+    std::vector<Mesh::StaticBlasPartition> staticBlasPartitions;
+    const uint32_t triangleCount = indexCount / 3u;
+    if (!hasJoints && triangleCount > Mesh::kMaxStaticBlasTriangles)
+    {
+        const std::span<const Scene::Vertex> primitiveVertices(vertices.data() + vbOffset, vertexCount);
+        const std::span<uint32_t> primitiveIndices(indicesOut.data() + ibOffset, indexCount);
+        staticBlasPartitions =
+            sceneloader::partitionStaticTriangles(primitiveVertices, primitiveIndices, Mesh::kMaxStaticBlasTriangles);
+        STRELKA_INFO("Spatially partitioned static glTF primitive {}:{}: {} triangles into {} BLAS ranges",
+                     primitiveKey >> 32u, primitiveKey & 0xffffffffu, triangleCount, staticBlasPartitions.size());
+    }
+
     uint32_t meshId = std::numeric_limits<uint32_t>::max();
     if (hasJoints)
         meshId = scene.createSkeletalMeshFromOffsets(
@@ -558,6 +573,7 @@ void processPrimitive(const tinygltf::Model& model,
     else
         meshId = scene.createMeshFromOffsets(vbOffset, vertexCount, ibOffset, indexCount);
     assert(meshId != std::numeric_limits<uint32_t>::max());
+    scene.mMeshes[meshId].mStaticBlasPartitions = std::move(staticBlasPartitions);
     // Skinned meshes are deliberately never cached: their vertices are rewritten
     // per frame from their own skin, so two nodes sharing one would deform the
     // same geometry twice.
@@ -668,8 +684,8 @@ void readGpuInstancing(const tinygltf::Model& model, const tinygltf::Node& node,
     const tinygltf::Accessor* translation = findAccessor("TRANSLATION");
     const tinygltf::Accessor* rotation = findAccessor("ROTATION");
     const tinygltf::Accessor* scale = findAccessor("SCALE");
-    const size_t count = std::max({ translation ? translation->count : 0, rotation ? rotation->count : 0,
-                                    scale ? scale->count : 0 });
+    const size_t count =
+        std::max({ translation ? translation->count : 0, rotation ? rotation->count : 0, scale ? scale->count : 0 });
     if (count == 0)
         return;
 
@@ -876,7 +892,8 @@ std::string extractEmbeddedImage(const tinygltf::Model& model, int imageId, cons
         STRELKA_WARNING("glTF image {} is embedded but '{}' could not be written", imageId, target.string());
         return {};
     }
-    out.write(reinterpret_cast<const char*>(data.data() + view.byteOffset), static_cast<std::streamsize>(view.byteLength));
+    out.write(
+        reinterpret_cast<const char*>(data.data() + view.byteOffset), static_cast<std::streamsize>(view.byteLength));
     return target.string();
 }
 
@@ -960,8 +977,8 @@ float khrFloat(const tinygltf::Material& material, const char* extension, const 
 }
 
 oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& model,
-                                                    const tinygltf::Material& material,
-                                                    const std::string& modelPath)
+                                                     const tinygltf::Material& material,
+                                                     const std::string& modelPath)
 {
     oka::Scene::MaterialDescription desc{};
     desc.name = material.name.empty() ? "material" : material.name;
@@ -1269,7 +1286,8 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
 
     // Store texture file paths for the renderer to load
     desc.baseColorTexPath = getTextureUri(model, material.pbrMetallicRoughness.baseColorTexture.index, modelPath);
-    desc.metallicRoughnessTexPath = getTextureUri(model, material.pbrMetallicRoughness.metallicRoughnessTexture.index, modelPath);
+    desc.metallicRoughnessTexPath =
+        getTextureUri(model, material.pbrMetallicRoughness.metallicRoughnessTexture.index, modelPath);
     desc.normalTexPath = getTextureUri(model, material.normalTexture.index, modelPath);
     desc.emissionTexPath = getTextureUri(model, material.emissiveTexture.index, modelPath);
     desc.occlusionTexPath = getTextureUri(model, material.occlusionTexture.index, modelPath);

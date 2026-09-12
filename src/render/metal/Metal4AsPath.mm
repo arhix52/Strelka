@@ -324,6 +324,13 @@ public:
         MTL::Buffer* scratchBuffer =
             mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
         const auto tEncode = std::chrono::steady_clock::now();
+        if (!scratchBuffer)
+        {
+            STRELKA_ERROR("Acceleration structure scratch allocation failed: {:.2f} GB requested",
+                          accelSizes.buildScratchBufferSize / 1e9);
+            accelerationStructure->release();
+            return nullptr;
+        }
         addResident(accelerationStructure);
         addResident(scratchBuffer);
 

@@ -37,12 +37,28 @@ inline constexpr uint32_t kInvalidIndex = ~uint32_t{ 0 };
 
 struct Mesh
 {
+    struct StaticBlasPartition
+    {
+        // Triangle range relative to mIndex. The loader keeps the range
+        // contiguous in the shared index buffer, so a renderer can describe it
+        // without copying either vertices or indices.
+        uint32_t firstTriangle = 0;
+        uint32_t triangleCount = 0;
+    };
+
+    // Large static primitives are spatially ordered and cut into ranges of at
+    // most this many triangles while the source geometry is still available to
+    // the loader. Metal consumes the ranges as separate BLASes. Other backends
+    // may keep treating the mesh as one primitive.
+    static constexpr uint32_t kMaxStaticBlasTriangles = 1u << 20;
+
     uint32_t mIndex = 0; // Index of 1st index in index buffer
     uint32_t mCount = 0; // amount of indices in mesh
     uint32_t mVbOffset = 0; // start in vb
     uint32_t mVertexCount = 0; // number of vertices in mesh
     uint32_t mSbOffset = 0; // start in sb
     bool isSkeletal = false;
+    std::vector<StaticBlasPartition> mStaticBlasPartitions;
 };
 
 struct Curve

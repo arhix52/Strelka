@@ -25,6 +25,13 @@
 namespace oka::metal
 {
 
+struct AsBuildGeometry
+{
+    uint32_t sceneInstanceId = 0;
+    uint32_t firstTriangle = 0;
+    uint32_t triangleCount = 0;
+};
+
 struct AsBuildState
 {
     // Instances that hang off the same node share a transform by construction.
@@ -64,8 +71,9 @@ struct AsBuildState
     // Grouping
     std::vector<int> instanceNode;
     std::map<GroupKey, size_t> groupOfKey;
-    std::vector<std::vector<uint32_t>> groups;
+    std::vector<std::vector<AsBuildGeometry>> groups;
     std::vector<bool> groupSkeletal;
+    std::vector<uint64_t> groupTriangleCount;
     size_t groupCursor = 0;
 
     // One BLAS per distinct geometry, shared by every group that holds the same.
@@ -207,16 +215,34 @@ void MetalAccelStructure::uploadEmissiveMeshLights()
     for (size_t emittedId = 0; emittedId < mEmittedInstances.size(); ++emittedId)
     {
         const EmittedInstance& emitted = mEmittedInstances[emittedId];
-        for (size_t geometryId = 0; geometryId < emitted.geometrySceneInstanceIds.size(); ++geometryId)
+        for (size_t geometryId = 0; geometryId < emitted.geometries.size(); ++geometryId)
         {
-            const uint32_t sceneInstanceId = emitted.geometrySceneInstanceIds[geometryId];
+            const EmittedInstance::Geometry& geometry = emitted.geometries[geometryId];
+            const uint32_t sceneInstanceId = geometry.sceneInstanceId;
             if (sceneInstanceId >= mSceneEmissiveInputs.size())
             {
                 continue;
             }
-            render::EmissiveMeshBuildInput input = mSceneEmissiveInputs[sceneInstanceId];
+            const render::EmissiveMeshBuildInput& source = mSceneEmissiveInputs[sceneInstanceId];
+            render::EmissiveMeshBuildInput input;
             input.instanceId = static_cast<uint32_t>(emittedId);
             input.geometryId = static_cast<uint32_t>(geometryId);
+            input.vertexOffset = source.vertexOffset;
+            input.indexOffset = source.indexOffset + geometry.firstTriangle * 3u;
+            input.materialId = source.materialId;
+            if (!source.trianglePowers.empty())
+            {
+                const size_t first = geometry.firstTriangle;
+                const size_t count = geometry.triangleCount;
+                if (first + count > source.trianglePowers.size())
+                {
+                    STRELKA_ERROR("Emissive BLAS partition [{}..{}) exceeds its {} triangle source", first,
+                                  first + count, source.trianglePowers.size());
+                    continue;
+                }
+                input.trianglePowers.assign(source.trianglePowers.begin() + static_cast<std::ptrdiff_t>(first),
+                                            source.trianglePowers.begin() + static_cast<std::ptrdiff_t>(first + count));
+            }
             inputs.push_back(std::move(input));
         }
     }
@@ -251,23 +277,57 @@ void MetalAccelStructure::rebuildEmissiveMeshLights()
 }
 
 
-size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstanceIds, bool skeletal)
+size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geometries, bool skeletal)
 {
     const std::vector<oka::Instance>& instances = mScene->getInstances();
     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
+
+    // Validate the whole group before appending GeometryEntry rows. In addition
+    // to protecting malformed scene data, this keeps a partially prepared mesh
+    // table from becoming an out-of-bounds pointer read if a staged build ever
+    // regresses again.
+    for (const AsBuildGeometry& geometry : geometries)
+    {
+        if (geometry.sceneInstanceId >= instances.size())
+        {
+            STRELKA_ERROR("Cannot build BLAS: scene instance {} is outside the {} instance table",
+                          geometry.sceneInstanceId, instances.size());
+            return ~size_t{ 0 };
+        }
+        const oka::Instance& inst = instances[geometry.sceneInstanceId];
+        const uint32_t meshId = inst.mMeshId;
+        if (meshId >= meshes.size() || meshId >= mGeometry->meshes().size() || mGeometry->meshes()[meshId] == nullptr)
+        {
+            STRELKA_ERROR("Cannot build BLAS for scene instance {}: mesh {} is not prepared (scene {}, Metal {})",
+                          geometry.sceneInstanceId, meshId, meshes.size(), mGeometry->meshes().size());
+            return ~size_t{ 0 };
+        }
+        const uint64_t meshTriangleCount = meshes[meshId].mCount / 3u;
+        if (geometry.triangleCount == 0u ||
+            static_cast<uint64_t>(geometry.firstTriangle) + geometry.triangleCount > meshTriangleCount)
+        {
+            STRELKA_ERROR("Cannot build BLAS for mesh {}: triangle range [{}..{}) exceeds {} triangles", meshId,
+                          geometry.firstTriangle,
+                          static_cast<uint64_t>(geometry.firstTriangle) + geometry.triangleCount, meshTriangleCount);
+            return ~size_t{ 0 };
+        }
+    }
 
     Blas blas;
     blas.mIsSkeletal = skeletal;
     blas.mGeometryBase = (uint32_t)mGeometry->geometryEntries().size();
 
     std::vector<const NS::Object*> geomDescriptors;
-    geomDescriptors.reserve(sceneInstanceIds.size());
+    geomDescriptors.reserve(geometries.size());
 
-    for (const uint32_t instId : sceneInstanceIds)
+    for (const AsBuildGeometry& geometry : geometries)
     {
-        const oka::Instance& inst = instances[instId];
+        const oka::Instance& inst = instances[geometry.sceneInstanceId];
         const uint32_t meshId = inst.mMeshId;
-        const oka::Mesh& mesh = meshes[meshId];
+        oka::Mesh mesh = meshes[meshId];
+        mesh.mIndex += geometry.firstTriangle * 3u;
+        mesh.mCount = geometry.triangleCount * 3u;
+        mesh.mStaticBlasPartitions.clear();
         const MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
         const bool materialNeedsTangent = inst.mMaterialId < mMaterials->needsAuthoredTangent().size() &&
                                           mMaterials->needsAuthoredTangent()[inst.mMaterialId] != 0u;
@@ -279,7 +339,7 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         if (usePrimitiveSurfaceData)
         {
             ++mPrimitiveSurfaceGeometryCount;
-            mPrimitiveSurfaceTriangleCount += meshData->mTriangleCount;
+            mPrimitiveSurfaceTriangleCount += geometry.triangleCount;
         }
 
         static const bool forceAllOpaque = envFlag("STRELKA_ALL_GEOM_OPAQUE");
@@ -291,11 +351,11 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
         if (skeletal && mBuildMotionBlas)
         {
             geom = mPath->makeMotionTriangleGeometry(
-                mDevice, mGeometry, mesh, meshData->mTriangleCount, blas.mMotionVertexRangeBuffers);
+                mDevice, mGeometry, mesh, geometry.triangleCount, blas.mMotionVertexRangeBuffers);
         }
         else
         {
-            geom = mPath->makeTriangleGeometry(mGeometry, mesh, meshData->mTriangleCount, usePrimitiveSurfaceData);
+            geom = mPath->makeTriangleGeometry(mGeometry, mesh, geometry.triangleCount, usePrimitiveSurfaceData);
         }
         static const bool leaveDefault = envFlag("STRELKA_NO_SET_OPAQUE");
         if (!leaveDefault)
@@ -348,7 +408,10 @@ size_t MetalAccelStructure::buildBlas(const std::vector<uint32_t>& sceneInstance
     }
 
     mBlasList.push_back(blas);
-    mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    if (blas.mAs)
+    {
+        mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    }
     return mBlasList.size() - 1;
 }
 
@@ -397,7 +460,10 @@ size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
     geom->release();
 
     mBlasList.push_back(blas);
-    mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    if (blas.mAs)
+    {
+        mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    }
     return mBlasList.size() - 1;
 }
 
@@ -426,7 +492,10 @@ size_t MetalAccelStructure::buildAnalyticLightBlas(uint32_t intersectionFunction
     descriptor->release();
     geom->release();
     mBlasList.push_back(blas);
-    mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    if (blas.mAs)
+    {
+        mPrimitiveAccelerationStructures.push_back(blas.mAs);
+    }
     return mBlasList.size() - 1;
 }
 
@@ -579,18 +648,18 @@ bool MetalAccelStructure::step(double budgetMs)
     if (st.phase == Phase::Meshes)
     {
         // Per-mesh records survive a rebuild of the structures that reference them.
-        if (mGeometry->meshes().empty())
+        // A budgeted initial build can yield with only a prefix prepared. Resume
+        // from that prefix instead of treating any non-empty table as complete.
+        st.meshCursor = std::max(st.meshCursor, mGeometry->meshes().size());
+        while (st.meshCursor < meshes.size())
         {
-            while (st.meshCursor < meshes.size())
+            mGeometry->createMeshData(mScene, st.meshCursor);
+            ++st.meshCursor;
+            if (outOfTime(st.meshCursor))
             {
-                mGeometry->createMeshData(mScene, st.meshCursor);
-                ++st.meshCursor;
-                if (outOfTime(st.meshCursor))
-                {
-                    chargePhase();
-                    report();
-                    return finish(false);
-                }
+                chargePhase();
+                report();
+                return finish(false);
             }
         }
         mMotionBlasBuilt = mBuildMotionBlas;
@@ -626,7 +695,9 @@ bool MetalAccelStructure::step(double budgetMs)
         // primitive, all with the same transform and heavily overlapping bounds, and
         // every ray that has to traverse deeply pays for the overlap. Instances that
         // hang off the same node share a transform by construction, so they can be
-        // merged into a single BLAS with one geometry per primitive.
+        // merged into a single BLAS with one geometry per primitive. Oversized static
+        // primitives arrive spatially partitioned by the loader; their ranges are
+        // expanded here and the triangle cap keeps them in sibling BLASes.
         st.instanceNode.assign(instances.size(), -1);
         const std::vector<Scene::Node>& nodes = mScene->getNodes();
         for (size_t n = 0; n < nodes.size(); ++n)
@@ -670,38 +741,65 @@ bool MetalAccelStructure::step(double budgetMs)
             // union -- and index a mesh that has nothing to do with it.
             if (curr.type == oka::Instance::Type::eMesh)
             {
-                const bool skeletal = meshes[curr.mMeshId].isSkeletal;
+                const oka::Mesh& mesh = meshes[curr.mMeshId];
+                const bool skeletal = mesh.isSkeletal;
                 const int nodeId = st.instanceNode[i];
                 const AsBuildState::GroupKey key{ nodeId >= 0 ? nodeId : -(int)i - 2, skeletal ? 1 : 0,
                                                   hashTransform(curr.transform) };
 
-                auto it = st.groupOfKey.find(key);
-                if (it == st.groupOfKey.end())
+                auto addGeometry = [&](uint32_t firstTriangle, uint32_t triangleCount) {
+                    const AsBuildGeometry geometry{ (uint32_t)i, firstTriangle, triangleCount };
+                    auto it = st.groupOfKey.find(key);
+                    bool append = it != st.groupOfKey.end();
+                    if (append)
+                    {
+                        const size_t group = it->second;
+                        // Component equality, not memcmp: glm::mat4 has no
+                        // unique object representation (padding / signalling
+                        // NaNs), and tidy flags the byte compare for that reason.
+                        const uint32_t representative = st.groups[group].front().sceneInstanceId;
+                        const bool sameTransform = instances[representative].transform == curr.transform;
+                        const bool withinGeometryLimit = st.groups[group].size() < kMaxGeometriesPerBlas;
+                        const bool withinTriangleLimit =
+                            skeletal || st.groupTriangleCount[group] + triangleCount <= Mesh::kMaxStaticBlasTriangles;
+                        append = sameTransform && withinGeometryLimit && withinTriangleLimit;
+                    }
+
+                    if (!append)
+                    {
+                        const size_t group = st.groups.size();
+                        if (it == st.groupOfKey.end())
+                        {
+                            st.groupOfKey.emplace(key, group);
+                        }
+                        else
+                        {
+                            // The key names the group currently being filled;
+                            // once it reaches either cap, later ranges continue
+                            // in a sibling BLAS with the same transform.
+                            it->second = group;
+                        }
+                        st.groups.push_back({ geometry });
+                        st.groupSkeletal.push_back(skeletal);
+                        st.groupTriangleCount.push_back(triangleCount);
+                        return;
+                    }
+
+                    const size_t group = it->second;
+                    st.groups[group].push_back(geometry);
+                    st.groupTriangleCount[group] += triangleCount;
+                };
+
+                if (mesh.mStaticBlasPartitions.empty())
                 {
-                    st.groupOfKey[key] = st.groups.size();
-                    st.groups.push_back({ (uint32_t)i });
-                    st.groupSkeletal.push_back(skeletal);
-                }
-                // Merging is only valid while the members share a transform.
-                // Component equality, not memcmp: glm::mat4 has no unique object
-                // representation (padding / signalling NaNs), and tidy flags the
-                // byte compare for that reason.
-                else if (instances[st.groups[it->second].front()].transform == curr.transform &&
-                         st.groups[it->second].size() < kMaxGeometriesPerBlas)
-                {
-                    st.groups[it->second].push_back((uint32_t)i);
+                    addGeometry(0u, mesh.mCount / 3u);
                 }
                 else
                 {
-                    // A full group is closed rather than abandoned: the key now
-                    // names the group being filled, so the rest of the node's
-                    // primitives still merge with each other.
-                    if (st.groups[it->second].size() >= kMaxGeometriesPerBlas)
+                    for (const Mesh::StaticBlasPartition& partition : mesh.mStaticBlasPartitions)
                     {
-                        it->second = st.groups.size();
+                        addGeometry(partition.firstTriangle, partition.triangleCount);
                     }
-                    st.groups.push_back({ (uint32_t)i });
-                    st.groupSkeletal.push_back(skeletal);
                 }
             }
             if (outOfTime(st.groupCursor))
@@ -729,9 +827,10 @@ bool MetalAccelStructure::step(double budgetMs)
         // would be 38 000 structures over the same 50 meshes, which is both the build
         // time and the memory of a scene 700 times larger than the one authored.
         //
-        // The signature is (mesh, material) per geometry rather than mesh alone,
-        // because the material is baked into the shared geometry entries -- two
-        // instances of the same mesh with different materials are not the same BLAS.
+        // The signature is (mesh, material, triangle range) per geometry rather
+        // than mesh alone, because the material and range are baked into the shared
+        // geometry entries -- two instances of the same mesh with different
+        // materials are not the same BLAS.
         // Skeletal groups are excluded: their vertices are rewritten per frame and
         // the structure refit alongside, so sharing one would mean two instances
         // deforming the same geometry.
@@ -739,10 +838,12 @@ bool MetalAccelStructure::step(double budgetMs)
         {
             const size_t g = st.blasCursor++;
             std::vector<uint64_t> signature;
-            signature.reserve(st.groups[g].size());
-            for (const uint32_t id : st.groups[g])
+            signature.reserve(st.groups[g].size() * 2u);
+            for (const AsBuildGeometry& geometry : st.groups[g])
             {
-                signature.push_back(((uint64_t)instances[id].mMeshId << 32) | instances[id].mMaterialId);
+                const Instance& instance = instances[geometry.sceneInstanceId];
+                signature.push_back(((uint64_t)instance.mMeshId << 32) | instance.mMaterialId);
+                signature.push_back(((uint64_t)geometry.firstTriangle << 32) | geometry.triangleCount);
             }
 
             size_t blasIdx = 0;
@@ -763,8 +864,25 @@ bool MetalAccelStructure::step(double budgetMs)
                 }
             }
 
+            if (blasIdx >= mBlasList.size() || !mBlasList[blasIdx].mAs)
+            {
+                if (built)
+                {
+                    STRELKA_ERROR("Skipping a {} triangle {} group whose BLAS could not be built",
+                                  st.groupTriangleCount[g], st.groupSkeletal[g] ? "skeletal" : "static");
+                }
+                if (outOfTime(st.blasCursor, built))
+                {
+                    flushAccelerationStructureGroup();
+                    chargePhase();
+                    report();
+                    return finish(false);
+                }
+                continue;
+            }
+
             EmittedInstance emitted{};
-            emitted.sceneInstanceId = st.groups[g].front();
+            emitted.sceneInstanceId = st.groups[g].front().sceneInstanceId;
             emitted.asIndex = (uint32_t)blasIdx;
             emitted.userID = mBlasList[blasIdx].mGeometryBase;
             // The boundary of a participating medium gets its own mask: shadow
@@ -772,11 +890,15 @@ bool MetalAccelStructure::step(double budgetMs)
             // encloses. Groups are keyed by node, so a gizmo -- one object, one
             // material -- is never merged with anything else, and reading the
             // first member's material is reading the group's.
-            const uint32_t groupMaterial = instances[st.groups[g].front()].mMaterialId;
+            const uint32_t groupMaterial = instances[st.groups[g].front().sceneInstanceId].mMaterialId;
             const bool isMediumBoundary = groupMaterial < mMaterials->isMediumBoundary().size() &&
                                           mMaterials->isMediumBoundary()[groupMaterial] != 0u;
             emitted.mask = isMediumBoundary ? GEOMETRY_MASK_MEDIUM : GEOMETRY_MASK_TRIANGLE;
-            emitted.geometrySceneInstanceIds = st.groups[g];
+            emitted.geometries.reserve(st.groups[g].size());
+            for (const AsBuildGeometry& geometry : st.groups[g])
+            {
+                emitted.geometries.push_back({ geometry.sceneInstanceId, geometry.firstTriangle, geometry.triangleCount });
+            }
 
             mEmittedInstances.push_back(emitted);
 
@@ -813,6 +935,10 @@ bool MetalAccelStructure::step(double budgetMs)
                         continue; // an empty set: warned about in buildCurveBuffers
                     }
                     it = st.curveBlasOfSet.emplace(curr.mCurveId, blasIdx).first;
+                }
+                if (it->second >= mBlasList.size() || !mBlasList[it->second].mAs)
+                {
+                    continue;
                 }
                 EmittedInstance emitted{};
                 emitted.sceneInstanceId = (uint32_t)i;
@@ -861,10 +987,15 @@ bool MetalAccelStructure::step(double budgetMs)
                     auto it = st.lightBlasOfMesh.find(curr.mMeshId);
                     if (it == st.lightBlasOfMesh.end())
                     {
-                        const size_t index = buildBlas({ (uint32_t)i }, meshes[curr.mMeshId].isSkeletal);
+                        const Mesh& mesh = meshes[curr.mMeshId];
+                        const size_t index = buildBlas({ { (uint32_t)i, 0u, mesh.mCount / 3u } }, mesh.isSkeletal);
                         it = st.lightBlasOfMesh.emplace(curr.mMeshId, index).first;
                     }
                     blasIdx = it->second;
+                }
+                if (blasIdx >= mBlasList.size() || !mBlasList[blasIdx].mAs)
+                {
+                    continue;
                 }
                 EmittedInstance emitted{};
                 emitted.sceneInstanceId = (uint32_t)i;

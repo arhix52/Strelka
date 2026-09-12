@@ -286,6 +286,13 @@ public:
         // NOLINTNEXTLINE(misc-const-correctness)
         MTL::Buffer* const scratchBuffer =
             mDevice->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate);
+        if (!scratchBuffer)
+        {
+            STRELKA_ERROR("Acceleration structure scratch allocation failed: {:.2f} GB requested",
+                          accelSizes.buildScratchBufferSize / 1e9);
+            accelerationStructure->release();
+            return nullptr;
+        }
         static const uint32_t kGroupSize = std::max(1u, envUint("STRELKA_AS_GROUP", 1));
         if (!mAsGroupCommandBuffer)
         {

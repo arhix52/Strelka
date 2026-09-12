@@ -128,8 +128,8 @@ float packedAnalyticLightSurfaceArea(const Scene::Light& light)
     }
     if (light.type == LIGHT_TYPE_SPHERE)
     {
-        return analyticEllipsoidSurfaceArea(glm::float3(light.points[0]), glm::float3(light.points[2]),
-                                             glm::float3(light.points[3]));
+        return analyticEllipsoidSurfaceArea(
+            glm::float3(light.points[0]), glm::float3(light.points[2]), glm::float3(light.points[3]));
     }
     return -1.0f;
 }
@@ -189,6 +189,9 @@ uint32_t Scene::acquireMeshSlot(Mesh*& mesh)
         mDelMesh.pop();
         mesh = &mMeshes[meshId];
     }
+    // A recycled slot may carry loader-only partition metadata (and skeletal
+    // state) from its previous mesh. Every creator below fills a fresh record.
+    *mesh = Mesh{};
     return meshId;
 }
 
@@ -872,14 +875,14 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // Controlled-falloff cutoff distance for area lights, read by
         // areaFalloff(); 0 (the default range) leaves the light unbounded.
         mLights[lightId].pad1 = desc.range;
-        lightHasSupport = affineSamplePointRangeIsFinite(
-                              glm::float3(mLights[lightId].points[0]),
-                              glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
-                              glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]), glm::float3(0.0f)) &&
-                          inverseFiniteCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
-                                                   glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0])) >
-                              0.0f &&
-                          glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f;
+        lightHasSupport =
+            affineSamplePointRangeIsFinite(glm::float3(mLights[lightId].points[0]),
+                                           glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
+                                           glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]),
+                                           glm::float3(0.0f)) &&
+            inverseFiniteCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
+                                     glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0])) > 0.0f &&
+            glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f;
     }
     else if (desc.type == LIGHT_TYPE_DISC)
     {
@@ -900,8 +903,8 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // compensated arithmetic -- the same per-ray recomputation the ellipsoid
         // representability check was. pad0 is written and never read for these
         // two types, so the answer travels in it.
-        mLights[lightId].pad0 = analyticDiscAreaPdf(glm::float3(mLights[lightId].points[2]),
-                                                    glm::float3(mLights[lightId].points[3]));
+        mLights[lightId].pad0 =
+            analyticDiscAreaPdf(glm::float3(mLights[lightId].points[2]), glm::float3(mLights[lightId].points[3]));
         // Controlled-falloff cutoff distance for area lights, read by
         // areaFalloff(); 0 (the default range) leaves the light unbounded.
         mLights[lightId].pad1 = desc.range;
@@ -947,8 +950,8 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // file from before the type was switched.
         const bool isProjector = desc.type == LIGHT_TYPE_PROJECTOR;
         const float iesSlot = isProjector ? -1.0f : packedRegisteredIndex(desc.iesProfile, mIesProfiles.size());
-        const float projectorSlot = isProjector ? packedRegisteredIndex(desc.projectorImage, mProjectorImages.size()) :
-                                                  -1.0f;
+        const float projectorSlot =
+            isProjector ? packedRegisteredIndex(desc.projectorImage, mProjectorImages.size()) : -1.0f;
         mLights[lightId].points[0] =
             glm::float4(desc.radius, iesSlot, projectorSlot, isProjector ? desc.projectorAspect : 0.0f);
         mLights[lightId].points[1] = localTransform * glm::float4(0.f, 0.f, 0.f, 1.f);
@@ -956,9 +959,9 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         const OrthonormalLightFrame profileFrame = transformedProfileFrame(localTransform);
         mLights[lightId].points[2] = glm::float4(profileFrame.x, 0.0f);
         mLights[lightId].points[3] = glm::float4(profileFrame.y, 0.0f);
-        const glm::float3 emissionAxis = needsProfileFrame ? profileFrame.emissionAxis :
-                                                           transformedDirectionOrZero(
-                                                               localTransform, glm::float3(0.0f, 0.0f, -1.0f));
+        const glm::float3 emissionAxis = needsProfileFrame ?
+                                             profileFrame.emissionAxis :
+                                             transformedDirectionOrZero(localTransform, glm::float3(0.0f, 0.0f, -1.0f));
         mLights[lightId].normal = glm::float4(emissionAxis, 0.0f);
         mLights[lightId].type = desc.type;
         // Spot: the outer cone. Projector: half of the horizontal field of view,
@@ -977,12 +980,10 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // The axes are the ones intersectAnalyticLightSurface() builds from the
         // radius, so this decides the same question the same way.
         const float softRadius = mLights[lightId].points[0].x;
-        const bool ellipsoidValid =
-            !punctualLightIsSoft(softRadius) ||
-            analyticEllipsoidIsRepresentable(glm::float3(mLights[lightId].points[1]),
-                                             glm::float3(softRadius, 0.0f, 0.0f),
-                                             glm::float3(0.0f, softRadius, 0.0f),
-                                             glm::float3(0.0f, 0.0f, softRadius));
+        const bool ellipsoidValid = !punctualLightIsSoft(softRadius) ||
+                                    analyticEllipsoidIsRepresentable(
+                                        glm::float3(mLights[lightId].points[1]), glm::float3(softRadius, 0.0f, 0.0f),
+                                        glm::float3(0.0f, softRadius, 0.0f), glm::float3(0.0f, 0.0f, softRadius));
         lightHasSupport = positionValid && ellipsoidValid &&
                           (!needsEmissionAxis || glm::dot(emissionAxis, emissionAxis) > 0.0f) &&
                           (!needsProfileFrame || profileFrame.valid);
@@ -1012,11 +1013,11 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     glm::float3 radiometric(0.0f);
     if (enabledAndSupported)
     {
-        radiometric = desc.intensityUnit == LIGHT_UNIT_POWER && surfaceArea >= 0.0f ?
-                          bakeAreaLightPower(desc.color, desc.intensity, surfaceArea) :
-                          bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width,
-                                               desc.height, desc.radius, desc.halfAngle, desc.outerConeAngle,
-                                               desc.projectorAspect);
+        radiometric =
+            desc.intensityUnit == LIGHT_UNIT_POWER && surfaceArea >= 0.0f ?
+                bakeAreaLightPower(desc.color, desc.intensity, surfaceArea) :
+                bakeLightRadiometric(desc.type, desc.intensityUnit, desc.color, desc.intensity, desc.width, desc.height,
+                                     desc.radius, desc.halfAngle, desc.outerConeAngle, desc.projectorAspect);
     }
     if (!packedLightIsFinite(mLights[lightId]) || !finiteNonnegativeColor(radiometric))
     {
@@ -1028,10 +1029,10 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     // Finite light intersections are evaluated against their exact analytic
     // geometry in every renderer. Keep visibility beside the packed shape so
     // the manual intersection path has camera-hidden semantics without a proxy.
-    mLights[lightId].normal.w =
-        enabledAndSupported ? float(STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT |
-                                    (desc.visibleToCamera ? STRELKA_ANALYTIC_LIGHT_CAMERA_BIT : 0u)) :
-                              0.0f;
+    mLights[lightId].normal.w = enabledAndSupported ?
+                                    float(STRELKA_ANALYTIC_LIGHT_SECONDARY_BIT |
+                                          (desc.visibleToCamera ? STRELKA_ANALYTIC_LIGHT_CAMERA_BIT : 0u)) :
+                                    0.0f;
     markChanged(ChangeBits::Lights);
 }
 

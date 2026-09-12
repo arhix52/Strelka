@@ -11,8 +11,10 @@ set(SCENELOADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/light_json.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/material_sidecar.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/materialx_loader.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/sceneloader/static_blas_partition.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/materialx_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gltfloader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/static_blas_partition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sceneserializer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/iesloader.cpp
 )
