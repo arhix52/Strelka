@@ -909,7 +909,8 @@ void MetalRender::init()
     static_assert(
         sizeof(SharcUpdateState) == 168, "SHARC update state is sparse and must stay ABI-compatible with Metal");
     static_assert(sizeof(ShadowRay) == 68, "ShadowRay host/Metal ABI changed");
-    static_assert(sizeof(CompactShadowRay) == 52, "CompactShadowRay host/Metal ABI changed");
+    static_assert(sizeof(CompactShadowTraversal) == 32, "Compact shadow traversal host/Metal ABI changed");
+    static_assert(sizeof(CompactShadowContribution) == 16, "Compact shadow contribution host/Metal ABI changed");
     // The hot record stays at 24 bytes despite carrying the TLAS instance: its
     // 8-byte-aligned barycentrics come first, leaving no internal/tail padding.
     static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");

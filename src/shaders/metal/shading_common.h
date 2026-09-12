@@ -67,6 +67,10 @@ constant bool kFcAllAnalyticLightsRect [[function_constant(26)]];
 constant bool kFcUniformRectLightSampling [[function_constant(27)]];
 constant bool kFcSplitBaseNee [[function_constant(28)]];
 constant bool kFcStochasticAlphaVisibility [[function_constant(29)]];
+// Offline compiler probe for attributing extend's register peak. Production
+// always sets this true; disabling it without a replacement preparation pass
+// would leave the shade payload undefined.
+constant bool kFcPrepareSurfaceGeometryInExtend [[function_constant(30)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_STOCHASTIC_ALPHA_VISIBILITY =
@@ -118,6 +122,8 @@ constant bool SPEC_ALL_ANALYTIC_LIGHTS_RECT =
 constant bool SPEC_UNIFORM_RECT_LIGHT_SAMPLING =
     is_function_constant_defined(kFcUniformRectLightSampling) ? kFcUniformRectLightSampling : false;
 constant bool SPEC_SPLIT_BASE_NEE = is_function_constant_defined(kFcSplitBaseNee) ? kFcSplitBaseNee : false;
+constant bool SPEC_PREPARE_SURFACE_GEOMETRY_IN_EXTEND =
+    is_function_constant_defined(kFcPrepareSurfaceGeometryInExtend) ? kFcPrepareSurfaceGeometryInExtend : true;
 
 __attribute__((always_inline)) float3 transformDirection(float3 p, float3 axisX, float3 axisY, float3 axisZ)
 {

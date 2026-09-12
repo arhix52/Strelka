@@ -2123,6 +2123,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&splitBaseNee, MTL::DataTypeBool, (NS::UInteger)28);
     const bool stochasticAlphaVisibility = !envFlag("STRELKA_DETERMINISTIC_ALPHA_VISIBILITY");
     values->setConstantValue(&stochasticAlphaVisibility, MTL::DataTypeBool, (NS::UInteger)29);
+    const bool prepareSurfaceGeometryInExtend = true;
+    values->setConstantValue(&prepareSurfaceGeometryInExtend, MTL::DataTypeBool, (NS::UInteger)30);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };

@@ -689,8 +689,6 @@ static inline float unpackSurfaceTangentSign(uint32_t packedColor)
     return (packedColor & SURFACE_GEOMETRY_TANGENT_NEGATIVE) != 0u ? -1.0f : 1.0f;
 }
 
-#define SURFACE_GEOMETRY_PAYLOAD_ENABLED true
-
 template <typename R>
 static inline ExtendIntersection captureExtendIntersection(thread const R& r, float curveParameter, uint32_t instanceId)
 {
@@ -1116,7 +1114,11 @@ static inline device HitRecord* wavefrontHitRecord(device char* records, uint32_
     return (device HitRecord*)(records + size_t(index) * stride);
 }
 
-static inline void bucketPush(device atomic_uint* counter, device uint32_t* queueOut, uint32_t pathIndex)
+static inline void bucketPush(constant Uniforms& uniforms,
+                              device atomic_uint* counter,
+                              device uint32_t* queueOut,
+                              uint32_t pathIndex,
+                              uint32_t capacity)
 {
     const uint32_t rank = simd_prefix_exclusive_sum(1u);
     const uint32_t total = simd_sum(1u);
@@ -1124,46 +1126,37 @@ static inline void bucketPush(device atomic_uint* counter, device uint32_t* queu
     if (simd_is_first())
     {
         base = atomic_fetch_add_explicit(counter, total, memory_order_relaxed);
-    }
-    queueOut[simd_broadcast_first(base) + rank] = pathIndex;
-}
-
-// Bucket at the producer rather than scanning the completed hit queue. The
-// total count and each participating bucket cost one SIMD-coalesced atomic;
-// there is no sorting dispatch and no per-hit atomic.
-static inline void hitQueuePush(constant Uniforms& uniforms,
-                                device atomic_uint* totalCounter,
-                                device uint32_t* queue,
-                                uint32_t pathIndex,
-                                uint32_t capacity,
-                                uint32_t bucket)
-{
-    const uint32_t total = simd_sum(1u);
-    if (simd_is_first())
-    {
-        const uint32_t base = atomic_fetch_add_explicit(totalCounter, total, memory_order_relaxed);
         auditWork(uniforms, WORK_QUEUE_APPENDS, total);
         if (base >= capacity || total > capacity - base)
         {
             auditWork(uniforms, WORK_QUEUE_OVERFLOWS, base >= capacity ? total : total - (capacity - base));
         }
     }
+    queueOut[simd_broadcast_first(base) + rank] = pathIndex;
+}
 
+// Bucket at the producer rather than scanning the completed hit queue. Every
+// hit belongs to exactly one bucket, so their four counters are also the
+// total count. Avoid maintaining a redundant fifth counter in the hottest
+// producer; wavefrontPrepareHitMiss sums the four counters after traversal.
+static inline void hitQueuePush(
+    constant Uniforms& uniforms, device uint32_t* queue, uint32_t pathIndex, uint32_t capacity, uint32_t bucket)
+{
     device atomic_uint* counters = (device atomic_uint*)queue;
     device uint32_t* buckets = queue + WF_HIT_BUCKET_COUNT;
     switch (bucket)
     {
     case 0u:
-        bucketPush(&counters[0], buckets, pathIndex);
+        bucketPush(uniforms, &counters[0], buckets, pathIndex, capacity);
         break;
     case 1u:
-        bucketPush(&counters[1], buckets + capacity, pathIndex);
+        bucketPush(uniforms, &counters[1], buckets + capacity, pathIndex, capacity);
         break;
     case 2u:
-        bucketPush(&counters[2], buckets + 2u * capacity, pathIndex);
+        bucketPush(uniforms, &counters[2], buckets + 2u * capacity, pathIndex, capacity);
         break;
     default:
-        bucketPush(&counters[3], buckets + 3u * capacity, pathIndex);
+        bucketPush(uniforms, &counters[3], buckets + 3u * capacity, pathIndex, capacity);
         break;
     }
 }
@@ -1217,7 +1210,6 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
                                        device char* hits,
                                        uint32_t tid,
                                        device uint32_t* hitQueue,
-                                       device atomic_uint* hitCounter,
                                        device uint32_t* missQueue,
                                        device atomic_uint* missCounter,
                                        device const uint32_t* control,
@@ -1240,7 +1232,7 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
     rec.distance = hit.distance;
     *wavefrontHitRecord(hits, tid) = rec;
     const uint32_t bucket = forceTail ? WF_SHADE_TAIL : shadeBucket;
-    hitQueuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY], bucket);
+    hitQueuePush(uniforms, hitQueue, tid, control[WF_CTRL_CAPACITY], bucket);
 }
 
 // Compact only dense subsurface paths. Normal paths stay in the original queue:
@@ -1316,7 +1308,6 @@ static void sssWalkImpl(uint gid,
                         device const uint32_t* sssControl,
                         device char* hits,
                         device uint32_t* hitQueue,
-                        device atomic_uint* hitCounter,
                         device uint32_t* missQueue,
                         device atomic_uint* missCounter,
                         device uint32_t* queueOut,
@@ -1407,7 +1398,7 @@ static void sssWalkImpl(uint gid,
             {
                 geometryEntryIndex = instances[hit.instanceId].userID + hit.geometryId;
             }
-            enqueueExtendSurfaceResult(uniforms, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control,
+            enqueueExtendSurfaceResult(uniforms, hit, hits, tid, hitQueue, missQueue, missCounter, control,
                                        geometryEntryIndex, WF_SHADE_TAIL, true);
             return;
         }
@@ -1462,8 +1453,8 @@ static void sssWalkImpl(uint gid,
                      device const GeometryEntry* geometryEntries [[buffer(19)]])                                       \
     {                                                                                                                  \
         sssWalkImpl<TRAITS>(gid, uniforms, instances, volumeAccelerationStructure, rays, paths, mediumPaths,           \
-                            materials, sampleIdx, sssQueue, sssControl, hits, hitQueue, hitCounter, missQueue,         \
-                            missCounter, queueOut, outCounter, control, rayMask, geometryEntries);                     \
+                            materials, sampleIdx, sssQueue, sssControl, hits, hitQueue, missQueue, missCounter,        \
+                            queueOut, outCounter, control, rayMask, geometryEntries);                                  \
     }
 
 WF_SSS_WALK_ENTRY(wavefrontSssWalk, MotionTraversal)
@@ -1484,7 +1475,7 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
                                  GeometryEntry entry,
                                  bool isLight)
 {
-    if (!SURFACE_GEOMETRY_PAYLOAD_ENABLED)
+    if (!SPEC_PREPARE_SURFACE_GEOMETRY_IN_EXTEND)
     {
         return false;
     }
@@ -1621,7 +1612,6 @@ static void extendImpl(uint gid,
                        device const uint32_t* queue,
                        device const uint32_t* control,
                        device uint32_t* hitQueue,
-                       device atomic_uint* hitCounter,
                        device uint32_t* missQueue,
                        device atomic_uint* missCounter,
                        // Only for the fog: the path's depth decorrelates the free-flight draw
@@ -1841,7 +1831,7 @@ static void extendImpl(uint gid,
         mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
         mediumRec.distance = mediumScatterT;
         *wavefrontHitRecord(hits, tid) = mediumRec;
-        hitQueuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY], 3u);
+        hitQueuePush(uniforms, hitQueue, tid, control[WF_CTRL_CAPACITY], 3u);
         return;
     }
 
@@ -1872,8 +1862,8 @@ static void extendImpl(uint gid,
     const bool hasSurfaceGeometry =
         storeSurfaceGeometry(uniforms, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, hit, tid,
                              pathFlags, motionTime, r.direction, geometryEntryIndex, entry, isLight);
-    enqueueExtendSurfaceResult(uniforms, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control,
-                               geometryEntryIndex, shadeBucket, !hasSurfaceGeometry);
+    enqueueExtendSurfaceResult(uniforms, hit, hits, tid, hitQueue, missQueue, missCounter, control, geometryEntryIndex,
+                               shadeBucket, SPEC_PREPARE_SURFACE_GEOMETRY_IN_EXTEND && !hasSurfaceGeometry);
 }
 
 
@@ -1895,9 +1885,9 @@ static void extendImpl(uint gid,
         constant uint32_t& directGeometryBase [[buffer(24)]], constant uint32_t& directInstanceIndex [[buffer(25)]])    \
     {                                                                                                                   \
         extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure,  \
-                           rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths,  \
-                           materials, mediumPaths, geometryEntries, functionTable, vertexBuffer, prevVertexBuffer,      \
-                           indexBuffer, lights, directGeometryBase, directInstanceIndex, rayMask);                      \
+                           rays, hits, sampleIdx, queue, control, hitQueue, missQueue, missCounter, paths, materials,   \
+                           mediumPaths, geometryEntries, functionTable, vertexBuffer, prevVertexBuffer, indexBuffer,    \
+                           lights, directGeometryBase, directInstanceIndex, rayMask);                                   \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -1934,11 +1924,10 @@ kernel void wavefrontExtendDirectStatic(uint gid [[thread_position_in_grid]],
                                         constant uint32_t& directGeometryBase [[buffer(24)]],
                                         constant uint32_t& directInstanceIndex [[buffer(25)]])
 {
-    extendImpl<DirectStaticTraversal>(gid + queueOffset, uniforms, instances, accelerationStructure,
-                                      volumeAccelerationStructure, rays, hits, sampleIdx, queue, control, hitQueue,
-                                      hitCounter, missQueue, missCounter, paths, materials, mediumPaths,
-                                      geometryEntries, 0u, vertexBuffer, prevVertexBuffer, indexBuffer, lights,
-                                      directGeometryBase, directInstanceIndex, rayMask);
+    extendImpl<DirectStaticTraversal>(
+        gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, rays, hits,
+        sampleIdx, queue, control, hitQueue, missQueue, missCounter, paths, materials, mediumPaths, geometryEntries, 0u,
+        vertexBuffer, prevVertexBuffer, indexBuffer, lights, directGeometryBase, directInstanceIndex, rayMask);
 }
 
 // Rebuild the triangle's vertex attributes from the vertex buffer.
@@ -2990,42 +2979,90 @@ static inline uint32_t allocateShadowSlot(device atomic_uint* shadowCounter)
     return base + rank;
 }
 
-static inline void storeShadowRay(device char* data, uint32_t index, thread const ShadowRay& ray)
+static inline void storeShadowRay(device char* data, uint32_t index, uint32_t capacity, thread const ShadowRay& ray)
 {
     if (SPEC_SHARC_UPDATE || SPEC_RESTIR || SPEC_RENDER_WORK_AUDIT)
     {
         ((device ShadowRay*)data)[index] = ray;
         return;
     }
-    CompactShadowRay compact;
-    compact.origin = ray.origin;
-    compact.direction = ray.direction;
-    compact.weight = ray.weight;
-    compact.maxDistance = ray.maxDistance;
-    compact.pixelIndex = ray.pixelIndex;
-    compact.alphaThreshold = ray.alphaThreshold;
-    compact.medium = ray.medium;
-    ((device CompactShadowRay*)data)[index] = compact;
+    device CompactShadowTraversal* traversal = (device CompactShadowTraversal*)data;
+    device CompactShadowContribution* contribution =
+        (device CompactShadowContribution*)(data + sizeof(CompactShadowTraversal) * capacity);
+    CompactShadowTraversal compactTraversal;
+    compactTraversal.origin = ray.origin;
+    compactTraversal.direction = ray.direction;
+    compactTraversal.maxDistance = ray.maxDistance;
+    compactTraversal.alphaThreshold = ray.alphaThreshold;
+    traversal[index] = compactTraversal;
+    CompactShadowContribution compactContribution;
+    compactContribution.weight = ray.weight;
+    compactContribution.pixelIndex = ray.pixelIndex;
+    contribution[index] = compactContribution;
+    if (SPEC_SSS)
+    {
+        device uint32_t* media =
+            (device uint32_t*)(data + (sizeof(CompactShadowTraversal) + sizeof(CompactShadowContribution)) * capacity);
+        media[index] = ray.medium;
+    }
 }
 
-static inline ShadowRay loadShadowRay(device const char* data, uint32_t index)
+static inline CompactShadowTraversal loadShadowTraversal(device const char* data, uint32_t index)
 {
     if (SPEC_SHARC_UPDATE || SPEC_RESTIR || SPEC_RENDER_WORK_AUDIT)
     {
-        return ((device const ShadowRay*)data)[index];
+        const device ShadowRay& ray = ((device const ShadowRay*)data)[index];
+        CompactShadowTraversal traversal;
+        traversal.origin = ray.origin;
+        traversal.direction = ray.direction;
+        traversal.maxDistance = ray.maxDistance;
+        traversal.alphaThreshold = ray.alphaThreshold;
+        return traversal;
     }
-    const CompactShadowRay compact = ((device const CompactShadowRay*)data)[index];
-    ShadowRay ray;
-    ray.origin = compact.origin;
-    ray.direction = compact.direction;
-    ray.weight = compact.weight;
-    ray.maxDistance = compact.maxDistance;
-    ray.pixelIndex = compact.pixelIndex;
-    ray.alphaThreshold = compact.alphaThreshold;
-    ray.medium = compact.medium;
-    ray.sharcRadiance = packed_float3(float3(0.0f));
-    ray.sharcPathIndex = compact.pixelIndex;
-    return ray;
+    return ((device const CompactShadowTraversal*)data)[index];
+}
+
+static inline CompactShadowContribution loadShadowContribution(device const char* data, uint32_t index, uint32_t capacity)
+{
+    if (SPEC_SHARC_UPDATE || SPEC_RESTIR || SPEC_RENDER_WORK_AUDIT)
+    {
+        const device ShadowRay& ray = ((device const ShadowRay*)data)[index];
+        CompactShadowContribution contribution;
+        contribution.weight = ray.weight;
+        contribution.pixelIndex = ray.pixelIndex;
+        return contribution;
+    }
+    const device char* contributionBase = data + sizeof(CompactShadowTraversal) * capacity;
+    return ((device const CompactShadowContribution*)contributionBase)[index];
+}
+
+static inline uint32_t loadShadowMedium(device const char* data, uint32_t index, uint32_t capacity)
+{
+    if (SPEC_SHARC_UPDATE || SPEC_RESTIR || SPEC_RENDER_WORK_AUDIT)
+    {
+        return ((device const ShadowRay*)data)[index].medium;
+    }
+    const device char* mediumBase =
+        data + (sizeof(CompactShadowTraversal) + sizeof(CompactShadowContribution)) * capacity;
+    return ((device const uint32_t*)mediumBase)[index];
+}
+
+static inline uint32_t loadShadowPathIndex(device const char* data, uint32_t index, uint32_t pixelIndex)
+{
+    if (SPEC_SHARC_UPDATE || SPEC_RESTIR || SPEC_RENDER_WORK_AUDIT)
+    {
+        return ((device const ShadowRay*)data)[index].sharcPathIndex;
+    }
+    return pixelIndex;
+}
+
+static inline float3 loadShadowSharcRadiance(device const char* data, uint32_t index)
+{
+    if (SPEC_SHARC_UPDATE)
+    {
+        return float3(((device const ShadowRay*)data)[index].sharcRadiance);
+    }
+    return float3(0.0f);
 }
 
 static inline BaseLightConnectionPayload packBaseLightConnection(thread const LightConnection& connection)
@@ -3375,7 +3412,7 @@ static inline void wavefrontShadeImpl(uint gid,
                     sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
                     const uint32_t slot = allocateShadowSlot(shadowCounter);
                     auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
-                    storeShadowRay(shadowRays, slot, sr);
+                    storeShadowRay(shadowRays, slot, uniforms.width * uniforms.height, sr);
                 }
             }
             else if (conn.needsRay)
@@ -3528,7 +3565,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.alphaThreshold = random<SampleDimension::eShadowRR>(wrng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
-                        storeShadowRay(shadowRays, slot, sr);
+                        storeShadowRay(shadowRays, slot, uniforms.width * uniforms.height, sr);
                     }
                 }
                 else if (conn.needsRay)
@@ -3769,8 +3806,7 @@ static inline void wavefrontShadeImpl(uint gid,
         // to Tail. Consequently Base/Layer/Translucent can compile without the
         // vertex-fetch fallback and its peak live range; Tail retains the exact
         // path for fused SSS exits, curves and degenerate transforms.
-        if (!kHandlesSpecialHits ||
-            (SURFACE_GEOMETRY_PAYLOAD_ENABLED && (preparedGeometry.color & SURFACE_GEOMETRY_VALID) != 0u))
+        if (!kHandlesSpecialHits || (preparedGeometry.color & SURFACE_GEOMETRY_VALID) != 0u)
         {
             shadingNormal = unpackSurfaceNormal(preparedGeometry.shadingNormal);
             shadingGeomNormal = unpackSurfaceNormal(preparedGeometry.geometryNormal);
@@ -3986,7 +4022,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.alphaThreshold = random<SampleDimension::eShadowRR>(xrng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
-                        storeShadowRay(shadowRays, slot, sr);
+                        storeShadowRay(shadowRays, slot, uniforms.width * uniforms.height, sr);
                     }
                 }
             }
@@ -4732,7 +4768,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
-                        storeShadowRay(shadowRays, slot, sr);
+                        storeShadowRay(shadowRays, slot, uniforms.width * uniforms.height, sr);
                     }
                     else if (!any(weight != 0.0f))
                     {
@@ -5207,7 +5243,7 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
                         const uint32_t slot = allocateShadowSlot(shadowCounter);
                         auditWork(uniforms, WORK_NEE_SHADOW_APPENDS);
-                        storeShadowRay(shadowRays, slot, sr);
+                        storeShadowRay(shadowRays, slot, uniforms.width * uniforms.height, sr);
                     }
                     else if (!any(weight != 0.0f))
                     {
@@ -6178,7 +6214,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                         (updateVisibilityCache ? RESTIR_VISIBILITY_UPDATE_BIT : 0u);
     sr.alphaThreshold = random<SampleDimension::eShadowRR>(rng, uniforms.samplerType);
     const uint32_t slot = atomic_fetch_add_explicit(shadowCounter, 1u, memory_order_relaxed);
-    storeShadowRay(shadowRays, slot, sr);
+    storeShadowRay(shadowRays, slot, uniforms.width * uniforms.height, sr);
     auditWork(uniforms, WORK_RESTIR_FINAL_VISIBILITY_RAYS);
     if (selectedHistory)
         auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_RAYS);
@@ -6592,22 +6628,27 @@ kernel void wavefrontPrepareHitMiss(device uint32_t& controlRef [[buffer(0)]],
                                     device const uint32_t* hitQueue [[buffer(2)]])
 {
     device uint32_t* control = &controlRef;
-    const uint32_t h = min(control[WF_CTRL_HIT], control[WF_CTRL_CAPACITY]);
+    const uint32_t capacity = control[WF_CTRL_CAPACITY];
+    const uint32_t baseCount = min(hitQueue[0], capacity);
+    const uint32_t layerCount = min(hitQueue[1], capacity);
+    const uint32_t translucentCount = min(hitQueue[2], capacity);
+    const uint32_t tailCount = min(hitQueue[3], capacity);
+    const uint32_t h = min(baseCount + layerCount + translucentCount + tailCount, capacity);
     control[WF_CTRL_HIT_N] = h;
     control[WF_CTRL_HIT_DIS + 0] = (h + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_HIT_DIS + 1] = 1u;
     control[WF_CTRL_HIT_DIS + 2] = 1u;
 
-    const uint32_t base = min(hitQueue[0], h);
+    const uint32_t base = min(baseCount, h);
     control[WF_CTRL_SHADE_BASE_DIS + 0] = (base + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADE_BASE_DIS + 1] = 1u;
     control[WF_CTRL_SHADE_BASE_DIS + 2] = 1u;
-    const uint32_t layer = min(hitQueue[1], h - base);
+    const uint32_t layer = min(layerCount, h - base);
     control[WF_CTRL_SHADE_LAYER_START] = base;
     control[WF_CTRL_SHADE_LAYER_DIS + 0] = (layer + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADE_LAYER_DIS + 1] = 1u;
     control[WF_CTRL_SHADE_LAYER_DIS + 2] = 1u;
-    const uint32_t translucent = min(hitQueue[2], h - base - layer);
+    const uint32_t translucent = min(translucentCount, h - base - layer);
     control[WF_CTRL_SHADE_TRANSLUCENT_START] = base + layer;
     control[WF_CTRL_SHADE_TRANSLUCENT_DIS + 0] = (translucent + threadsPerGroup - 1u) / threadsPerGroup;
     control[WF_CTRL_SHADE_TRANSLUCENT_DIS + 1] = 1u;
@@ -6957,12 +6998,8 @@ static void shadowImpl(uint gid,
     {
         return;
     }
-    const ShadowRay sr = loadShadowRay(shadowRays, gid);
-    const bool restirHistoryRay =
-        SPEC_RENDER_WORK_AUDIT && bounce == 0u && (sr.sharcPathIndex & RESTIR_AUDIT_HISTORY_BIT) != 0u;
-    const bool restirVisibilityUpdate = bounce == 0u && uniforms.restirFinalVisibilityReuse != 0u &&
-                                        (sr.sharcPathIndex & RESTIR_VISIBILITY_UPDATE_BIT) != 0u;
-    const uint32_t sharcPathIndex = sr.sharcPathIndex & RESTIR_AUDIT_PATH_INDEX_MASK;
+    const uint32_t capacity = uniforms.width * uniforms.height;
+    const CompactShadowTraversal traversal = loadShadowTraversal(shadowRays, gid);
     auditWork(uniforms, WORK_SHADOW_RAYS_BASE + min(bounce, WORK_BOUNCE_SLOTS - 1u));
     // Opaque validation scenes issue exactly one hardware query per shadow ray.
     // Alpha restart walks may issue more and remain classified separately in
@@ -6970,8 +7007,8 @@ static void shadowImpl(uint gid,
     auditWork(uniforms, WORK_INTERSECTION_QUERIES);
 
     ray shadowRay;
-    shadowRay.origin = float3(sr.origin);
-    shadowRay.direction = float3(sr.direction);
+    shadowRay.origin = float3(traversal.origin);
+    shadowRay.direction = float3(traversal.direction);
     // Zero, because connectLight/connectEnvLight now offset the origin along the
     // face the ray leaves through. A world-space epsilon standing in for that
     // offset is the wrong shape for the problem -- too small at architectural
@@ -6980,12 +7017,14 @@ static void shadowImpl(uint gid,
     // asymmetry from the other side. OptiX runs its occlusion rays at
     // shadowRayTmin, which both apps seed to 0.
     shadowRay.min_distance = 0.0f;
-    shadowRay.max_distance = sr.maxDistance;
+    shadowRay.max_distance = traversal.maxDistance;
 
-    const float motionTime = motionTimeFor(uniforms, sr.pixelIndex, sampleIdx);
-    float3 weight = float3(sr.weight);
-    float3 sharcRadiance = float3(sr.sharcRadiance);
-
+    uint32_t motionPixelIndex = 0u;
+    if (SPEC_MOTION_BLUR)
+    {
+        motionPixelIndex = loadShadowContribution(shadowRays, gid, capacity).pixelIndex;
+    }
+    const float motionTime = motionTimeFor(uniforms, motionPixelIndex, sampleIdx);
     if (!SPEC_ALPHA)
     {
         // No cutouts in this scene: one any-hit trace, exactly as before.
@@ -6996,51 +7035,70 @@ static void shadowImpl(uint gid,
         const bool visible =
             T::trace(isect, shadowRay, accelerationStructure, RAY_MASK_SHADOW, motionTime, functionTable).type ==
             intersection_type::none;
-        if (restirVisibilityUpdate)
-            restirStoreFinalVisibility(uniforms, sr.pixelIndex, visible ? 1.0f : 0.0f);
-        if (visible)
+        if (!visible)
         {
-            // Geometry visibility and atmospheric transmittance are separate; surviving shadow rays still cross fog.
-            if (SPEC_FOG && uniforms.hasFog)
+            if (SPEC_RESTIR)
             {
-                const float tau = fogOpticalDepth(
-                    float3(sr.origin), float3(sr.direction), sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
-                const float fogTransmittance = exp(-tau);
-                weight *= fogTransmittance;
-                sharcRadiance *= fogTransmittance;
+                const CompactShadowContribution contribution = loadShadowContribution(shadowRays, gid, capacity);
+                const uint32_t pathIndex = loadShadowPathIndex(shadowRays, gid, contribution.pixelIndex);
+                const bool update = bounce == 0u && uniforms.restirFinalVisibilityReuse != 0u &&
+                                    (pathIndex & RESTIR_VISIBILITY_UPDATE_BIT) != 0u;
+                if (update)
+                    restirStoreFinalVisibility(uniforms, contribution.pixelIndex, 0.0f);
             }
-            if (SPEC_SSS && uniforms.hasBoundedMedium)
-            {
-                const float3 transmittance = mediumTransmittance<T>(
-                    accelerationStructure, uniforms, materials, geometryEntries, instances, float3(sr.origin),
-                    float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
-                weight *= transmittance;
-                sharcRadiance *= transmittance;
-            }
-            if (bounce == 0u)
-            {
-                restirDiagnosticVisibility(uniforms, sr.pixelIndex, weight);
-                if (restirHistoryRay)
-                    auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
-            }
-            radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
-            if (SPEC_SHARC_UPDATE)
-            {
-                const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sharcPathIndex);
-                const SharcUpdateState updateState = sharcUpdates[updateIndex];
-                sharcPropagate(updateState, sharcAccumulation, sharcRadiance, uniforms,
-                               (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u);
-            }
+            return;
+        }
+        // The contribution is a separate dense array for plain path tracing.
+        // Blocked rays never touch it, and its values do not span traversal.
+        const CompactShadowContribution contribution = loadShadowContribution(shadowRays, gid, capacity);
+        const uint32_t pathIndex = loadShadowPathIndex(shadowRays, gid, contribution.pixelIndex);
+        const bool restirHistoryRay =
+            SPEC_RENDER_WORK_AUDIT && bounce == 0u && (pathIndex & RESTIR_AUDIT_HISTORY_BIT) != 0u;
+        const bool restirVisibilityUpdate = SPEC_RESTIR && bounce == 0u && uniforms.restirFinalVisibilityReuse != 0u &&
+                                            (pathIndex & RESTIR_VISIBILITY_UPDATE_BIT) != 0u;
+        if (restirVisibilityUpdate)
+            restirStoreFinalVisibility(uniforms, contribution.pixelIndex, 1.0f);
+        float3 weight = float3(contribution.weight);
+        float3 sharcRadiance = loadShadowSharcRadiance(shadowRays, gid);
+        if (SPEC_FOG && uniforms.hasFog)
+        {
+            const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
+            const float tau = fogOpticalDepth(float3(visibleRay.origin), float3(visibleRay.direction),
+                                              visibleRay.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
+            const float fogTransmittance = exp(-tau);
+            weight *= fogTransmittance;
+            sharcRadiance *= fogTransmittance;
+        }
+        if (SPEC_SSS && uniforms.hasBoundedMedium)
+        {
+            const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
+            const float3 transmittance =
+                mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries, instances,
+                                       float3(visibleRay.origin), float3(visibleRay.direction), visibleRay.maxDistance,
+                                       loadShadowMedium(shadowRays, gid, capacity), motionTime);
+            weight *= transmittance;
+            sharcRadiance *= transmittance;
+        }
+        if (bounce == 0u)
+        {
+            restirDiagnosticVisibility(uniforms, contribution.pixelIndex, weight);
+            if (restirHistoryRay)
+                auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
+        }
+        radianceOut[contribution.pixelIndex] += float4(weight, 0.0f);
+        if (SPEC_SHARC_UPDATE)
+        {
+            const uint32_t sharcPathIndex = pathIndex & RESTIR_AUDIT_PATH_INDEX_MASK;
+            const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sharcPathIndex);
+            const SharcUpdateState updateState = sharcUpdates[updateIndex];
+            sharcPropagate(updateState, sharcAccumulation, sharcRadiance, uniforms,
+                           (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u);
         }
         return;
     }
 
     // Cutouts make occlusion a product rather than a predicate, so a plain
     // any-hit does not answer the question: the nearest hit may be a hole.
-    //
-    // Deterministic rather than stochastic: a MASK surface contributes 0 or 1
-    // exactly and a BLEND one its alpha, which is far quieter than rolling a
-    // second random number per shadow ray.
     //
     // The walk itself is in CutoutShadowWalk -- inline intersection_query where
     // the tags allow it, a bounded restart otherwise. See the note there for why
@@ -7051,14 +7109,21 @@ static void shadowImpl(uint gid,
     // reject at the first partially covered texel instead of visiting every
     // layer to evaluate their product. MASK materials remain exact because
     // their resolved opacity is either zero or one.
-    const float alphaCutoff =
-        SPEC_STOCHASTIC_ALPHA_VISIBILITY ? sr.alphaThreshold : sr.alphaThreshold * kShadowTransmittanceCutoff;
+    const float alphaCutoff = SPEC_STOCHASTIC_ALPHA_VISIBILITY ? traversal.alphaThreshold :
+                                                                 traversal.alphaThreshold * kShadowTransmittanceCutoff;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(uniforms, accelerationStructure, shadowRay, motionTime,
                                                         alphaCutoff, materials, geometryEntries, vertexBuffer,
                                                         indexBuffer, functionTable, transmittance))
     {
-        if (restirVisibilityUpdate)
-            restirStoreFinalVisibility(uniforms, sr.pixelIndex, 0.0f);
+        if (SPEC_RESTIR)
+        {
+            const CompactShadowContribution contribution = loadShadowContribution(shadowRays, gid, capacity);
+            const uint32_t pathIndex = loadShadowPathIndex(shadowRays, gid, contribution.pixelIndex);
+            const bool update = bounce == 0u && uniforms.restirFinalVisibilityReuse != 0u &&
+                                (pathIndex & RESTIR_VISIBILITY_UPDATE_BIT) != 0u;
+            if (update)
+                restirStoreFinalVisibility(uniforms, contribution.pixelIndex, 0.0f);
+        }
         return; // fully blocked
     }
     // The stochastic path returns binary visibility; its survival probability
@@ -7074,10 +7139,17 @@ static void shadowImpl(uint gid,
     {
         transmittance = kShadowTransmittanceCutoff;
     }
+    // Like the opaque path, defer the contribution payload until after the
+    // potentially long cutout walk. Most foliage rays terminate in traversal.
+    const CompactShadowContribution contribution = loadShadowContribution(shadowRays, gid, capacity);
+    const uint32_t pathIndex = loadShadowPathIndex(shadowRays, gid, contribution.pixelIndex);
+    const bool restirHistoryRay = SPEC_RENDER_WORK_AUDIT && bounce == 0u && (pathIndex & RESTIR_AUDIT_HISTORY_BIT) != 0u;
+    const bool restirVisibilityUpdate = SPEC_RESTIR && bounce == 0u && uniforms.restirFinalVisibilityReuse != 0u &&
+                                        (pathIndex & RESTIR_VISIBILITY_UPDATE_BIT) != 0u;
     if (restirVisibilityUpdate)
-        restirStoreFinalVisibility(uniforms, sr.pixelIndex, transmittance);
-    weight *= transmittance;
-    sharcRadiance *= transmittance;
+        restirStoreFinalVisibility(uniforms, contribution.pixelIndex, transmittance);
+    float3 weight = float3(contribution.weight) * transmittance;
+    float3 sharcRadiance = loadShadowSharcRadiance(shadowRays, gid) * transmittance;
     if (all(weight <= 1e-6f))
     {
         return;
@@ -7085,29 +7157,33 @@ static void shadowImpl(uint gid,
 
     if (SPEC_FOG && uniforms.hasFog)
     {
-        const float tau = fogOpticalDepth(
-            float3(sr.origin), float3(sr.direction), sr.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
+        const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
+        const float tau = fogOpticalDepth(float3(visibleRay.origin), float3(visibleRay.direction),
+                                          visibleRay.maxDistance, uniforms.fogHeight, uniforms.fogSigmaT);
         const float fogTransmittance = exp(-tau);
         weight *= fogTransmittance;
         sharcRadiance *= fogTransmittance;
     }
     if (SPEC_SSS && uniforms.hasBoundedMedium)
     {
+        const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
         const float3 mediumTr =
             mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries, instances,
-                                   float3(sr.origin), float3(sr.direction), sr.maxDistance, sr.medium, motionTime);
+                                   float3(visibleRay.origin), float3(visibleRay.direction), visibleRay.maxDistance,
+                                   loadShadowMedium(shadowRays, gid, capacity), motionTime);
         weight *= mediumTr;
         sharcRadiance *= mediumTr;
     }
     if (bounce == 0u)
     {
-        restirDiagnosticVisibility(uniforms, sr.pixelIndex, weight);
+        restirDiagnosticVisibility(uniforms, contribution.pixelIndex, weight);
         if (restirHistoryRay)
             auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
     }
-    radianceOut[sr.pixelIndex] += float4(weight, 0.0f);
+    radianceOut[contribution.pixelIndex] += float4(weight, 0.0f);
     if (SPEC_SHARC_UPDATE)
     {
+        const uint32_t sharcPathIndex = pathIndex & RESTIR_AUDIT_PATH_INDEX_MASK;
         const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, sharcPathIndex);
         const SharcUpdateState updateState = sharcUpdates[updateIndex];
         sharcPropagate(updateState, sharcAccumulation, sharcRadiance, uniforms,

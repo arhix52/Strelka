@@ -1076,17 +1076,21 @@ struct ShadowRay
 // Plain path tracing never consumes the SHARC payload or the ReSTIR visibility
 // flags. Its queue is dense, so omitting those four words saves both the shade
 // write and the shadow read rather than merely shrinking the allocation.
-struct CompactShadowRay
+struct CompactShadowTraversal
 {
     packed_float3 origin;
     packed_float3 direction;
-    packed_float3 weight;
     float maxDistance;
-    uint32_t pixelIndex;
     float alphaThreshold;
-    uint32_t medium;
 };
-static_assert(sizeof(CompactShadowRay) == 52, "CompactShadowRay ABI changed");
+static_assert(sizeof(CompactShadowTraversal) == 32, "Compact shadow traversal ABI changed");
+
+struct CompactShadowContribution
+{
+    packed_float3 weight;
+    uint32_t pixelIndex;
+};
+static_assert(sizeof(CompactShadowContribution) == 16, "Compact shadow contribution ABI changed");
 
 // EnvAliasEntry is shared by Metal, OptiX and host tests.
 #include <env_alias_sampling.h>

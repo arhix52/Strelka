@@ -7,10 +7,13 @@ Xcode's shader profiler shows, minus the capture and the replay.
 
   tools/metal_regs.py build/Release/metal/shaders/wavefront.metallib wavefrontShade \
       -c 0=1 -c 1=1 -c 11=1 -c 17=1 -c 23=1
+  tools/metal_regs.py --trace capture.gputrace wavefrontExtendStatic \
+      --lib build/Release/metal/shaders/wavefront.metallib --dwarf 20
 
 Constants are function-constant index (or name) = value, bool unless -t is given.
 """
-import argparse, glob, json, os, struct, subprocess, tempfile, zlib
+import argparse, glob, json, os, re, struct, subprocess, tempfile, zlib
+from collections import defaultdict
 
 # ponytail: slot numbers are AGCCodeGenerator.ShaderInfo field order, read off the
 # flatbuffer schema embedded in libapplegpu-nt.dylib. A toolchain that renumbers them
@@ -110,12 +113,103 @@ def read_stats(md):
     return out
 
 
+def source_hotspots(line_dump, text_size):
+    directories = {}
+    files = {}
+    for match in re.finditer(r'include_directories\[\s*(\d+)\]\s*=\s*"(.*)"', line_dump):
+        directories[int(match.group(1))] = match.group(2)
+    current_file = None
+    current_name = None
+    for line in line_dump.splitlines():
+        match = re.match(r"file_names\[\s*(\d+)\]:", line)
+        if match:
+            current_file = int(match.group(1))
+            current_name = None
+            continue
+        match = re.match(r'\s*name: "(.*)"', line)
+        if match and current_file is not None:
+            current_name = match.group(1)
+            continue
+        match = re.match(r"\s*dir_index:\s*(\d+)", line)
+        if match and current_file is not None and current_name is not None:
+            directory = directories.get(int(match.group(1)), "")
+            files[current_file] = os.path.join(directory, current_name) if directory else current_name
+            current_file = None
+            current_name = None
+
+    rows = []
+    row_re = re.compile(r"^(0x[0-9a-fA-F]+)\s+(\d+)\s+\d+\s+(\d+)\s+")
+    for line in line_dump.splitlines():
+        match = row_re.match(line)
+        if match:
+            rows.append((int(match.group(1), 16), int(match.group(2)), int(match.group(3))))
+    bytes_per_line = defaultdict(int)
+    for i, (address, line, file_index) in enumerate(rows):
+        next_address = rows[i + 1][0] if i + 1 < len(rows) else text_size
+        if line != 0 and next_address >= address:
+            bytes_per_line[(files.get(file_index, f"file#{file_index}"), line)] += next_address - address
+    return bytes_per_line
+
+
+def inline_hotspots(info_dump):
+    bytes_per_function = defaultdict(int)
+    blocks = re.split(r"(?=^0x[0-9a-fA-F]+:\s+DW_TAG_)", info_dump, flags=re.MULTILINE)
+    for block in blocks:
+        block_lines = block.splitlines()
+        if not block_lines or "DW_TAG_inlined_subroutine" not in block_lines[0]:
+            continue
+        name_match = re.search(r'DW_AT_abstract_origin\s+\([^\n]*"([^"]+)"\)', block)
+        if not name_match:
+            continue
+        ranges = [(int(a, 16), int(b, 16)) for a, b in
+                  re.findall(r"\[0x([0-9a-fA-F]+), 0x([0-9a-fA-F]+)\)", block)]
+        if not ranges:
+            low = re.search(r"DW_AT_low_pc\s+\(0x([0-9a-fA-F]+)\)", block)
+            high = re.search(r"DW_AT_high_pc\s+\(0x([0-9a-fA-F]+)\)", block)
+            if low and high:
+                ranges = [(int(low.group(1), 16), int(high.group(1), 16))]
+        bytes_per_function[name_match.group(1)] += sum(max(b - a, 0) for a, b in ranges)
+    return bytes_per_function
+
+
+def print_dwarf_summary(kernel, execute, text_size, output_dir, limit):
+    dwarfdump = subprocess.check_output(["xcrun", "--find", "dwarfdump"], text=True).strip()
+    info = subprocess.run([dwarfdump, "--debug-info", execute], check=False, capture_output=True, text=True)
+    lines = subprocess.run([dwarfdump, "--debug-line", execute], check=False, capture_output=True, text=True)
+    info_text = info.stdout + info.stderr
+    line_text = lines.stdout + lines.stderr
+    if output_dir:
+        with open(os.path.join(output_dir, f"dwarf-info-{kernel}.txt"), "w") as f:
+            f.write(info_text)
+        with open(os.path.join(output_dir, f"dwarf-lines-{kernel}.txt"), "w") as f:
+            f.write(line_text)
+
+    print("    largest inlined regions (inclusive native bytes):")
+    for name, size in sorted(inline_hotspots(info_text).items(), key=lambda item: -item[1])[:limit]:
+        print(f"      {size:6d}  {100.0 * size / max(text_size, 1):5.1f}%  {name}")
+    print("    largest source lines (exclusive native bytes):")
+    for (path, line), size in sorted(source_hotspots(line_text, text_size).items(),
+                                     key=lambda item: -item[1])[:limit]:
+        source = ""
+        candidate = path if os.path.isabs(path) else os.path.abspath(path)
+        try:
+            with open(candidate) as f:
+                source = next((text.strip() for i, text in enumerate(f, 1) if i == line), "")
+        except OSError:
+            pass
+        if len(source) > 88:
+            source = source[:85] + "..."
+        print(f"      {size:6d}  {100.0 * size / max(text_size, 1):5.1f}%  {path}:{line}  {source}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("metallib", help=".metallib, or a .gputrace bundle with --trace")
     ap.add_argument("kernels", nargs="+")
     ap.add_argument("--trace", action="store_true",
                     help="read the metallib and the recorded function constants out of a .gputrace")
+    ap.add_argument("--constants-from", metavar="KERNEL",
+                    help="with --trace: reuse another captured kernel's constants (for a new entry point)")
     ap.add_argument("--lib", help="with --trace: use this metallib instead of the bundle's")
     ap.add_argument("--set", action="append", default=[], metavar="ID=VAL",
                     help="with --trace: override one recorded constant, keeping its recorded type")
@@ -124,12 +218,21 @@ def main():
     ap.add_argument("-t", "--type", default="ConstantBool", help="constant type (default ConstantBool)")
     ap.add_argument("-a", "--arch", default="applegpu_g16s",
                     help="M1 g13g/g13s, M2 g14g/g14s, M3 g15g/g15s, M4 g16g/g16s (default)")
+    ap.add_argument("--dump-dir",
+                    help="keep each specialized translator script, native object, DWARF, and best-effort disassembly")
+    ap.add_argument("--dwarf", type=int, metavar="N", default=0,
+                    help="report the N largest inlined regions and source lines from native DWARF")
     args = ap.parse_args()
 
     tc = os.path.dirname(subprocess.check_output(
         ["xcrun", "-sdk", "macosx", "--find", "metal"], text=True).strip())
-    keep = tempfile.TemporaryDirectory(prefix="metal_regs_")
-    tmp = keep.name
+    keep = None
+    if args.dump_dir:
+        tmp = os.path.abspath(args.dump_dir)
+        os.makedirs(tmp, exist_ok=True)
+    else:
+        keep = tempfile.TemporaryDirectory(prefix="metal_regs_")
+        tmp = keep.name
 
     cli = []
     for c in args.constant:
@@ -144,9 +247,10 @@ def main():
     stripped = None
     print(f"{args.arch}  {os.path.basename(args.metallib)}")
     for kernel in args.kernels:
+        safe_kernel = re.sub(r"[^A-Za-z0-9_.-]", "_", kernel)
         cv = cli
         if args.trace:
-            source, recorded = trace_inputs(args.metallib, kernel)
+            source, recorded = trace_inputs(args.metallib, args.constants_from or kernel)
             for o in args.set:
                 k, _, v = o.partition("=")
                 recorded[int(k)] = (recorded[int(k)][0], int(v))
@@ -169,22 +273,36 @@ def main():
                 {"label": "sp", "function_descriptor": ref, "constant_values": cv}]
             ref = "fnd:sp"
         doc["pipeline_descriptors"] = {"compute_pipeline_descriptors": [{"compute_function_descriptor": ref}]}
-        script = os.path.join(tmp, "pipelines.mtl4-json")
+        script = os.path.join(tmp, f"pipeline-{safe_kernel}.mtl4-json")
         with open(script, "w") as f:
             json.dump(doc, f)
 
-        out = os.path.join(tmp, "gpu.bin")
+        out = os.path.join(tmp, f"native-{safe_kernel}.bin")
         subprocess.run([f"{tc}/metal-nt", "-arch", args.arch, "-platform_version", "macos", "26.0", "26.0",
                         "-N", script, "-o", out, lib], check=True)
         blob = open(out, "rb").read()
         off, _ = sections(blob)["__TEXT,__compute"]
         obj = blob[off:]
+        execute = os.path.join(tmp, f"execute-{safe_kernel}.bin")
+        with open(execute, "wb") as f:
+            f.write(obj)
+        if args.dump_dir:
+            disassembly = subprocess.run(
+                [f"{tc}/metal-objdump", "--macho", "--disassemble", "--source", "--line-numbers",
+                 "--debug-vars=ascii", "--no-show-raw-insn", execute],
+                cwd=tmp, check=False, capture_output=True, text=True)
+            with open(os.path.join(tmp, f"disassembly-{safe_kernel}.txt"), "w") as f:
+                f.write(disassembly.stdout)
+                f.write(disassembly.stderr)
         secs = sections(obj)
         md_off, md_size = secs["__GPU_METADATA,__compute"]
         s = read_stats(obj[md_off:md_off + md_size])
         print(f"  {kernel}: regs={s['regs']} shared={s['shared']} spill={s['spill']}B "
               f"ti_spill={s['ti_spill']}B tls_spill={s['tls_spill']}B ipr={s['ipr']}B "
               f"complexity={s['complexity']} code={secs['__TEXT,__text'][1]}B")
+        if args.dwarf:
+            print_dwarf_summary(safe_kernel, execute, secs["__TEXT,__text"][1],
+                                tmp if args.dump_dir else None, args.dwarf)
 
 
 if __name__ == "__main__":
