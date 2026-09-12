@@ -27,6 +27,25 @@ static_assert(offsetof(oka::ies_pack::IesProfileHeader, maxCandela) == offsetof(
 
 namespace oka::metal
 {
+namespace
+{
+glm::float3 rectangleInverseGram(const Scene::Light& light)
+{
+    if (light.normal.w == 0.0f)
+    {
+        return glm::float3(0.0f);
+    }
+
+    const glm::float3 edgeX(light.points[1] - light.points[0]);
+    const glm::float3 edgeY(light.points[3] - light.points[0]);
+    const float xx = glm::dot(edgeX, edgeX);
+    const float xy = glm::dot(edgeX, edgeY);
+    const float yy = glm::dot(edgeY, edgeY);
+    const float determinant = std::fma(xx, yy, -xy * xy);
+    return { yy / determinant, -xy / determinant, xx / determinant };
+}
+} // namespace
+
 MetalLights::~MetalLights()
 {
     release();
@@ -150,8 +169,14 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
 
     std::vector<double> powers;
     powers.reserve(lightDescs.size());
-    for (const Scene::Light& light : lightDescs)
+    std::vector<glm::float3> rectangleInverseGrams(lightDescs.size(), glm::float3(0.0f));
+    for (size_t i = 0; i < lightDescs.size(); ++i)
     {
+        const Scene::Light& light = lightDescs[i];
+        if (light.type == LIGHT_TYPE_RECT)
+        {
+            rectangleInverseGrams[i] = rectangleInverseGram(light);
+        }
         powers.push_back(analyticLightPower(light, sceneExtent));
     }
     const LightSelectionTable selection = buildLightSelectionAlias(powers);
@@ -243,6 +268,16 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
             dst.color.w = selection.entries[i].pdf;
             dst.selectionAliasThreshold = selection.entries[i].aliasThreshold;
             dst.selectionAlias = selection.entries[i].alias;
+            if (lightDescs[i].type == LIGHT_TYPE_RECT)
+            {
+                // Rectangle sampling needs corners 0, 1 and 3 only. The Metal
+                // hit path uses slot 2 for the inverse of the edge Gram matrix:
+                // (inv00, inv01, inv11). This removes an invariant matrix solve
+                // from every ray/light pair without changing the shared scene
+                // representation used by the other backends.
+                const glm::float3 inverseGram = rectangleInverseGrams[i];
+                dst.points[2] = vector_float4{ inverseGram.x, inverseGram.y, inverseGram.z, 0.0f };
+            }
             if (lightDescs[i].type == LIGHT_TYPE_PROJECTOR)
             {
                 const int slot = (int)lightDescs[i].points[0].z;

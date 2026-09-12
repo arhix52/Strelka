@@ -259,6 +259,24 @@ static inline void auditWork(constant Uniforms& uniforms, uint32_t counter, uint
     }
 }
 
+static inline void auditExtendWork(constant Uniforms& uniforms, uint32_t bounce)
+{
+    if (SPEC_RENDER_WORK_AUDIT)
+    {
+        // Only lanes that survived the queue/SSS guards reach this point. Keep
+        // the counters exact while replacing three contended atomics per ray
+        // with three atomics per active SIMD group. The whole block disappears
+        // from normal Release variants through the function constant.
+        const uint32_t rays = simd_sum(1u);
+        if (simd_is_first())
+        {
+            auditWork(uniforms, WORK_EXTEND_RAYS_BASE + min(bounce, WORK_BOUNCE_SLOTS - 1u), rays);
+            auditWork(uniforms, WORK_INTERSECTION_QUERIES, rays);
+            auditWork(uniforms, WORK_EXTENSION_QUERIES, rays);
+        }
+    }
+}
+
 static inline device RestirDiagnosticRecord* restirDiagnosticRecord(constant Uniforms& uniforms, uint32_t pixelIndex)
 {
     if (!SPEC_RENDER_WORK_AUDIT || uniforms.renderWorkCounters == nullptr)
@@ -412,9 +430,11 @@ struct MotionTraversal
     // restart walk.
     enum
     {
-        kInlineQuery = 0
+        kInlineQuery = 0,
+        kDirect = 0
     };
     using structure = acceleration_structure<instancing, primitive_motion>;
+    using volume_structure = structure;
     using isect = intersector<triangle_data, instancing, primitive_motion>;
     using volume_isect = isect;
     using table = intersection_function_table<triangle_data, instancing, primitive_motion>;
@@ -425,6 +445,10 @@ struct MotionTraversal
     static float curveParameter(thread const isect::result_type&)
     {
         return 0.0f;
+    }
+    static uint32_t instanceId(thread const isect::result_type& r, uint32_t)
+    {
+        return r.instance_id;
     }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time, table t)
     {
@@ -439,6 +463,7 @@ struct MotionTraversal
 struct StaticTraversal
 {
     using structure = acceleration_structure<instancing>;
+    using volume_structure = structure;
     using isect = intersector<triangle_data, instancing>;
     // Metal's inline traversal, used by the cutout shadow walk so the alpha test
     // can run in the kernel without giving up the single traversal. An enum
@@ -447,7 +472,8 @@ struct StaticTraversal
     using query = intersection_query<triangle_data, instancing>;
     enum
     {
-        kInlineQuery = 0
+        kInlineQuery = 0,
+        kDirect = 0
     };
     using volume_isect = isect;
     using table = intersection_function_table<triangle_data, instancing>;
@@ -459,11 +485,52 @@ struct StaticTraversal
     {
         return 0.0f;
     }
+    static uint32_t instanceId(thread const isect::result_type& r, uint32_t)
+    {
+        return r.instance_id;
+    }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float, table t)
     {
         return i.intersect(r, as, mask, t);
     }
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
+    {
+        return i.intersect(r, as, mask);
+    }
+};
+
+// Fast path for a scene whose immutable geometry was baked into one world-space
+// primitive AS. Extend does not need a top-level traversal for that case. Area
+// lights are intersected analytically below; volume walks retain their separate
+// instanced structure because medium boundaries are not necessarily flat.
+struct DirectStaticTraversal
+{
+    enum
+    {
+        kDirect = 1
+    };
+    using structure = primitive_acceleration_structure;
+    using volume_structure = acceleration_structure<instancing>;
+    using isect = intersector<triangle_data>;
+    using volume_isect = intersector<triangle_data, instancing>;
+    using table = uint32_t;
+    static geometry_type geometryTypes()
+    {
+        return geometry_type::triangle;
+    }
+    static float curveParameter(thread const isect::result_type&)
+    {
+        return 0.0f;
+    }
+    static uint32_t instanceId(thread const isect::result_type&, uint32_t directInstanceIndex)
+    {
+        return directInstanceIndex;
+    }
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t, float, table)
+    {
+        return i.intersect(r, as);
+    }
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, volume_structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
     }
@@ -483,9 +550,11 @@ struct CurveMotionTraversal
     // restart walk.
     enum
     {
-        kInlineQuery = 0
+        kInlineQuery = 0,
+        kDirect = 0
     };
     using structure = acceleration_structure<instancing, primitive_motion>;
+    using volume_structure = structure;
     using isect = intersector<triangle_data, curve_data, instancing, primitive_motion>;
     using volume_isect = intersector<triangle_data, instancing, primitive_motion>;
     using table = intersection_function_table<triangle_data, curve_data, instancing, primitive_motion>;
@@ -496,6 +565,10 @@ struct CurveMotionTraversal
     static float curveParameter(thread const isect::result_type& r)
     {
         return r.curve_parameter;
+    }
+    static uint32_t instanceId(thread const isect::result_type& r, uint32_t)
+    {
+        return r.instance_id;
     }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float time, table t)
     {
@@ -510,11 +583,13 @@ struct CurveMotionTraversal
 struct CurveStaticTraversal
 {
     using structure = acceleration_structure<instancing>;
+    using volume_structure = structure;
     using isect = intersector<triangle_data, curve_data, instancing>;
     using query = intersection_query<triangle_data, curve_data, instancing>;
     enum
     {
-        kInlineQuery = 0
+        kInlineQuery = 0,
+        kDirect = 0
     };
     using volume_isect = intersector<triangle_data, instancing>;
     using table = intersection_function_table<triangle_data, curve_data, instancing>;
@@ -525,6 +600,10 @@ struct CurveStaticTraversal
     static float curveParameter(thread const isect::result_type& r)
     {
         return r.curve_parameter;
+    }
+    static uint32_t instanceId(thread const isect::result_type& r, uint32_t)
+    {
+        return r.instance_id;
     }
     static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float, table t)
     {
@@ -615,11 +694,11 @@ static inline float unpackSurfaceTangentSign(uint32_t packedColor)
 #define SURFACE_GEOMETRY_PAYLOAD_ENABLED true
 
 template <typename R>
-static inline ExtendIntersection captureExtendIntersection(thread const R& r, float curveParameter)
+static inline ExtendIntersection captureExtendIntersection(thread const R& r, float curveParameter, uint32_t instanceId)
 {
     ExtendIntersection out;
     out.type = r.type;
-    out.instanceId = 0u;
+    out.instanceId = instanceId;
     out.geometryId = 0u;
     out.primitiveId = 0u;
     out.distance = INFINITY;
@@ -628,7 +707,6 @@ static inline ExtendIntersection captureExtendIntersection(thread const R& r, fl
     out.primitiveData = nullptr;
     if (r.type != intersection_type::none)
     {
-        out.instanceId = r.instance_id;
         out.geometryId = r.geometry_id;
         out.primitiveId = r.primitive_id;
         out.distance = r.distance;
@@ -1137,7 +1215,6 @@ static inline uint32_t bucketedHitIndex(uint32_t index, device const uint32_t* q
 }
 
 static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
-                                       constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                                        thread const ExtendIntersection& hit,
                                        device char* hits,
                                        uint32_t tid,
@@ -1146,7 +1223,8 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
                                        device uint32_t* missQueue,
                                        device atomic_uint* missCounter,
                                        device const uint32_t* control,
-                                       device const GeometryEntry* geometryEntries,
+                                       uint32_t geometryEntryIndex,
+                                       uint32_t shadeBucket,
                                        bool forceTail)
 {
     if (hit.type == intersection_type::none)
@@ -1155,20 +1233,15 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
         return;
     }
 
-    const auto inst = instances[hit.instanceId];
-    const bool isLight = (inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN);
     HitRecord rec;
-    rec.geomEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID) : (inst.userID + hit.geometryId);
+    rec.geomEntryIndex = geometryEntryIndex;
     rec.instanceIndex = hit.instanceId;
     rec.primitiveId = hit.primitiveId;
     rec.barycentrics =
         (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
     rec.distance = hit.distance;
     *wavefrontHitRecord(hits, tid) = rec;
-    const uint32_t bucket =
-        (isLight || forceTail) ?
-            3u :
-            ((geometryEntries[rec.geomEntryIndex].flags & GEOM_SHADE_BUCKET_MASK) >> GEOM_SHADE_BUCKET_SHIFT);
+    const uint32_t bucket = forceTail ? WF_SHADE_TAIL : shadeBucket;
     hitQueuePush(uniforms, hitCounter, hitQueue, tid, control[WF_CTRL_CAPACITY], bucket);
 }
 
@@ -1314,7 +1387,7 @@ static void sssWalkImpl(uint gid,
         volumeIsect.accept_any_intersection(false);
         const typename T::volume_isect::result_type volumeHit =
             T::traceVolume(volumeIsect, sssRay, volumeAccelerationStructure, rayMask & ~GEOMETRY_MASK_CURVE, motionTime);
-        const ExtendIntersection hit = captureExtendIntersection(volumeHit, 0.0f);
+        const ExtendIntersection hit = captureExtendIntersection(volumeHit, 0.0f, volumeHit.instance_id);
         const float surfaceDistance = hit.type == intersection_type::none ? sssRay.max_distance : hit.distance;
 
         if (!sampledScatter || (hit.type != intersection_type::none && scatterDistance >= surfaceDistance))
@@ -1331,8 +1404,13 @@ static void sssWalkImpl(uint gid,
             // regular extend path that prepares compact geometry. Force shade
             // onto its exact vertex-buffer fallback for this uncommon exit.
             uniforms.surfaceGeometry[tid].color = 0u;
-            enqueueExtendSurfaceResult(uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue,
-                                       missCounter, control, geometryEntries, true);
+            uint32_t geometryEntryIndex = 0u;
+            if (hit.type != intersection_type::none)
+            {
+                geometryEntryIndex = instances[hit.instanceId].userID + hit.geometryId;
+            }
+            enqueueExtendSurfaceResult(uniforms, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control,
+                                       geometryEntryIndex, WF_SHADE_TAIL, true);
             return;
         }
 
@@ -1395,7 +1473,6 @@ WF_SSS_WALK_ENTRY(wavefrontSssWalkStatic, StaticTraversal)
 
 static bool storeSurfaceGeometry(constant Uniforms& uniforms,
                                  constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
-                                 device const GeometryEntry* geometryEntries,
                                  device const Material* materials,
                                  device const char* vertexBuffer,
                                  device const char* prevVertexBuffer,
@@ -1404,7 +1481,10 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
                                  uint32_t tid,
                                  uint32_t pathFlags,
                                  float motionTime,
-                                 float3 rayDirection)
+                                 float3 rayDirection,
+                                 uint32_t geometryEntryIndex,
+                                 GeometryEntry entry,
+                                 bool isLight)
 {
     if (!SURFACE_GEOMETRY_PAYLOAD_ENABLED)
     {
@@ -1415,19 +1495,13 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
         return false;
     }
 
-    SurfaceGeometryPayload payload = {};
-    payload.lodBase = -1e30f;
-
-    const auto inst = instances[hit.instanceId];
-    const bool isLight = inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN;
     if (hit.type != intersection_type::triangle || isLight)
     {
-        uniforms.surfaceGeometry[tid] = payload;
         return false;
     }
 
-    const uint32_t geometryEntryIndex = inst.userID + hit.geometryId;
-    const GeometryEntry entry = geometryEntries[geometryEntryIndex];
+    SurfaceGeometryPayload payload;
+    payload.lodBase = -1e30f;
     const bool interpolateMotion =
         SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
@@ -1500,7 +1574,10 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
     const float worldArea2 = length(worldGeomNormal);
     if (!(worldArea2 > 1e-20f) || !all(isfinite(shadingNormal)))
     {
-        uniforms.surfaceGeometry[tid] = payload;
+        // Tail will reconstruct this uncommon hit from the vertex buffer. It
+        // only needs the validity bit cleared; the remaining stale words are
+        // never observed.
+        uniforms.surfaceGeometry[tid].color = 0u;
         return false;
     }
     const float3 geometryNormal = normalTransform.orientation * (worldGeomNormal / worldArea2);
@@ -1539,7 +1616,7 @@ static void extendImpl(uint gid,
                        constant Uniforms& uniforms,
                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                        typename T::structure accelerationStructure,
-                       typename T::structure volumeAccelerationStructure,
+                       typename T::volume_structure volumeAccelerationStructure,
                        device const PathRay* rays,
                        device char* hits,
                        constant uint32_t& sampleIdx,
@@ -1562,6 +1639,9 @@ static void extendImpl(uint gid,
                        device const char* vertexBuffer,
                        device const char* prevVertexBuffer,
                        device const uint32_t* indexBuffer,
+                       device const UniformLight* lights,
+                       uint32_t directGeometryBase,
+                       uint32_t directInstanceIndex,
                        // Chosen per dispatch rather than per ray: the only thing it distinguishes
                        // is the camera bounce from the rest, and `extend` is encoded once per
                        // bounce anyway. Reading the path's depth here to answer the same question
@@ -1582,21 +1662,27 @@ static void extendImpl(uint gid,
     {
         return;
     }
-    if (SPEC_SSS && !SPEC_SHARC_UPDATE)
+    MediumPathState mediumState = {};
+    if (SPEC_SSS)
     {
-        const uint32_t medium = mediumPaths[tid].medium & MEDIUM_INDEX_MASK;
-        if (medium != 0u && (materials[medium - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
+        mediumState = mediumPaths[tid];
+        const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
+        if (!SPEC_SHARC_UPDATE && medium != 0u && (materials[medium - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
         {
             return;
         }
     }
     const PathRay pr = rays[tid];
-    const uint32_t pathFlags = paths[tid].depthAndFlags;
+    // The host excludes camera-hidden lights only on bounce zero. Camera rays
+    // therefore need no PathState load: their depth is zero and the cone code
+    // already treats depth zero as specular. Secondary iterations retain the
+    // per-path depth because transparent and medium crossings need not advance
+    // in lockstep with the host's bounce loop.
+    const bool primaryRay = (rayMask & GEOMETRY_MASK_LIGHT_HIDDEN) == 0u;
+    const uint32_t pathFlags = primaryRay ? 0u : paths[tid].depthAndFlags;
 
     const uint32_t auditBounce = min(pathDepth(pathFlags), WORK_BOUNCE_SLOTS - 1u);
-    auditWork(uniforms, WORK_EXTEND_RAYS_BASE + auditBounce);
-    auditWork(uniforms, WORK_INTERSECTION_QUERIES);
-    auditWork(uniforms, WORK_EXTENSION_QUERIES);
+    auditExtendWork(uniforms, auditBounce);
 
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
@@ -1638,7 +1724,6 @@ static void extendImpl(uint gid,
     float mediumScatterT = 0.0f;
     if (SPEC_SSS)
     {
-        const MediumPathState mediumState = mediumPaths[tid];
         const uint32_t sss = mediumState.medium;
         const uint32_t medium = sss & MEDIUM_INDEX_MASK;
         insideSss = medium != 0u;
@@ -1697,7 +1782,7 @@ static void extendImpl(uint gid,
         volumeIsect.accept_any_intersection(false);
         const typename T::volume_isect::result_type volumeHit =
             T::traceVolume(volumeIsect, r, volumeAccelerationStructure, rayMask & ~GEOMETRY_MASK_CURVE, motionTime);
-        hit = captureExtendIntersection(volumeHit, 0.0f);
+        hit = captureExtendIntersection(volumeHit, 0.0f, volumeHit.instance_id);
     }
     else
     {
@@ -1709,10 +1794,43 @@ static void extendImpl(uint gid,
         const typename T::isect::result_type surfaceHit =
             T::trace(isect, r, accelerationStructure, rayMask, motionTime, functionTable);
         const float curveParameter = surfaceHit.type == intersection_type::curve ? T::curveParameter(surfaceHit) : 0.0f;
-        hit = captureExtendIntersection(surfaceHit, curveParameter);
+        hit = captureExtendIntersection(surfaceHit, curveParameter, T::instanceId(surfaceHit, directInstanceIndex));
     }
 
-    const float surfaceDistance = hit.type == intersection_type::none ? r.max_distance : hit.distance;
+    float surfaceDistance = hit.type == intersection_type::none ? r.max_distance : hit.distance;
+    if (T::kDirect && SPEC_LIGHTS)
+    {
+        // The direct primitive AS contains immutable scene triangles only. Area
+        // lights already carry their exact world-space surface in UniformLight.
+        // Host eligibility admits rectangles only, so this PSO needs neither a
+        // type switch nor any general affine solver.
+        for (uint32_t lightId = 0u; lightId < uniforms.numLights; ++lightId)
+        {
+            device const UniformLight& light = lights[lightId];
+            // Scenes containing only rectangles compile the type test out. A
+            // punctual/infinite light has no TLAS proxy surface and remains
+            // NEE-only when it accompanies the rectangle fast path.
+            if ((!SPEC_ALL_ANALYTIC_LIGHTS_RECT && light.type != LIGHT_TYPE_RECT) ||
+                !analyticLightVisibilityAllowsRay(light.normal.w, !primaryRay))
+            {
+                continue;
+            }
+            const PackedAnalyticHit lightHit =
+                intersectPackedRectangle(light, r.origin, r.direction, r.min_distance, surfaceDistance);
+            if (lightHit.hit && lightHit.distance < surfaceDistance)
+            {
+                hit.type = intersection_type::triangle;
+                hit.instanceId = directInstanceIndex;
+                hit.geometryId = HIT_LIGHT_BIT | lightId;
+                hit.primitiveId = 0u;
+                hit.distance = lightHit.distance;
+                hit.barycentrics = float2(0.0f);
+                hit.curveParameter = 0.0f;
+                hit.primitiveData = nullptr;
+                surfaceDistance = lightHit.distance;
+            }
+        }
+    }
 
     // Escaped rays skip shade and go to miss. Fog/SSS are decided here
     // because only extend knows whether a surface precedes the medium event.
@@ -1729,40 +1847,101 @@ static void extendImpl(uint gid,
         return;
     }
 
+    uint32_t geometryEntryIndex = 0u;
+    uint32_t shadeBucket = WF_SHADE_TAIL;
+    bool isLight = false;
+    GeometryEntry entry = {};
+    if (hit.type != intersection_type::none)
+    {
+        if (T::kDirect)
+        {
+            isLight = (hit.geometryId & HIT_LIGHT_BIT) != 0u;
+            geometryEntryIndex = isLight ? hit.geometryId : directGeometryBase + hit.geometryId;
+        }
+        else
+        {
+            const auto inst = instances[hit.instanceId];
+            isLight = inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN;
+            geometryEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID) : (inst.userID + hit.geometryId);
+        }
+        if (!isLight && hit.type == intersection_type::triangle)
+        {
+            entry = geometryEntries[geometryEntryIndex];
+            shadeBucket = (entry.flags & GEOM_SHADE_BUCKET_MASK) >> GEOM_SHADE_BUCKET_SHIFT;
+        }
+    }
+
     const bool hasSurfaceGeometry =
-        storeSurfaceGeometry(uniforms, instances, geometryEntries, materials, vertexBuffer, prevVertexBuffer,
-                             indexBuffer, hit, tid, pathFlags, motionTime, r.direction);
-    enqueueExtendSurfaceResult(uniforms, instances, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter,
-                               control, geometryEntries, !hasSurfaceGeometry);
+        storeSurfaceGeometry(uniforms, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, hit, tid,
+                             pathFlags, motionTime, r.direction, geometryEntryIndex, entry, isLight);
+    enqueueExtendSurfaceResult(uniforms, hit, hits, tid, hitQueue, hitCounter, missQueue, missCounter, control,
+                               geometryEntryIndex, shadeBucket, !hasSurfaceGeometry);
 }
 
 
-#define WF_EXTEND_ENTRY(NAME, TRAITS)                                                                                  \
-    kernel void NAME(                                                                                                  \
-        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
-        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                          \
-        TRAITS::structure accelerationStructure [[buffer(2)]], device const PathRay* rays [[buffer(3)]],               \
-        device char* hits [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],                                   \
-        device const uint32_t* queue [[buffer(6)]], device const uint32_t* control [[buffer(7)]],                      \
-        device uint32_t* hitQueue [[buffer(8)]], device atomic_uint* hitCounter [[buffer(9)]],                         \
-        device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                     \
-        device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                 \
-        constant uint32_t& rayMask [[buffer(14)]], TRAITS::structure volumeAccelerationStructure [[buffer(15)]],       \
-        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],       \
-        device const GeometryEntry* geometryEntries [[buffer(18)]], TRAITS::table functionTable [[buffer(19)]],        \
-        device const char* vertexBuffer [[buffer(20)]], device const char* prevVertexBuffer [[buffer(21)]],            \
-        device const uint32_t* indexBuffer [[buffer(22)]])                                                             \
-    {                                                                                                                  \
-        extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, \
-                           rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths, \
-                           materials, mediumPaths, geometryEntries, functionTable, vertexBuffer, prevVertexBuffer,     \
-                           indexBuffer, rayMask);                                                                      \
+#define WF_EXTEND_ENTRY(NAME, TRAITS)                                                                                   \
+    kernel void NAME(                                                                                                   \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                                \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                           \
+        TRAITS::structure accelerationStructure [[buffer(2)]], device const PathRay* rays [[buffer(3)]],                \
+        device char* hits [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],                                    \
+        device const uint32_t* queue [[buffer(6)]], device const uint32_t* control [[buffer(7)]],                       \
+        device uint32_t* hitQueue [[buffer(8)]], device atomic_uint* hitCounter [[buffer(9)]],                          \
+        device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                      \
+        device const PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                  \
+        constant uint32_t& rayMask [[buffer(14)]], TRAITS::volume_structure volumeAccelerationStructure [[buffer(15)]], \
+        constant uint32_t& queueOffset [[buffer(16)]], device const MediumPathState* mediumPaths [[buffer(17)]],        \
+        device const GeometryEntry* geometryEntries [[buffer(18)]], TRAITS::table functionTable [[buffer(19)]],         \
+        device const char* vertexBuffer [[buffer(20)]], device const char* prevVertexBuffer [[buffer(21)]],             \
+        device const uint32_t* indexBuffer [[buffer(22)]], device const UniformLight* lights [[buffer(23)]],            \
+        constant uint32_t& directGeometryBase [[buffer(24)]], constant uint32_t& directInstanceIndex [[buffer(25)]])    \
+    {                                                                                                                   \
+        extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure,  \
+                           rays, hits, sampleIdx, queue, control, hitQueue, hitCounter, missQueue, missCounter, paths,  \
+                           materials, mediumPaths, geometryEntries, functionTable, vertexBuffer, prevVertexBuffer,      \
+                           indexBuffer, lights, directGeometryBase, directInstanceIndex, rayMask);                      \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
 WF_EXTEND_ENTRY(wavefrontExtendStatic, StaticTraversal)
 WF_EXTEND_ENTRY(wavefrontExtendCurve, CurveMotionTraversal)
 WF_EXTEND_ENTRY(wavefrontExtendStaticCurve, CurveStaticTraversal)
+
+kernel void wavefrontExtendDirectStatic(uint gid [[thread_position_in_grid]],
+                                        constant Uniforms& uniforms [[buffer(0)]],
+                                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances
+                                        [[buffer(1)]],
+                                        DirectStaticTraversal::structure accelerationStructure [[buffer(2)]],
+                                        device const PathRay* rays [[buffer(3)]],
+                                        device char* hits [[buffer(4)]],
+                                        constant uint32_t& sampleIdx [[buffer(5)]],
+                                        device const uint32_t* queue [[buffer(6)]],
+                                        device const uint32_t* control [[buffer(7)]],
+                                        device uint32_t* hitQueue [[buffer(8)]],
+                                        device atomic_uint* hitCounter [[buffer(9)]],
+                                        device uint32_t* missQueue [[buffer(10)]],
+                                        device atomic_uint* missCounter [[buffer(11)]],
+                                        device const PathState* paths [[buffer(12)]],
+                                        device const Material* materials [[buffer(13)]],
+                                        constant uint32_t& rayMask [[buffer(14)]],
+                                        DirectStaticTraversal::volume_structure volumeAccelerationStructure
+                                        [[buffer(15)]],
+                                        constant uint32_t& queueOffset [[buffer(16)]],
+                                        device const MediumPathState* mediumPaths [[buffer(17)]],
+                                        device const GeometryEntry* geometryEntries [[buffer(18)]],
+                                        device const char* vertexBuffer [[buffer(20)]],
+                                        device const char* prevVertexBuffer [[buffer(21)]],
+                                        device const uint32_t* indexBuffer [[buffer(22)]],
+                                        device const UniformLight* lights [[buffer(23)]],
+                                        constant uint32_t& directGeometryBase [[buffer(24)]],
+                                        constant uint32_t& directInstanceIndex [[buffer(25)]])
+{
+    extendImpl<DirectStaticTraversal>(gid + queueOffset, uniforms, instances, accelerationStructure,
+                                      volumeAccelerationStructure, rays, hits, sampleIdx, queue, control, hitQueue,
+                                      hitCounter, missQueue, missCounter, paths, materials, mediumPaths,
+                                      geometryEntries, 0u, vertexBuffer, prevVertexBuffer, indexBuffer, lights,
+                                      directGeometryBase, directInstanceIndex, rayMask);
+}
 
 // Rebuild the triangle's vertex attributes from the vertex buffer.
 //
@@ -6110,7 +6289,7 @@ static void guideImpl(uint gid,
             T::trace(isect, r, accelerationStructure, uniforms.primaryRayMask | GEOMETRY_MASK_LIGHT_HIDDEN, motionTime,
                      functionTable);
         const float curveParameter = rawHit.type == intersection_type::curve ? T::curveParameter(rawHit) : 0.0f;
-        const ExtendIntersection hit = captureExtendIntersection(rawHit, curveParameter);
+        const ExtendIntersection hit = captureExtendIntersection(rawHit, curveParameter, rawHit.instance_id);
         if (hit.type == intersection_type::none)
         {
             const float missDistance = totalDistance + max(uniforms.sceneExtent, 1e3f);

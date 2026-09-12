@@ -112,6 +112,31 @@ bool authoredLightScalarsAreFinite(const Scene::UniformLightDesc& desc)
     }
 }
 
+bool rectangleHasStableFloatGramInverse(const Scene::Light& light)
+{
+    const glm::dvec3 edgeX(glm::float3(light.points[1] - light.points[0]));
+    const glm::dvec3 edgeY(glm::float3(light.points[3] - light.points[0]));
+    const double xx = glm::dot(edgeX, edgeX);
+    const double xy = glm::dot(edgeX, edgeY);
+    const double yy = glm::dot(edgeY, edgeY);
+    const double product = xx * yy;
+    const double determinant = std::fma(xx, yy, -xy * xy);
+
+    // Intersection and sampling run in float32. Reject a basis whose ordinary
+    // Gram inverse is ill-conditioned once, while the scene is packed, rather
+    // than carrying compensated affine solvers in every GPU ray.
+    constexpr double kMinimumRelativeDeterminant = 1e-8;
+    if (!(xx > 0.0f) || !(yy > 0.0f) || !std::isfinite(product) || !(determinant > product * kMinimumRelativeDeterminant))
+    {
+        return false;
+    }
+
+    const glm::float3 inverseGram(static_cast<float>(yy / determinant), static_cast<float>(-xy / determinant),
+                                  static_cast<float>(xx / determinant));
+    return std::isfinite(inverseGram.x) && std::isfinite(inverseGram.y) && std::isfinite(inverseGram.z) &&
+           inverseGram.x > 0.0f && inverseGram.z > 0.0f;
+}
+
 float packedAnalyticLightSurfaceArea(const Scene::Light& light)
 {
     if (light.type == LIGHT_TYPE_RECT)
@@ -847,10 +872,16 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     disablePackedLight(mLights[lightId], desc.type);
     if (!authoredLightScalarsAreFinite(desc))
     {
+        if (desc.enabled)
+        {
+            STRELKA_WARNING(
+                "Disabling light {} ('{}'): authored parameters contain a non-finite value", lightId, desc.name);
+        }
         markChanged(ChangeBits::Lights);
         return;
     }
     bool lightHasSupport = true;
+    bool rectangleFloatBasisIsStable = true;
     if (desc.type == LIGHT_TYPE_RECT)
     {
         const glm::float4x4 scaleMatrix = glm::scale(glm::float4x4(1.0f), glm::float3(desc.width, desc.height, 1.0f));
@@ -875,6 +906,7 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // Controlled-falloff cutoff distance for area lights, read by
         // areaFalloff(); 0 (the default range) leaves the light unbounded.
         mLights[lightId].pad1 = desc.range;
+        rectangleFloatBasisIsStable = rectangleHasStableFloatGramInverse(mLights[lightId]);
         lightHasSupport =
             affineSamplePointRangeIsFinite(glm::float3(mLights[lightId].points[0]),
                                            glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
@@ -882,7 +914,8 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
                                            glm::float3(0.0f)) &&
             inverseFiniteCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
                                      glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0])) > 0.0f &&
-            glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f;
+            glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f &&
+            rectangleFloatBasisIsStable;
     }
     else if (desc.type == LIGHT_TYPE_DISC)
     {
@@ -1008,6 +1041,19 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].pad1 = 0.0f;
     }
 
+    if (desc.enabled && !lightHasSupport)
+    {
+        if (desc.type == LIGHT_TYPE_RECT && !rectangleFloatBasisIsStable)
+        {
+            STRELKA_WARNING("Disabling light {} ('{}'): its float32 rectangle basis is degenerate or ill-conditioned",
+                            lightId, desc.name);
+        }
+        else
+        {
+            STRELKA_WARNING("Disabling light {} ('{}'): its transform or emitting surface is not representable",
+                            lightId, desc.name);
+        }
+    }
     const bool enabledAndSupported = desc.enabled && lightHasSupport;
     const float surfaceArea = packedAnalyticLightSurfaceArea(mLights[lightId]);
     glm::float3 radiometric(0.0f);
@@ -1021,6 +1067,11 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     }
     if (!packedLightIsFinite(mLights[lightId]) || !finiteNonnegativeColor(radiometric))
     {
+        if (desc.enabled)
+        {
+            STRELKA_WARNING(
+                "Disabling light {} ('{}'): packed geometry or radiometric value is invalid", lightId, desc.name);
+        }
         disablePackedLight(mLights[lightId], desc.type);
         markChanged(ChangeBits::Lights);
         return;

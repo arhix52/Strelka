@@ -1106,6 +1106,9 @@ static_assert(sizeof(SkinningParams) == 16, "SkinningParams host/Metal ABI chang
 // slot, projector frame aspect); an unused slot carries -1, not a stale value.
 // points[0..3] for a sphere: affine axis X, centre, affine axis Y, affine axis Z.
 // points[1..3] for a disc: centre, affine axis X, affine axis Y.
+// Metal upload repurposes points[2].xyz for a rectangle as its inverse Gram
+// coefficients (inv00, inv01, inv11); the shared Scene::Light still holds the
+// redundant fourth corner there.
 // normal.w: analytic intersection visibility bits (camera, secondary).
 // halfAngle: distant cone, spot outer cone, or half the projector's horizontal
 // field of view.

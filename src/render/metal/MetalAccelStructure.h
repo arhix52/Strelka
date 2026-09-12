@@ -193,6 +193,18 @@ public:
     {
         return mInstanceAccelerationStructure;
     }
+    MTL::AccelerationStructure* directStaticAccelerationStructure() const
+    {
+        return mDirectStaticAccelerationStructure;
+    }
+    uint32_t directStaticGeometryBase() const
+    {
+        return mDirectStaticGeometryBase;
+    }
+    uint32_t directStaticInstanceIndex() const
+    {
+        return mDirectStaticInstanceIndex;
+    }
     /// Triangle-only top level used by bounded-medium random walks. Curve BLAS
     /// are deliberately absent, rather than merely rejected by a ray mask: on
     /// current Metal 4 drivers a handful of deep rays can still spend watchdog-
@@ -320,6 +332,12 @@ private:
     uint32_t mEmissiveMeshCount = 0;
     double mEmissiveMeshPower = 0.0;
     std::vector<MTL::AccelerationStructure*> mPrimitiveAccelerationStructures;
+    // Non-owning view of the sole immutable, world-space triangle BLAS when
+    // extend can bypass the TLAS. Ownership remains in mBlasList/the primitive
+    // AS vector; the indices preserve the HitRecord ABI used by shade.
+    MTL::AccelerationStructure* mDirectStaticAccelerationStructure = nullptr;
+    uint32_t mDirectStaticGeometryBase = 0;
+    uint32_t mDirectStaticInstanceIndex = 0;
     MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
     MTL::AccelerationStructure* mVolumeInstanceAccelerationStructure = nullptr;
     // Reused for every TLAS refit. Path-owned descriptor type (MTL3 or MTL4).

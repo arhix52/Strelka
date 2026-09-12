@@ -450,7 +450,14 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     }
     else
     {
-        blas.mAs = createAccelerationStructureNoCompact(primDescriptor);
+        // World-space baked geometry is immutable: unlike shared/refittable
+        // mesh BLASes it never pays for keeping the build layout around. A
+        // compacted structure reduces the BVH footprint competing with the
+        // vertex/index fetches in wavefrontExtend. Keep an escape hatch for
+        // profiling and for devices with a problematic compaction driver.
+        static const bool disableStaticCompaction = envFlag("STRELKA_NO_STATIC_BLAS_COMPACTION");
+        blas.mAs = bakedTransform && !disableStaticCompaction ? createAccelerationStructure(primDescriptor) :
+                                                                createAccelerationStructureNoCompact(primDescriptor);
         ++mAuditCounts.blasBuilds;
         primDescriptor->release();
     }
@@ -838,6 +845,9 @@ bool MetalAccelStructure::step(double budgetMs)
         mGeometry->geometryEntries().clear();
         mEmittedInstances.clear();
         mGeometryTransformSceneInstances.clear();
+        mDirectStaticAccelerationStructure = nullptr;
+        mDirectStaticGeometryBase = 0u;
+        mDirectStaticInstanceIndex = 0u;
 
         chargePhase();
         st.phase = Phase::Grouping;
@@ -1183,9 +1193,11 @@ bool MetalAccelStructure::step(double budgetMs)
                 // spot light was reported occluded and those lights lit nothing at all.
                 // Picking runs on the CPU in Scene::pick() and never consults these
                 // masks, so a proxy invisible to every ray costs nothing.
-                const bool enabled = curr.mLightId < mScene->getLightsDesc().size() ?
-                                         mScene->getLightsDesc()[curr.mLightId].enabled :
-                                         true;
+                // Scene::updateLight is the single host-side validation point.
+                // normal.w is zero for disabled or rejected lights, so their
+                // editor proxy must not survive as a ray-visible TLAS instance.
+                const bool enabled =
+                    curr.mLightId < mScene->getLights().size() && mScene->getLights()[curr.mLightId].normal.w != 0.0f;
                 const bool visibleToCamera = curr.mLightId < mScene->getLightsDesc().size() ?
                                                  mScene->getLightsDesc()[curr.mLightId].visibleToCamera :
                                                  true;
@@ -1259,6 +1271,53 @@ bool MetalAccelStructure::step(double budgetMs)
                  100.0 * mCutoutGeometryCount / std::max<uint32_t>(1u, mOpaqueGeometryCount + mCutoutGeometryCount));
     STRELKA_INFO("Primitive surface data: {} geometries, {} triangles embedded in BLAS", mPrimitiveSurfaceGeometryCount,
                  mPrimitiveSurfaceTriangleCount);
+
+    // A sole baked triangle BLAS is already in world space. Extend can traverse
+    // it directly and intersect the small set of area lights from UniformLight,
+    // avoiding the instance level entirely. Other stages retain the TLAS for
+    // now, so this eligibility rule is deliberately strict and easy to audit.
+    // Analytic intersection is a linear scan. It wins over entering a handful
+    // of proxy instances, but must not turn a scene with hundreds of lights
+    // into hundreds of tests per ray.
+    constexpr size_t kMaxDirectStaticLightTests = 8u;
+    bool directStaticEligible =
+        !envFlag("STRELKA_NO_DIRECT_STATIC_EXTEND") && mScene->getLightsDesc().size() <= kMaxDirectStaticLightTests;
+    size_t directInstance = ~size_t{ 0 };
+    for (size_t i = 0; directStaticEligible && i < mEmittedInstances.size(); ++i)
+    {
+        const EmittedInstance& emitted = mEmittedInstances[i];
+        if (emitted.mask == 0u)
+        {
+            continue;
+        }
+        if (emitted.mask == GEOMETRY_MASK_TRIANGLE && emitted.identityTransform && emitted.asIndex < mBlasList.size() &&
+            !mBlasList[emitted.asIndex].mIsSkeletal)
+        {
+            directStaticEligible = directInstance == ~size_t{ 0 };
+            directInstance = i;
+            continue;
+        }
+        if (emitted.mask == GEOMETRY_MASK_LIGHT || emitted.mask == GEOMETRY_MASK_LIGHT_HIDDEN)
+        {
+            const Instance& lightInstance = instances[emitted.sceneInstanceId];
+            const bool validLight = lightInstance.mLightId < mScene->getLightsDesc().size();
+            // The direct path intentionally has one tiny packed-rectangle test.
+            // Disc/sphere lights retain their proxy BLAS and the regular TLAS
+            // instead of pulling general affine solvers into this hot PSO.
+            directStaticEligible = validLight && mScene->getLightsDesc()[lightInstance.mLightId].type == LIGHT_TYPE_RECT;
+            continue;
+        }
+        directStaticEligible = false;
+    }
+    if (directStaticEligible && directInstance != ~size_t{ 0 })
+    {
+        const EmittedInstance& emitted = mEmittedInstances[directInstance];
+        mDirectStaticAccelerationStructure = mBlasList[emitted.asIndex].mAs;
+        mDirectStaticGeometryBase = emitted.userID;
+        mDirectStaticInstanceIndex = static_cast<uint32_t>(directInstance);
+        STRELKA_INFO("Direct static extend: primitive BLAS {} with {} geometries; rectangle lights analytic",
+                     emitted.asIndex, emitted.geometries.size());
+    }
 
     // Per-geometry lookup table consumed by the kernel.
     mGeometry->uploadGeometryEntryBuffer();
@@ -2040,6 +2099,9 @@ void MetalAccelStructure::release()
         safeRelease(as);
     }
     mPrimitiveAccelerationStructures.clear();
+    mDirectStaticAccelerationStructure = nullptr;
+    mDirectStaticGeometryBase = 0u;
+    mDirectStaticInstanceIndex = 0u;
     removeResident(mInstanceAccelerationStructure);
     safeRelease(mInstanceAccelerationStructure);
     removeResident(mVolumeInstanceAccelerationStructure);

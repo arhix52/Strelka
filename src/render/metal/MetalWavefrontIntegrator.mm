@@ -83,6 +83,7 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.generate);
         safeRelease(kv.second.extendMotion);
         safeRelease(kv.second.extendStatic);
+        safeRelease(kv.second.extendDirectStatic);
         safeRelease(kv.second.sssWalkMotion);
         safeRelease(kv.second.sssWalkStatic);
         safeRelease(kv.second.connectBase);
@@ -760,6 +761,12 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
     const bool useMotion = frame.motionBlasBuilt || variant->extendStatic == nullptr ||
                            frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
+    const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
+    const MTL::ComputePipelineState* const extendPso = useDirectStatic ? variant->extendDirectStatic :
+                                                       useMotion       ? variant->extendMotion :
+                                                                         variant->extendStatic;
+    const MTL::AccelerationStructure* const extendAs =
+        useDirectStatic ? scene.directStaticAccelerationStructure : scene.instanceAccelerationStructure;
     // A terminal camera hit never samples a BSDF and therefore cannot enter an
     // SSS medium. Keep the SSS-specialised shade variant, but do not scan the
     // full camera queue or encode the empty SSS walk for a depth-1 capture.
@@ -858,6 +865,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     };
 
     const MTL::GPUAddress sampleIdx = ring.push(s);
+    const MTL::GPUAddress directGeometryBase = ring.push(scene.directStaticGeometryBase);
+    const MTL::GPUAddress directInstanceIndex = ring.push(scene.directStaticInstanceIndex);
     // A few queue counters and four diagnostic lanes are cheap enough to
     // collect with stage profiling. Breadcrumb dispatches remain opt-in.
     const MTL::GPUAddress stageCountersEnabled = ring.push(profileThisSample ? 1u : 0u);
@@ -928,10 +937,10 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             }
 
             const uint32_t extendStage = beginStage(kStageExtend, bounce);
-            enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
+            enc->setComputePipelineState(extendPso);
             bind(uniformBuffer, 0, 0);
             bind(scene.instanceBuffer, 0, 1);
-            table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 2);
+            table->setResource(extendAs->gpuResourceID(), 2);
             bind(mPathRayBuffer, 0, 3);
             bind(mHitBuffer, 0, 4);
             table->setAddress(sampleIdx, 5);
@@ -950,11 +959,17 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
             bind(mMediumPathStateBuffer, 0, 17);
             bind(scene.geometryEntryBuffer, 0, 18);
-            table->setResource(
-                (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+            if (!useDirectStatic)
+            {
+                table->setResource(
+                    (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+            }
             bind(scene.vertexBuffer, 0, 20);
             bind(scene.prevVertexBuffer, 0, 21);
             bind(scene.indexBuffer, 0, 22);
+            bind(scene.lightBuffer, 0, 23);
+            table->setAddress(directGeometryBase, 24);
+            table->setAddress(directInstanceIndex, 25);
             const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete ? 0u : chunk.traversalBatchBegin;
             const uint32_t batchEnd = chunk.phase == WavefrontChunkPhase::Complete ?
                                           traversalBatchCount :
@@ -978,10 +993,10 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     traversalBatchBarrier();
                     // All Metal 4 kernels share one argument table. Classification
                     // overwrote its first slots, so restore extend's bindings.
-                    enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
+                    enc->setComputePipelineState(extendPso);
                     bind(uniformBuffer, 0, 0);
                     bind(scene.instanceBuffer, 0, 1);
-                    table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 2);
+                    table->setResource(extendAs->gpuResourceID(), 2);
                     bind(mPathRayBuffer, 0, 3);
                     bind(mHitBuffer, 0, 4);
                     table->setAddress(sampleIdx, 5);
@@ -997,13 +1012,21 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 15);
                     bind(mMediumPathStateBuffer, 0, 17);
                     bind(scene.geometryEntryBuffer, 0, 18);
-                    table->setResource(
-                        (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+                    if (!useDirectStatic)
+                    {
+                        table->setResource(
+                            (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+                    }
                     bind(scene.vertexBuffer, 0, 20);
                     bind(scene.prevVertexBuffer, 0, 21);
                     bind(scene.indexBuffer, 0, 22);
+                    bind(scene.lightBuffer, 0, 23);
+                    table->setAddress(directGeometryBase, 24);
+                    table->setAddress(directInstanceIndex, 25);
                 }
-                auditDispatch(useMotion ? "wavefrontExtend" : "wavefrontExtendStatic");
+                auditDispatch(useDirectStatic ? "wavefrontExtendDirectStatic" :
+                              useMotion       ? "wavefrontExtend" :
+                                                "wavefrontExtendStatic");
                 table->setAddress(ring.push(batch * traversalBatchThreads), 16);
                 enc->dispatchThreadgroups(
                     traversalDispatches + static_cast<MTL::GPUAddress>(batch) * 3u * sizeof(uint32_t), tg);
@@ -1566,6 +1589,12 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     {
         return enc;
     }
+    const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
+    const MTL::ComputePipelineState* const extendPso = useDirectStatic ? variant->extendDirectStatic :
+                                                       useMotion       ? variant->extendMotion :
+                                                                         variant->extendStatic;
+    const MTL::AccelerationStructure* const extendAs =
+        useDirectStatic ? scene.directStaticAccelerationStructure : scene.instanceAccelerationStructure;
     // See the Metal 4 path above: depth 1 cannot produce an SSS continuation,
     // even when alpha pass-through headroom keeps the host iteration loop alive.
     const bool fusedSss = uniforms && uniforms->maxDepth > 1u && (features & WavefrontFeatures::kSubsurface) != 0u &&
@@ -1664,10 +1693,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->memoryBarrier(MTL::BarrierScopeBuffers);
             }
             enc->pushDebugGroup(NS::String::string("extend", NS::UTF8StringEncoding));
-            enc->setComputePipelineState(useMotion ? variant->extendMotion : variant->extendStatic);
+            enc->setComputePipelineState(extendPso);
             enc->setBuffer(uniformBuffer, 0, 0);
             enc->setBuffer(scene.instanceBuffer, 0, 1);
-            enc->setAccelerationStructure(scene.instanceAccelerationStructure, 2);
+            enc->setAccelerationStructure(extendAs, 2);
             enc->setBuffer(mPathRayBuffer, 0, 3);
             enc->setBuffer(mHitBuffer, 0, 4);
             enc->setBytes(&s, sizeof(uint32_t), 5);
@@ -1687,13 +1716,19 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 16);
             enc->setBuffer(mMediumPathStateBuffer, 0, 17);
             enc->setBuffer(scene.geometryEntryBuffer, 0, 18);
-            MTL::IntersectionFunctionTable* extendTable =
-                useMotion ? variant->extendTableMotion : variant->extendTableStatic;
-            enc->setIntersectionFunctionTable(extendTable, 19);
-            enc->useResource(extendTable, MTL::ResourceUsageRead);
+            if (!useDirectStatic)
+            {
+                const MTL::IntersectionFunctionTable* extendTable =
+                    useMotion ? variant->extendTableMotion : variant->extendTableStatic;
+                enc->setIntersectionFunctionTable(extendTable, 19);
+                enc->useResource(extendTable, MTL::ResourceUsageRead);
+            }
             enc->setBuffer(scene.vertexBuffer, 0, 20);
             enc->setBuffer(scene.prevVertexBuffer, 0, 21);
             enc->setBuffer(scene.indexBuffer, 0, 22);
+            enc->setBuffer(scene.lightBuffer, 0, 23);
+            enc->setBytes(&scene.directStaticGeometryBase, sizeof(uint32_t), 24);
+            enc->setBytes(&scene.directStaticInstanceIndex, sizeof(uint32_t), 25);
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
@@ -2185,6 +2220,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.generate = make("wavefrontGenerate");
     v.extendMotion = makeTraversal(entry("wavefrontExtend"), "Extend", true, v.extendTableMotion);
     v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), "Extend", false, v.extendTableStatic);
+    v.extendDirectStatic = make("wavefrontExtendDirectStatic");
     if (subsurface && !sharcUpdate)
     {
         v.sssWalkMotion = make("wavefrontSssWalk");

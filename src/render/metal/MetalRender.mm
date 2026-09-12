@@ -1171,6 +1171,9 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     metal::IntegratorSceneBindings b;
     b.instanceBuffer = mAccel.instanceBuffer();
     b.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
+    b.directStaticAccelerationStructure = mAccel.directStaticAccelerationStructure();
+    b.directStaticGeometryBase = mAccel.directStaticGeometryBase();
+    b.directStaticInstanceIndex = mAccel.directStaticInstanceIndex();
     b.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
     b.primitiveAccelerationStructures = &mAccel.primitiveAccelerationStructures();
     b.materialBuffer = mMaterials.buffer() ? mMaterials.buffer() : mSceneTablePlaceholder;
@@ -2063,9 +2066,8 @@ void MetalRender::render(Buffer* output)
                 const uint32_t requested = envUint("STRELKA_TRIANGLE_BATCH_THREADS", 0u);
                 if (requested != 0u)
                 {
-                    const uint32_t upper = std::max(
-                        metal::kWavefrontMinDiagnosticTraversalBatchThreads,
-                        (frameReq.pathCount + 63u) & ~63u);
+                    const uint32_t upper =
+                        std::max(metal::kWavefrontMinDiagnosticTraversalBatchThreads, (frameReq.pathCount + 63u) & ~63u);
                     traversalBatchThreads =
                         std::clamp(requested, metal::kWavefrontMinDiagnosticTraversalBatchThreads, upper);
                     traversalBatchThreads -= traversalBatchThreads % 64u;
@@ -2218,8 +2220,8 @@ void MetalRender::render(Buffer* output)
                     const char* encoderLabel = "trace chunk 0";
                     if (anySkinWork)
                     {
-                        encoderLabel = encodeAccel ? "geometry update + accel + trace chunk 0" :
-                                                     "geometry update + trace chunk 0";
+                        encoderLabel =
+                            encodeAccel ? "geometry update + accel + trace chunk 0" : "geometry update + trace chunk 0";
                     }
                     else if (encodeAccel)
                     {

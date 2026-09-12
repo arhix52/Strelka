@@ -189,8 +189,8 @@ TEST_CASE("power units use the transformed analytic surface area")
         }
         else
         {
-            area = analyticEllipsoidSurfaceArea(glm::vec3(light.points[0]), glm::vec3(light.points[2]),
-                                                 glm::vec3(light.points[3]));
+            area = analyticEllipsoidSurfaceArea(
+                glm::vec3(light.points[0]), glm::vec3(light.points[2]), glm::vec3(light.points[3]));
         }
         return std::numbers::pi_v<float> * area * light.color.x;
     };
@@ -548,6 +548,20 @@ TEST_CASE("invalid analytic lights keep safe acceleration structure transforms")
     CHECK_FALSE(accelerationStructureTransformIsSafe(invalid.xform));
 }
 
+TEST_CASE("ill-conditioned rectangle lights are rejected while packing the scene")
+{
+    Scene scene;
+    Scene::UniformLightDesc desc = rectDesc();
+    desc.useXform = true;
+    desc.xform = glm::float4x4(1.0f);
+    desc.xform[0] = glm::float4(1.0f, 0.0f, 0.0f, 0.0f);
+    desc.xform[1] = glm::float4(1.0f, 1e-5f, 0.0f, 0.0f);
+
+    const Scene::Light& light = scene.getLights()[scene.createLight(desc)];
+    CHECK(light.normal.w == 0.0f);
+    CHECK(glm::float3(light.color) == glm::float3(0.0f));
+}
+
 TEST_CASE("headless light edits do not recreate released proxy geometry")
 {
     Scene scene;
@@ -618,7 +632,7 @@ TEST_CASE("a rect or disc light carries its area density rather than rebuilding 
     REQUIRE(packedRect.type == LIGHT_TYPE_RECT);
     CHECK(packedRect.pad0 ==
           doctest::Approx(inverseFiniteCrossLength(glm::float3(packedRect.points[1] - packedRect.points[0]),
-                                                    glm::float3(packedRect.points[3] - packedRect.points[0]))));
+                                                   glm::float3(packedRect.points[3] - packedRect.points[0]))));
     // 1 / area, and the area is what was authored.
     CHECK(packedRect.pad0 == doctest::Approx(1.0f / (0.7f * 0.3f)).epsilon(1e-4));
 
@@ -630,7 +644,7 @@ TEST_CASE("a rect or disc light carries its area density rather than rebuilding 
     disc.radius = 0.25f;
     const Scene::Light& packedDisc = scene.getLights()[scene.createLight(disc)];
     REQUIRE(packedDisc.type == LIGHT_TYPE_DISC);
-    CHECK(packedDisc.pad0 == doctest::Approx(analyticDiscAreaPdf(glm::float3(packedDisc.points[2]),
-                                                                 glm::float3(packedDisc.points[3]))));
+    CHECK(packedDisc.pad0 ==
+          doctest::Approx(analyticDiscAreaPdf(glm::float3(packedDisc.points[2]), glm::float3(packedDisc.points[3]))));
     CHECK(packedDisc.pad0 == doctest::Approx(1.0f / (std::numbers::pi_v<float> * 0.25f * 0.25f)).epsilon(1e-4));
 }

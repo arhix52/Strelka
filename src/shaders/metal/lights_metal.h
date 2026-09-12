@@ -28,6 +28,51 @@ struct LightSampleData
     float distToLight;
 };
 
+struct PackedAnalyticHit
+{
+    float distance;
+    bool hit;
+};
+
+// Hot intersection for a rectangle that MetalLights::upload has validated and
+// packed. All shape-only work is on the CPU: normal.xyz is the unit plane
+// normal and points[2].xyz is the inverse edge Gram matrix. Ordered range
+// comparisons reject NaN/Inf ray results without separate finite checks.
+static __inline__ PackedAnalyticHit intersectPackedRectangle(
+    device const UniformLight& light, float3 rayOrigin, float3 rayDirection, float minDistance, float maxDistance)
+{
+    const float3 corner = float3(light.points[0]);
+    const float3 edgeX = float3(light.points[1]) - corner;
+    const float3 edgeY = float3(light.points[3]) - corner;
+    const float3 planeNormal = float3(light.normal);
+    const float denominator = dot(rayDirection, planeNormal);
+    if (denominator == 0.0f)
+    {
+        return { maxDistance, false };
+    }
+
+    const float numerator = dot(corner - rayOrigin, planeNormal);
+    const float distanceHigh = numerator / denominator;
+    // Preserve the quotient remainder when reconstructing the hit point. This
+    // is three FMAs and one divide, not a general compensated affine solve, and
+    // keeps a ray exactly on a practical rectangle edge from moving across it.
+    const float distanceLow = fma(-distanceHigh, denominator, numerator) / denominator;
+    const float distance = distanceHigh + distanceLow;
+    if (!(distance >= minDistance && distance < maxDistance))
+    {
+        return { maxDistance, false };
+    }
+
+    const float3 offset = fma(rayDirection, float3(distanceHigh), rayOrigin - corner) + distanceLow * rayDirection;
+    const float projectedX = dot(offset, edgeX);
+    const float projectedY = dot(offset, edgeY);
+    const float3 inverseGram = float3(light.points[2]);
+    const float u = fma(inverseGram.x, projectedX, inverseGram.y * projectedY);
+    const float v = fma(inverseGram.y, projectedX, inverseGram.z * projectedY);
+    const bool inside = u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f;
+    return { inside ? distance : maxDistance, inside };
+}
+
 static float calcLightAreaPdf(device const UniformLight& l, const float3 hitPoint)
 {
     float areaPdf = 0.0f;
@@ -213,13 +258,12 @@ static __inline__ LightSampleData SampleDiscLight(device const UniformLight& l, 
 {
     LightSampleData lightSampleData;
     const float3 center = float3(l.points[1]);
-    const AnalyticLightSample sample =
-        sampleAnalyticDisc(center, float3(l.points[2]), float3(l.points[3]), float3(l.normal), u.x, u.y);
-    lightSampleData.pointOnLight = sample.point;
-    const float3 toLight = sample.point - hitPoint;
+    const float2 objectPoint = sampleCanonicalDisc(u.x, u.y);
+    lightSampleData.pointOnLight = center + objectPoint.x * float3(l.points[2]) + objectPoint.y * float3(l.points[3]);
+    const float3 toLight = lightSampleData.pointOnLight - hitPoint;
     lightSampleData.L = finiteDirectionAndDistance(toLight, lightSampleData.distToLight);
-    lightSampleData.normal = sample.normal;
-    lightSampleData.areaPdf = sample.areaPdf;
+    lightSampleData.normal = float3(l.normal);
+    lightSampleData.areaPdf = l.pad0;
     lightSampleData.solidAngle = 0.0f;
     return lightSampleData;
 }

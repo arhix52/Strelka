@@ -30,6 +30,7 @@ struct WavefrontVariant
     MTL::ComputePipelineState* generate = nullptr;
     MTL::ComputePipelineState* extendMotion = nullptr;
     MTL::ComputePipelineState* extendStatic = nullptr;
+    MTL::ComputePipelineState* extendDirectStatic = nullptr;
     MTL::ComputePipelineState* sssWalkMotion = nullptr;
     MTL::ComputePipelineState* sssWalkStatic = nullptr;
     MTL::ComputePipelineState* connectBase = nullptr;
@@ -58,6 +59,9 @@ struct IntegratorSceneBindings
 {
     MTL::Buffer* instanceBuffer = nullptr;
     MTL::AccelerationStructure* instanceAccelerationStructure = nullptr;
+    MTL::AccelerationStructure* directStaticAccelerationStructure = nullptr;
+    uint32_t directStaticGeometryBase = 0;
+    uint32_t directStaticInstanceIndex = 0;
     MTL::AccelerationStructure* volumeAccelerationStructure = nullptr;
     const std::vector<MTL::AccelerationStructure*>* primitiveAccelerationStructures = nullptr;
     MTL::Buffer* materialBuffer = nullptr;
