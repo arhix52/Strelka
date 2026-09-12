@@ -22,6 +22,7 @@ struct EmissiveMeshBuildInput
     uint32_t vertexOffset = 0;
     uint32_t indexOffset = 0;
     uint32_t materialId = 0;
+    uint32_t transformIndex = 0;
     std::vector<double> trianglePowers;
 };
 
@@ -166,6 +167,7 @@ inline EmissiveMeshDistribution buildEmissiveMeshDistribution(const std::vector<
         mesh.vertexOffset = input.vertexOffset;
         mesh.indexOffset = input.indexOffset;
         mesh.materialId = input.materialId;
+        mesh.transformIndex = input.transformIndex;
         out.meshes.push_back(mesh);
         meshPowers.push_back(triangleTable.totalPower);
 

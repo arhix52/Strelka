@@ -1328,7 +1328,7 @@ glm::float3 Scene::posedVertexPosition(const Mesh& mesh,
 
 bool Scene::meshBounds(const uint32_t meshId, glm::float3& outMin, glm::float3& outMax)
 {
-    if (mHostGeometryReleased || meshId >= mMeshes.size())
+    if (meshId >= mMeshes.size())
     {
         return false;
     }
@@ -1342,21 +1342,28 @@ bool Scene::meshBounds(const uint32_t meshId, glm::float3& outMin, glm::float3& 
         mMeshBounds.resize(mMeshes.size());
     }
     MeshBounds& cached = mMeshBounds[meshId];
-    if (!cached.valid)
+    if (cached.valid)
     {
-        // No palette: a mesh that is not skeletal has no pose, so the rest
-        // position is the only position it has.
-        const std::vector<glm::mat4> noPalette;
-        cached.min = glm::float3(std::numeric_limits<float>::max());
-        cached.max = glm::float3(std::numeric_limits<float>::lowest());
-        for (uint32_t i = 0; i < mesh.mVertexCount; ++i)
-        {
-            const glm::float3 p = posedVertexPosition(mesh, i, noPalette);
-            cached.min = glm::min(cached.min, p);
-            cached.max = glm::max(cached.max, p);
-        }
-        cached.valid = true;
+        outMin = cached.min;
+        outMax = cached.max;
+        return true;
     }
+    if (mHostGeometryReleased)
+    {
+        return false;
+    }
+    // No palette: a mesh that is not skeletal has no pose, so the rest
+    // position is the only position it has.
+    const std::vector<glm::mat4> noPalette;
+    cached.min = glm::float3(std::numeric_limits<float>::max());
+    cached.max = glm::float3(std::numeric_limits<float>::lowest());
+    for (uint32_t i = 0; i < mesh.mVertexCount; ++i)
+    {
+        const glm::float3 p = posedVertexPosition(mesh, i, noPalette);
+        cached.min = glm::min(cached.min, p);
+        cached.max = glm::max(cached.max, p);
+    }
+    cached.valid = true;
     outMin = cached.min;
     outMax = cached.max;
     return true;

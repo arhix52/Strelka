@@ -21,7 +21,9 @@ struct EmissiveMeshLight
 
     unsigned int aliasThreshold;
     unsigned int alias;
-    unsigned int pad0;
+    // Metal: descriptor-buffer record containing this geometry's transform.
+    // OptiX keeps its separate transform table and leaves this as instanceId.
+    unsigned int transformIndex;
     unsigned int pad1;
 };
 static_assert(sizeof(EmissiveMeshLight) == 48, "EmissiveMeshLight host/GPU ABI changed");

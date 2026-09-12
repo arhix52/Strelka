@@ -81,7 +81,9 @@ public:
     NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
                                      const oka::Mesh& mesh,
                                      uint32_t triangleCount,
-                                     bool usePrimitiveSurfaceData) override
+                                     bool usePrimitiveSurfaceData,
+                                     MTL::Buffer* transformationMatrixBuffer,
+                                     size_t transformationMatrixOffset) override
     {
         auto* geom = MTL4::AccelerationStructureTriangleGeometryDescriptor::alloc()->init();
         geom->setVertexBuffer(bufferRange(geometry->vertexBuffer(), mesh.mVbOffset * sizeof(Scene::Vertex)));
@@ -90,6 +92,11 @@ public:
         geom->setIndexBuffer(bufferRange(geometry->indexBuffer(), mesh.mIndex * sizeof(uint32_t)));
         geom->setIndexType(MTL::IndexTypeUInt32);
         geom->setTriangleCount(triangleCount);
+        if (transformationMatrixBuffer)
+        {
+            geom->setTransformationMatrixBuffer(bufferRange(transformationMatrixBuffer, transformationMatrixOffset));
+            geom->setTransformationMatrixLayout(MTL::MatrixLayoutColumnMajor);
+        }
         if (usePrimitiveSurfaceData)
         {
             const size_t primitiveOffset = (mesh.mIndex / 3u) * sizeof(PrimitiveSurfaceData);

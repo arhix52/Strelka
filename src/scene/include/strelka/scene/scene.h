@@ -50,7 +50,7 @@ struct Mesh
     // most this many triangles while the source geometry is still available to
     // the loader. Metal consumes the ranges as separate BLASes. Other backends
     // may keep treating the mesh as one primitive.
-    static constexpr uint32_t kMaxStaticBlasTriangles = 1u << 20;
+    static constexpr uint32_t kMaxStaticBlasTriangles = 1u << 24;
 
     uint32_t mIndex = 0; // Index of 1st index in index buffer
     uint32_t mCount = 0; // amount of indices in mesh
@@ -931,6 +931,11 @@ public:
     ChangeBits peekChanges() const
     {
         return mChanges;
+    }
+
+    const std::set<uint32_t>& dirtyInstances() const
+    {
+        return mDirtyInstances;
     }
 
     ChangeBits consumeChanges()

@@ -5385,6 +5385,7 @@ void OptiXRender::createEmissiveMeshLights()
         input.vertexOffset = mesh.mVbOffset;
         input.indexOffset = mesh.mIndex;
         input.materialId = materialId;
+        input.transformIndex = static_cast<uint32_t>(instanceId);
         const bool potentiallyChanging = mesh.isSkeletal || (mEnableMotionBlur && previous != instance.transform);
         input.trianglePowers = oka::render::emissiveTrianglePowers(
             *mScene, mesh, materials[materialId], instance.transform, potentiallyChanging);

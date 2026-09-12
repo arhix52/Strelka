@@ -499,8 +499,11 @@ struct Uniforms
 #else
     uint64_t baseLightConnections;
 #endif
+    /// First transform-only record after the real TLAS instance descriptors.
+    /// A world-space baked geometry indexes this tail by GeometryEntry id.
+    uint32_t geometryTransformBase;
 };
-static_assert(sizeof(Uniforms) == 1040, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1056, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -751,6 +754,7 @@ struct GeometryEntry
 #define GEOM_SHADE_BUCKET_SHIFT 28u
 #define GEOM_SHADE_BUCKET_MASK (3u << GEOM_SHADE_BUCKET_SHIFT)
 #define GEOM_FLAG_PRIMITIVE_SURFACE_DATA (1u << 27)
+#define GEOM_FLAG_BAKED_TRANSFORM (1u << 26)
 #define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
 // Wavefront path state is memory-traffic critical and fixed at 24 bytes; feature-specific state uses side tables.

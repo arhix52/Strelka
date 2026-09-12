@@ -13,6 +13,7 @@ using oka::metal::kWavefrontStageStatsUints;
 using oka::metal::kWavefrontTraversalBatchThreads;
 using oka::metal::kWavefrontTriangleTraversalBatchThreads;
 using oka::metal::wavefrontBufferLayout;
+using oka::metal::wavefrontFullFrameTraversalBatchThreads;
 using oka::metal::WavefrontElementSizes;
 using oka::metal::wavefrontTraversalBatchCount;
 
@@ -158,4 +159,13 @@ TEST_CASE("wavefront traversal batches cap one hardware dispatch")
     CHECK(wavefrontTraversalBatchCount(1920 * 1080) == 8);
     CHECK(wavefrontTraversalBatchCount(1920 * 1080, kWavefrontCurveTraversalBatchThreads) == 16);
     CHECK(kWavefrontCurveTraversalBatchThreads * kWavefrontCurveTraversalBatchesPerGroup == 256u * 1024u);
+}
+
+TEST_CASE("Metal 4 triangle traversal uses one full-frame batch")
+{
+    constexpr uint32_t pixels = 1280u * 720u;
+    const uint32_t batchThreads = wavefrontFullFrameTraversalBatchThreads(pixels);
+    CHECK(batchThreads == pixels);
+    CHECK(wavefrontTraversalBatchCount(pixels, batchThreads) == 1u);
+    CHECK(wavefrontFullFrameTraversalBatchThreads(0u) == 1u);
 }

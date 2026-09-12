@@ -93,6 +93,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_transform.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_upload_plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_accel_build_policy.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_static_blas_grouping.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ies_pack.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_ies_math.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_opacity_micromap_policy.cpp

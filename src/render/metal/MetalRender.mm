@@ -894,7 +894,8 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, emissiveTriangles) == 872);
     static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(offsetof(Uniforms, baseLightConnections) == 1032);
-    static_assert(sizeof(Uniforms) == 1040, "Uniforms host/Metal ABI changed");
+    static_assert(offsetof(Uniforms, geometryTransformBase) == 1040);
+    static_assert(sizeof(Uniforms) == 1056, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -1215,7 +1216,10 @@ uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurface
         iterations += kPassthroughIterations;
     }
     // Subsurface walk steps have a separate ceiling; cap host iterations so rare long tails do not pad every launch.
-    if (mMaterials.hasSubsurfaceMaterials())
+    // A depth-1 render terminates in shade before it samples a BSDF or enters a
+    // subsurface walk, so SSS headroom there only encodes zero-work indirect
+    // dispatches after the camera ray.
+    if (maxDepth > 1u && mMaterials.hasSubsurfaceMaterials())
     {
         const uint32_t steps = std::min(subsurfaceIterations, (uint32_t)MEDIUM_MAX_STEPS);
         iterations += fusedSss ? (steps + SSS_FUSED_STEPS - 1u) / SSS_FUSED_STEPS : steps;
@@ -2044,9 +2048,26 @@ void MetalRender::render(Buffer* output)
             const std::vector<metal::WavefrontChunk> logicalWavefrontChunks =
                 metal::makeWavefrontChunkPlan(samplesThisLaunch, frameReq.bounceIterations, iterationsPerChunk);
             uint32_t traversalBatchThreads = useMetal4 && !featureIn.hasCurves ?
-                                                 metal::kWavefrontTriangleTraversalBatchThreads :
+                                                 metal::wavefrontFullFrameTraversalBatchThreads(frameReq.pathCount) :
                                                  metal::kWavefrontTraversalBatchThreads;
             uint32_t traversalBatchesPerGroup = metal::kWavefrontTraversalBatchesPerCommandBuffer;
+            if (useMetal4 && !featureIn.hasCurves)
+            {
+                // Triangle traversal is preemptible on Apple silicon. Keep one
+                // full-frame dispatch so the RT hardware sees the complete
+                // camera wavefront. The override exists only to subdivide a
+                // failing workload while diagnosing a driver/watchdog issue.
+                const uint32_t requested = envUint("STRELKA_TRIANGLE_BATCH_THREADS", 0u);
+                if (requested != 0u)
+                {
+                    const uint32_t upper = std::max(
+                        metal::kWavefrontMinDiagnosticTraversalBatchThreads,
+                        (frameReq.pathCount + 63u) & ~63u);
+                    traversalBatchThreads =
+                        std::clamp(requested, metal::kWavefrontMinDiagnosticTraversalBatchThreads, upper);
+                    traversalBatchThreads -= traversalBatchThreads % 64u;
+                }
+            }
             if (useMetal4 && featureIn.hasCurves)
             {
                 // Keep extend independent of the shadow batches: curve closest-
@@ -2190,9 +2211,20 @@ void MetalRender::render(Buffer* output)
                     // trace all share one Metal 4 command buffer.
                     cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
                     enc4 = cmd4->computeCommandEncoder();
-                    labelMetal4(enc4, "skinning + accel + trace chunk 0");
+                    const bool encodeAccel = encodeSkeletalBlas || encodeTlas;
+                    const char* encoderLabel = "trace chunk 0";
+                    if (anySkinWork)
+                    {
+                        encoderLabel = encodeAccel ? "geometry update + accel + trace chunk 0" :
+                                                     "geometry update + trace chunk 0";
+                    }
+                    else if (encodeAccel)
+                    {
+                        encoderLabel = "accel + trace chunk 0";
+                    }
+                    labelMetal4(enc4, encoderLabel);
                     encodeSkinningAndCopies(enc4, mMetal4.constants());
-                    if (encodeSkeletalBlas || encodeTlas)
+                    if (encodeAccel)
                     {
                         mAccel.encodeInline(enc4, asUpdate);
                     }
@@ -3521,8 +3553,18 @@ void MetalRender::handleSceneChanges()
     {
         if (!mAccel.blasList().empty())
         {
-            mAccel.rebuildTLAS();
-            mAccel.rebuildEmissiveMeshLights();
+            if (mAccel.transformChangesRequireRebuild())
+            {
+                // This transform was consumed by a triangle descriptor while
+                // building a world-space static BLAS. A TLAS refit cannot move
+                // those triangles; reclassify and rebuild the affected layout.
+                rebuildAccelerationStructures();
+            }
+            else
+            {
+                mAccel.rebuildTLAS();
+                mAccel.rebuildEmissiveMeshLights();
+            }
         }
         needReset = true;
         needSharcReset = true;

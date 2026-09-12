@@ -126,3 +126,18 @@ TEST_CASE("worldBounds follows a new instance")
     REQUIRE(scene.worldBounds(lo, hi));
     CHECK(hi.x == doctest::Approx(10.0f));
 }
+
+TEST_CASE("cached mesh bounds survive host geometry release")
+{
+    Scene scene;
+    const uint32_t meshId = addQuad(scene);
+    glm::float3 lo(0.0f);
+    glm::float3 hi(0.0f);
+
+    REQUIRE(scene.meshBounds(meshId, lo, hi));
+    scene.releaseHostGeometry();
+
+    REQUIRE(scene.meshBounds(meshId, lo, hi));
+    CHECK(lo == glm::float3(-1.0f, -1.0f, 0.0f));
+    CHECK(hi == glm::float3(1.0f, 1.0f, 0.0f));
+}

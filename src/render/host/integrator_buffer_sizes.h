@@ -65,9 +65,9 @@ inline constexpr uint32_t kWavefrontControlUints = 96;
 // trip the Metal watchdog. Prepare writes one indirect argument triplet per
 // batch, so inactive tail batches remain true zero-work dispatches.
 inline constexpr uint32_t kWavefrontTraversalBatchThreads = 256 * 1024;
-// Triangle traversal is preemptible enough on Apple silicon to amortise the
-// launch with a larger batch. Curves retain the conservative size above: those
-// were the workloads that originally hit the watchdog.
+// Optional diagnostic subdivision for triangle traversal. Production Metal 4
+// dispatches the whole pixel queue at once; this size is retained for the
+// STRELKA_TRIANGLE_BATCH_THREADS reproducer when a driver fault needs narrowing.
 inline constexpr uint32_t kWavefrontTriangleTraversalBatchThreads = 512 * 1024;
 // Diagnostic subdivision may reduce a traversal dispatch to this size. Keeping
 // the indirect-argument buffer large enough costs less than 7 KB at 1080p and
@@ -90,6 +90,11 @@ inline constexpr uint32_t wavefrontTraversalBatchCount(uint32_t pixels,
                                                        uint32_t batchThreads = kWavefrontTraversalBatchThreads)
 {
     return std::max(1u, (pixels + batchThreads - 1u) / batchThreads);
+}
+
+inline constexpr uint32_t wavefrontFullFrameTraversalBatchThreads(uint32_t pixels)
+{
+    return std::max(pixels, 1u);
 }
 // Metal 4 fault diagnosis writes the stage it is about to enter here. Keep it
 // outside the Metal 3 control-buffer snapshot at the start of stageStats.

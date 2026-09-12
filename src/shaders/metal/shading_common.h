@@ -1229,6 +1229,25 @@ static float4x4 emissiveObjectToWorld(InstancePointer instances, uint32_t instan
         float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
 }
 
+static uint32_t geometryTransformIndex(constant Uniforms& uniforms,
+                                       uint32_t instanceIndex,
+                                       uint32_t geometryEntryIndex,
+                                       GeometryEntry entry)
+{
+    return (entry.flags & GEOM_FLAG_BAKED_TRANSFORM) != 0u ? uniforms.geometryTransformBase + geometryEntryIndex :
+                                                             instanceIndex;
+}
+
+template <typename InstancePointer>
+static float4x4 geometryObjectToWorld(constant Uniforms& uniforms,
+                                      InstancePointer instances,
+                                      uint32_t instanceIndex,
+                                      uint32_t geometryEntryIndex,
+                                      GeometryEntry entry)
+{
+    return emissiveObjectToWorld(instances, geometryTransformIndex(uniforms, instanceIndex, geometryEntryIndex, entry));
+}
+
 template <typename InstancePointer>
 static EmissiveTriangleGeometry fetchEmissiveTriangle(constant Uniforms& uniforms,
                                                       InstancePointer instances,
@@ -1244,7 +1263,7 @@ static EmissiveTriangleGeometry fetchEmissiveTriangle(constant Uniforms& uniform
     EmissiveTriangleGeometry triangle;
     thread float3* points[3] = { &triangle.p0, &triangle.p1, &triangle.p2 };
     thread float2* uvs[3] = { &triangle.uv0, &triangle.uv1, &triangle.uv2 };
-    const float4x4 objectToWorld = emissiveObjectToWorld(instances, mesh.instanceId);
+    const float4x4 objectToWorld = emissiveObjectToWorld(instances, mesh.transformIndex);
     for (uint32_t k = 0u; k < 3u; ++k)
     {
         const uint32_t vertexId = indexBuffer[mesh.indexOffset + primitiveId * 3u + k] + mesh.vertexOffset;

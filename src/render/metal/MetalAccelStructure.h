@@ -42,9 +42,10 @@ public:
         uint64_t tlasBuilds = 0;
         uint64_t tlasRefits = 0;
     };
-    // One acceleration structure covering N geometries that always move together.
+    // One acceleration structure covering N geometries that either move
+    // together or were individually transformed into a static world-space BLAS.
     // A large static glTF primitive may contribute only one spatial index range;
-    // the remaining ranges live in sibling BLASes with the same transform.
+    // the remaining ranges live in sibling BLASes.
     struct Blas
     {
         MTL::AccelerationStructure* mAs = nullptr;
@@ -52,6 +53,10 @@ public:
         // (both derive from MTL::AccelerationStructureDescriptor).
         MTL::AccelerationStructureDescriptor* mDescriptor = nullptr;
         MTL::Buffer* mScratch = nullptr; // persistent, reused every refit/rebuild
+        // One packed object-to-world matrix per geometry in a baked static BLAS.
+        // Metal consumes these while building world-space geometry; shaders read
+        // the matching matrices from the descriptor-buffer tail instead.
+        MTL::Buffer* mGeometryTransformBuffer = nullptr;
         // Metal 4 motion descriptors read BufferRange arrays from GPU memory.
         std::vector<MTL::Buffer*> mMotionVertexRangeBuffers;
         size_t mRefitScratchSize = 0;
@@ -68,6 +73,7 @@ public:
         uint32_t asIndex;
         uint32_t userID;
         uint32_t mask;
+        bool identityTransform = false;
         struct Geometry
         {
             uint32_t sceneInstanceId = 0;
@@ -146,6 +152,7 @@ public:
 
     void updateInstanceTransforms();
     void rebuildTLAS();
+    bool transformChangesRequireRebuild() const;
 
     /// Encode dynamic updates into the caller's Metal 4 compute encoder. Only
     /// valid when inlineWithTracer() is true.
@@ -218,6 +225,10 @@ public:
     size_t tlasInstanceCount() const
     {
         return mTlasInstanceCount;
+    }
+    uint32_t geometryTransformBase() const
+    {
+        return static_cast<uint32_t>(mEmittedInstances.size());
     }
     MTL::Buffer* tlasScratchBuffer() const
     {
@@ -298,6 +309,10 @@ private:
 
     std::vector<Blas> mBlasList;
     std::vector<EmittedInstance> mEmittedInstances;
+    // Indexed exactly like GeometryEntry. A valid scene-instance id means the
+    // geometry was baked into world space and needs that transform for shading.
+    std::vector<uint32_t> mGeometryTransformSceneInstances;
+    std::vector<uint8_t> mBakedSceneInstances;
     std::vector<render::EmissiveMeshBuildInput> mSceneEmissiveInputs;
     MTL::Buffer* mEmissiveMeshBuffer = nullptr;
     MTL::Buffer* mEmissiveTriangleBuffer = nullptr;
@@ -345,7 +360,8 @@ private:
     // because being wrong on the high side only delays a free.
     static constexpr uint64_t kMaxFramesInFlight = 3;
     static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
-    /// How many geometries one bottom level may hold.
+    /// How many geometries one refittable bottom level may hold. World-space
+    /// baked static BLASes omit Refit and are limited by triangle count instead.
     ///
     /// Past a certain width, a structure built with AccelerationStructureUsageRefit
     /// returns no intersections at all on this driver -- it builds without error,
@@ -356,7 +372,7 @@ private:
     /// allocates, which is the difference between the pine forest fitting in memory
     /// and not -- so the width is capped instead, well short of where it was seen to
     /// fail. Splitting costs one more instance in the top level per 32 primitives.
-    static constexpr size_t kMaxGeometriesPerBlas = 32;
+    static constexpr size_t kMaxGeometriesPerRefitBlas = 32;
     size_t mNextBlasRebuildIndex = 0;
 };
 

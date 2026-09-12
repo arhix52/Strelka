@@ -1331,7 +1331,8 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
         return false;
     }
 
-    const GeometryEntry entry = geometryEntries[inst.userID + hit.geometryId];
+    const uint32_t geometryEntryIndex = inst.userID + hit.geometryId;
+    const GeometryEntry entry = geometryEntries[geometryEntryIndex];
     const bool interpolateMotion =
         SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
@@ -1361,9 +1362,10 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
                              objectGeomNormal, uvArea2);
     }
 
-    const float3 axisX = float3(inst.transformationMatrix[0]);
-    const float3 axisY = float3(inst.transformationMatrix[1]);
-    const float3 axisZ = float3(inst.transformationMatrix[2]);
+    const float4x4 objectToWorld = geometryObjectToWorld(uniforms, instances, hit.instanceId, geometryEntryIndex, entry);
+    const float3 axisX = objectToWorld[0].xyz;
+    const float3 axisY = objectToWorld[1].xyz;
+    const float3 axisZ = objectToWorld[2].xyz;
     const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
     const float3 shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
                                                      normalTransform.cofactorZ, normalTransform.orientation);
@@ -1925,8 +1927,10 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
 static inline float3 previousWorldPosition(device const char* prevFrameVertexBuffer,
                                            device const uint32_t* indexBuffer,
                                            device const MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances,
+                                           constant Uniforms& uniforms,
                                            GeometryEntry entry,
                                            uint32_t instanceIndex,
+                                           uint32_t geometryEntryIndex,
                                            uint32_t primitiveId,
                                            float2 bary)
 {
@@ -1940,10 +1944,8 @@ static inline float3 previousWorldPosition(device const char* prevFrameVertexBuf
     }
     const float3 objectPos = interpolateAttrib(p[0], p[1], p[2], bary);
 
-    const auto inst = prevInstances[instanceIndex];
     const float4x4 prevObjectToWorld =
-        float4x4(float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
-                 float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
+        geometryObjectToWorld(uniforms, prevInstances, instanceIndex, geometryEntryIndex, entry);
     return (prevObjectToWorld * float4(objectPos, 1.0f)).xyz;
 }
 
@@ -2607,10 +2609,17 @@ static bool restirTargetIsDirect(thread const RestirTargetSurface& stored)
     return (stored.geomEntryIndex & RESTIR_TARGET_DIRECT) != 0u;
 }
 
-static float4x4 restirTargetObjectToWorld(constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+static float4x4 restirTargetObjectToWorld(constant Uniforms& uniforms,
+                                          constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
+                                          device const GeometryEntry* geometryEntries,
                                           thread const RestirTargetSurface& stored)
 {
-    return restirTargetIsDirect(stored) ? float4x4(1.0f) : emissiveObjectToWorld(instances, stored.instanceIndex);
+    if (restirTargetIsDirect(stored))
+    {
+        return float4x4(1.0f);
+    }
+    const GeometryEntry entry = geometryEntries[stored.geomEntryIndex];
+    return geometryObjectToWorld(uniforms, instances, stored.instanceIndex, stored.geomEntryIndex, entry);
 }
 
 static void rebuildRestirTargetSurface(constant Uniforms& uniforms,
@@ -3436,10 +3445,8 @@ static inline void wavefrontShadeImpl(uint gid,
     float3 shadingNormal, shadingTangent, shadingGeomNormal;
     if (isCurve)
     {
-        const auto inst = instances[rec.instanceIndex];
-        const float4x4 objectToWorld = float4x4(
-            float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
-            float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
+        const float4x4 objectToWorld =
+            geometryObjectToWorld(uniforms, instances, rec.instanceIndex, rec.geomEntryIndex, entry);
         // Built in world space rather than fetched in object space and
         // transformed out, because the radial normal is taken *from the hit
         // point* -- and the hit point only exists in world space. Coming back the
@@ -3480,10 +3487,11 @@ static inline void wavefrontShadeImpl(uint gid,
             fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
                                  motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
                                  objectGeomNormal, uvArea2);
-            const auto inst = instances[rec.instanceIndex];
-            const float3 axisX = float3(inst.transformationMatrix[0]);
-            const float3 axisY = float3(inst.transformationMatrix[1]);
-            const float3 axisZ = float3(inst.transformationMatrix[2]);
+            const float4x4 objectToWorld =
+                geometryObjectToWorld(uniforms, instances, rec.instanceIndex, rec.geomEntryIndex, entry);
+            const float3 axisX = objectToWorld[0].xyz;
+            const float3 axisY = objectToWorld[1].xyz;
+            const float3 axisZ = objectToWorld[2].xyz;
             const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
             shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
                                                 normalTransform.cofactorZ, normalTransform.orientation);
@@ -3964,10 +3972,11 @@ static inline void wavefrontShadeImpl(uint gid,
 
         // Depth and motion always belong to the camera-visible surface, even
         // when its material attributes will be replaced.
-        const float3 prevPrimary = uniforms.hasPrevFramePose ?
-                                       previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry,
-                                                             rec.instanceIndex, rec.primitiveId, bary) :
-                                       worldPosition;
+        const float3 prevPrimary =
+            uniforms.hasPrevFramePose ?
+                previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, uniforms, entry,
+                                      rec.instanceIndex, rec.geomEntryIndex, rec.primitiveId, bary) :
+                worldPosition;
         const ScreenMotion primaryMotion = screenMotion(uniforms, uniforms.prevWorldToClip * float4(prevPrimary, 1.0f),
                                                         uint2(tid % uniforms.width, tid / uniforms.width));
         aov[tid].depth = viewDepth(uniforms, worldPosition);
@@ -4590,8 +4599,8 @@ static inline void wavefrontShadeImpl(uint gid,
 
                 const float3 previousPosition =
                     uniforms.hasPrevFramePose != 0u && !isCurve ?
-                        previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, entry,
-                                              rec.instanceIndex, rec.primitiveId, bary) :
+                        previousWorldPosition(prevFrameVertexBuffer, indexBuffer, prevInstances, uniforms, entry,
+                                              rec.instanceIndex, rec.geomEntryIndex, rec.primitiveId, bary) :
                         worldPosition;
                 const uint2 pixel = uint2(tid % uniforms.width, tid / uniforms.width);
                 const ScreenMotion motion =
@@ -4794,12 +4803,11 @@ static inline void wavefrontShadeImpl(uint gid,
                                         float4x4 previousObjectToWorld = float4x4(1.0f);
                                         if (!restirTargetIsDirect(previousStored))
                                         {
-                                            const auto previousInstance = prevInstances[previousStored.instanceIndex];
-                                            previousObjectToWorld =
-                                                float4x4(float4(float3(previousInstance.transformationMatrix[0]), 0.0f),
-                                                         float4(float3(previousInstance.transformationMatrix[1]), 0.0f),
-                                                         float4(float3(previousInstance.transformationMatrix[2]), 0.0f),
-                                                         float4(float3(previousInstance.transformationMatrix[3]), 1.0f));
+                                            const GeometryEntry previousEntry =
+                                                geometryEntries[previousStored.geomEntryIndex];
+                                            previousObjectToWorld = geometryObjectToWorld(
+                                                uniforms, prevInstances, previousStored.instanceIndex,
+                                                previousStored.geomEntryIndex, previousEntry);
                                         }
                                         rebuildRestirTargetSurface(
                                             uniforms, previousObjectToWorld, materials, geometryEntries,
@@ -5561,10 +5569,10 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
     const float storedMotionTime = motionTimeFor(uniforms, tid, sampleIdx);
     const bool interpolateMotion =
         SPEC_MOTION_BLUR && uniforms.enableMotionBlur && storedMotionTime < 1.0f && prevVertexBuffer && indexBuffer;
-    rebuildRestirTargetSurface(uniforms, restirTargetObjectToWorld(instances, stored), materials, geometryEntries,
-                               vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments, stored,
-                               interpolateMotion, storedMotionTime, si, isFibre, isOpenPBR, neeFrame, openpbrPrepared,
-                               curveRadius);
+    rebuildRestirTargetSurface(uniforms, restirTargetObjectToWorld(uniforms, instances, geometryEntries, stored),
+                               materials, geometryEntries, vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints,
+                               curveSegments, stored, interpolateMotion, storedMotionTime, si, isFibre, isOpenPBR,
+                               neeFrame, openpbrPrepared, curveRadius);
 
     const uint2 pixel = uint2(tid % uniforms.width, tid / uniforms.width);
     const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
@@ -5715,11 +5723,11 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
             const float neighborMotionTime = motionTimeFor(uniforms, neighborIndex, neighborSampleIdx);
             const bool neighborInterpolateMotion = SPEC_MOTION_BLUR && uniforms.enableMotionBlur &&
                                                    neighborMotionTime < 1.0f && prevVertexBuffer && indexBuffer;
-            rebuildRestirTargetSurface(uniforms, restirTargetObjectToWorld(instances, neighborStored), materials,
-                                       geometryEntries, vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints,
-                                       curveSegments, neighborStored, neighborInterpolateMotion, neighborMotionTime,
-                                       neighborSi, neighborIsFibre, neighborIsOpenPBR, neighborNeeFrame,
-                                       neighborOpenpbrPrepared, neighborCurveRadius);
+            rebuildRestirTargetSurface(
+                uniforms, restirTargetObjectToWorld(uniforms, instances, geometryEntries, neighborStored), materials,
+                geometryEntries, vertexBuffer, prevVertexBuffer, indexBuffer, curvePoints, curveSegments,
+                neighborStored, neighborInterpolateMotion, neighborMotionTime, neighborSi, neighborIsFibre,
+                neighborIsOpenPBR, neighborNeeFrame, neighborOpenpbrPrepared, neighborCurveRadius);
             const LightConnection selectedAtNeighbor = reconnectRestirSample(
                 uniforms, lights, instances, materials, vertexBuffer, prevVertexBuffer, indexBuffer, neighborMotionTime,
                 neighborSi, envAliasTable, envMapTexture, iesProfiles, reservoir.sample);
@@ -6002,7 +6010,8 @@ static void guideImpl(uint gid,
             return;
         }
 
-        const GeometryEntry entry = geometryEntries[inst.userID + hit.geometryId];
+        const uint32_t geometryEntryIndex = inst.userID + hit.geometryId;
+        const GeometryEntry entry = geometryEntries[geometryEntryIndex];
         // The common glossy case needs only the first opaque hit distance. It
         // avoids all vertex/material texture traffic here.
         if (!replaceMaterial && materials[entry.materialId].alpha_mode == ALPHA_MODE_OPAQUE)
@@ -6011,9 +6020,8 @@ static void guideImpl(uint gid,
             return;
         }
 
-        const float4x4 objectToWorld = float4x4(
-            float4(float3(inst.transformationMatrix[0]), 0.0f), float4(float3(inst.transformationMatrix[1]), 0.0f),
-            float4(float3(inst.transformationMatrix[2]), 0.0f), float4(float3(inst.transformationMatrix[3]), 1.0f));
+        const float4x4 objectToWorld =
+            geometryObjectToWorld(uniforms, instances, hit.instanceId, geometryEntryIndex, entry);
         const float3 worldPosition = origin + direction * hit.distance;
         const bool isCurve = SPEC_CURVES && (entry.flags & GEOM_FLAG_CURVE) != 0u;
 

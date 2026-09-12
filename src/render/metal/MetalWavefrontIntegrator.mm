@@ -745,16 +745,19 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const NS::UInteger kRestirArgsOffset = 29 * sizeof(uint32_t);
     const uint32_t traversalBatchThreads = frame.traversalBatchThreads;
     const uint32_t traversalBatchCount = wavefrontTraversalBatchCount(pixels, traversalBatchThreads);
-    const uint32_t shadowBatchThreads = (features & WavefrontFeatures::kCurves) != 0 ?
-                                            kWavefrontTraversalBatchThreads :
-                                            kWavefrontTriangleTraversalBatchThreads;
+    const uint32_t shadowBatchThreads =
+        (features & WavefrontFeatures::kCurves) != 0 ? kWavefrontTraversalBatchThreads : traversalBatchThreads;
     const uint32_t shadowBatchCount = wavefrontTraversalBatchCount(pixels, shadowBatchThreads);
     const MTL::GPUAddress traversalBatchThreadsAddress = ring.push(traversalBatchThreads);
     const MTL::GPUAddress traversalBatchCountAddress = ring.push(traversalBatchCount);
 
     const bool useMotion = frame.motionBlasBuilt || variant->extendStatic == nullptr ||
                            frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
-    const bool fusedSss = (features & WavefrontFeatures::kSubsurface) != 0u &&
+    // A terminal camera hit never samples a BSDF and therefore cannot enter an
+    // SSS medium. Keep the SSS-specialised shade variant, but do not scan the
+    // full camera queue or encode the empty SSS walk for a depth-1 capture.
+    const bool fusedSss = uniforms && uniforms->maxDepth > 1u &&
+                          (features & WavefrontFeatures::kSubsurface) != 0u &&
                           (features & WavefrontFeatures::kSharcUpdate) == 0u && variant->sssWalkMotion &&
                           variant->sssWalkStatic;
 
@@ -1553,7 +1556,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     {
         return enc;
     }
-    const bool fusedSss = (features & WavefrontFeatures::kSubsurface) != 0u && !sharcUpdatePass &&
+    // See the Metal 4 path above: depth 1 cannot produce an SSS continuation,
+    // even when alpha pass-through headroom keeps the host iteration loop alive.
+    const bool fusedSss = uniforms && uniforms->maxDepth > 1u &&
+                          (features & WavefrontFeatures::kSubsurface) != 0u && !sharcUpdatePass &&
                           variant->sssWalkMotion && variant->sssWalkStatic;
 
     // Profiling gives each stage its own encoder, because this hardware samples
