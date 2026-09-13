@@ -420,7 +420,8 @@ extern "C" __global__ void __raygen__rg()
             // It deliberately does not spend a bounce -- a hedge of alpha-tested
             // leaves would otherwise exhaust max_depth before any light
             // transport happened -- and is bounded instead by
-            // PATH_PASSTHROUGH_MAX, which the closest hit enforces.
+            // PATH_PASSTHROUGH_MAX, which radiance any-hit enforces for triangles
+            // and closest hit enforces for curves and medium boundaries.
             if (prd.passedThrough)
             {
                 prd.passedThrough = false;

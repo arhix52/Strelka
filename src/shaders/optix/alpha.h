@@ -33,7 +33,7 @@
 /// Coverage of a surface at a uv. 1 for an opaque material, 0 or 1 for MASK,
 /// the base-colour alpha for BLEND.
 ///
-/// Opacity uses raw UV; material shading passes transformed UV to bsdf_init.
+/// Callers pass the base-colour texture's transformed UV.
 static __forceinline__ __device__ float resolveOpacity(const MaterialParams& material,
                                                        const cudaTextureObject_t* textures,
                                                        float2 uv)

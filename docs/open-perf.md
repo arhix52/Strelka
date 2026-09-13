@@ -101,15 +101,18 @@ out entirely (`hasCutout` forced false -- wrong image, measured for the bound)
 is 93.3 ms against 106.4: the feature is 13 % of pine's frame. Moving the test
 above `initSurfaceInteraction()`, so that a needle the path slips through no
 longer resolves base colour, metallic-roughness, emission and the normal map
-first, takes 3 % of that (109.2 -> 106.1). The other 10 % is not shading at all:
-it is the traversal restart every pass-through costs, one full trace per needle,
-with the segment bookkeeping and the continuation-stack spill that go with it.
-An `__anyhit__radiance` that ignores the intersection is what removes that --
-the radiance hit group has no any-hit program today, and cutout instances
-already omit `OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT` for the shadow ray's sake. It
-needs a per-intersection random rather than the per-vertex `passthrough`
-counter, so it would change the noise pattern (not the estimate), and Metal
-keeps the loop until someone ports it.
+first, takes 3 % of that (109.2 -> 106.1). The other 10 % was not shading at
+all: it was the traversal restart every pass-through cost, one full trace per
+needle, with segment bookkeeping and a continuation-stack spill. Radiance
+any-hit now rejects those intersections inside the original traversal, using
+the existing per-path passthrough counter to bound and stratify the decisions.
+On top of the specialised-hit-group build, pine moved 18.01 -> 17.13 ms. The
+required `OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL` prevents a split BVH
+from reporting one primitive twice; its traversal cost regressed the mixed
+curve/cutout kids scene by 3.7%, so that pipeline conservatively keeps the old
+closest-hit restart path. NCU measured time down 5.3%, DRAM reads 5.3%, writes
+7.8%, `no_instruction` 5.8% and `long_scoreboard` 5.0%. The noise pattern
+changes, not the estimate: at 24 spp pine's mean moved 0.013%.
 
 ## The profile after the traffic work, 2026-09-11
 

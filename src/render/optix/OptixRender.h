@@ -101,6 +101,7 @@ private:
         /// ask a bare CUdeviceptr how big it is, and an estimate made from the
         /// triangle count would be the thing the report exists to avoid.
         size_t gas_bytes = 0;
+        uint32_t geometry_flags = OPTIX_GEOMETRY_FLAG_NONE;
         /// This mesh's opacity micromap array, or 0 when it has none.
         ///
         /// Owned here because the structure references it: an acceleration

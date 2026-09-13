@@ -350,6 +350,24 @@ static __forceinline__ __device__ float3 mediumTransmittance(float3 origin,
     return make_float3(expf(-optical.x), expf(-optical.y), expf(-optical.z));
 }
 
+static __forceinline__ __device__ float hitOpacity(const HitGroupData* hit_data, int32_t matId)
+{
+    const MaterialParams& material = params.materials[matId];
+    const unsigned int primitiveId = optixGetPrimitiveIndex();
+    const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
+    const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
+    const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
+    const uint32_t baseVbOffset = hit_data->vertexOffset;
+    const float2 uv = apply_texture_transform(
+        interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
+                          unpackUV(params.scene.vb[baseVbOffset + i1].uv),
+                          unpackUV(params.scene.vb[baseVbOffset + i2].uv), optixGetTriangleBarycentrics()),
+        material);
+
+    const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
+    return resolveOpacity(material, textures, uv);
+}
+
 /// Any-hit for shadow rays. Only bound on instances whose material is not
 /// opaque -- everything else carries OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT, so a
 /// trunk or a rock never enters this program alongside the leaves.
@@ -364,23 +382,12 @@ extern "C" __global__ void __anyhit__occlusion()
 
     const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const int32_t matId = hit_data->materialId;
-    const MaterialParams& material = params.materials[matId];
-    if (material.alpha_mode == ALPHA_MODE_OPAQUE)
+    if (params.materials[matId].alpha_mode == ALPHA_MODE_OPAQUE)
     {
         return; // accepted; TERMINATE_ON_FIRST_HIT ends the ray here
     }
 
-    const unsigned int primitiveId = optixGetPrimitiveIndex();
-    const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
-    const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
-    const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
-    const uint32_t baseVbOffset = hit_data->vertexOffset;
-    const float2 uv = interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
-                                        unpackUV(params.scene.vb[baseVbOffset + i1].uv),
-                                        unpackUV(params.scene.vb[baseVbOffset + i2].uv), optixGetTriangleBarycentrics());
-
-    const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
-    const float opacity = resolveOpacity(material, textures, uv);
+    const float opacity = hitOpacity(hit_data, matId);
 
     const float transmittance = __uint_as_float(optixGetPayload_0()) * (1.0f - opacity);
     if (transmittance <= SHADOW_TRANSMITTANCE_CUTOFF)
@@ -389,6 +396,34 @@ extern "C" __global__ void __anyhit__occlusion()
     }
     optixSetPayload_0(__float_as_uint(transmittance));
     optixIgnoreIntersection();
+}
+
+extern "C" __global__ void __anyhit__radiance()
+{
+    if (optixGetPrimitiveType() != OPTIX_PRIMITIVE_TYPE_TRIANGLE)
+    {
+        return;
+    }
+
+    PerRayData* prd = getPRD();
+    if (prd->passthrough >= PATH_PASSTHROUGH_MAX)
+    {
+        return;
+    }
+
+    const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+    const int32_t matId = hit_data->materialId;
+    if (params.materials[matId].alpha_mode == ALPHA_MODE_OPAQUE)
+    {
+        return;
+    }
+
+    const float opacity = hitOpacity(hit_data, matId);
+    if (opacity < 1.0f && opacitySample(prd->sampler, launchPixelIndex(params), prd->passthrough) >= opacity)
+    {
+        ++prd->passthrough;
+        optixIgnoreIntersection();
+    }
 }
 
 static __forceinline__ __device__ uint32_t selectLightIndex(uint32_t bucketWord, uint32_t coinWord, uint32_t numLights)
@@ -2636,13 +2671,14 @@ static __forceinline__ __device__ void closestHitRadiance()
     // Fetching only the uv for the test, and the positions only for the step-off,
     // was measured and is not here: it reads 36 bytes of vertex where the full
     // fetch reads 96, and pine_scene does not move for it (106.2 against 106.4).
-    // What is left of the 13 % is the traversal restart each pass-through costs,
-    // which wants an any-hit program rather than a cheaper closest hit.
+    // Triangle cutouts are rejected by __anyhit__radiance now. This fallback is
+    // retained for curves, whose hit groups accept the intersection in any-hit.
     //
     // params.hasCutout is bound, so a scene whose materials are all opaque does
     // not carry the test -- nor the opacity texture fetch inside it. Metal
     // spells it kFcAlpha.
-    if (params.hasCutout && prd->passthrough < PATH_PASSTHROUGH_MAX)
+    if (params.hasCutout && (params.hasCurves || primType != OPTIX_PRIMITIVE_TYPE_TRIANGLE) &&
+        prd->passthrough < PATH_PASSTHROUGH_MAX)
     {
         const float opacity = resolveOpacity(matParams, textures, apply_texture_transform(surfaceHit.uv, matParams));
         if (opacity < 1.0f && opacitySample(prd->sampler, launchPixelIndex(params), prd->passthrough) >= opacity)

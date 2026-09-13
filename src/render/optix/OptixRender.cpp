@@ -1407,7 +1407,26 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
 
     const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
 
-    const uint32_t triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    // Requiring one any-hit call disables primitive splitting. It pays for the
+    // foliage scene, but regresses the mixed curve/cutout kids scene; that scene
+    // keeps the restart path below until a cheaper duplicate-hit key exists.
+    uint32_t geometryFlags = OPTIX_GEOMETRY_FLAG_NONE;
+    const auto& materials = mScene->getMaterials();
+    if (mScene->getCurves().empty())
+    {
+        for (const oka::Instance& instance : mScene->getInstances())
+        {
+            if (instance.type != oka::Instance::Type::eMesh || instance.mMeshId != meshIndex)
+                continue;
+            const uint32_t materialId = instance.mMaterialId == kInvalidIndex ? 0u : instance.mMaterialId;
+            if (materialId < materials.size() && materials[materialId].params.alpha_mode != ALPHA_MODE_OPAQUE)
+            {
+                geometryFlags = OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
+                break;
+            }
+        }
+    }
+    const uint32_t triangle_input_flags[1] = { geometryFlags };
     OptixBuildInput triangle_input = {};
     triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
     triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
@@ -1501,6 +1520,7 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
     rmesh->d_gas_output_buffer = d_gas_output_buffer;
     rmesh->gas_handle = gas_handle;
     rmesh->gas_bytes = gasBytes;
+    rmesh->geometry_flags = geometryFlags;
     // Taken over even when the build did not use it, so nothing leaks on a path
     // that returned early.
     rmesh->d_omm_array = omm.array;
@@ -1580,7 +1600,7 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
     const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
 
     // Our build input is a simple list of non-indexed triangle vertices
-    const uint32_t triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    const uint32_t triangle_input_flags[1] = { mOptixMeshes[optixMeshesId]->geometry_flags };
     OptixBuildInput triangle_input = {};
     triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
     triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
@@ -1635,7 +1655,7 @@ bool OptiXRender::rebuildMesh(const oka::Mesh& mesh, int optixMeshesId)
     const CUdeviceptr vertexBuffer = mVertexBuffer->getPtr() + mesh.mVbOffset * sizeof(oka::Scene::Vertex);
     const CUdeviceptr indexBuffer = mIndexBuffer->getPtr() + mesh.mIndex * sizeof(uint32_t);
 
-    const uint32_t triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    const uint32_t triangle_input_flags[1] = { mOptixMeshes[optixMeshesId]->geometry_flags };
     OptixBuildInput triangle_input = {};
     triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
     triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
@@ -2298,6 +2318,11 @@ void OptiXRender::createProgramGroups()
     OptixProgramGroupDesc hit_prog_group_desc = {};
     hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hit_prog_group_desc.hitgroup.moduleCH = mState.closest_hit_module;
+    if (mPipelineSpec.hasCutout && !mPipelineSpec.hasCurves)
+    {
+        hit_prog_group_desc.hitgroup.moduleAH = mState.closest_hit_module;
+        hit_prog_group_desc.hitgroup.entryFunctionNameAH = "__anyhit__radiance";
+    }
     // Mesh records need no curve intersector. They also know their material at
     // SBT build time, so compile the inactive uber-BSDF branch out of each path.
     hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance_gltf";
