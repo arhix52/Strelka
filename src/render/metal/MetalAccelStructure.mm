@@ -402,6 +402,13 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         const bool isLightProxy = inst.type == oka::Instance::Type::eLight;
         const bool isCutout = !isLightProxy && !forceAllOpaque && inst.mMaterialId < mMaterials->isCutout().size() &&
                               mMaterials->isCutout()[inst.mMaterialId] != 0;
+        const size_t primitiveAlphaDataOffset = isCutout ?
+                                                    mGeometry->primitiveAlphaDataOffset(meshId, geometry.firstTriangle) :
+                                                    MetalGeometry::kNoPrimitiveAlphaDataOffset;
+        const size_t primitiveAlphaDataIndex = primitiveAlphaDataOffset == MetalGeometry::kNoPrimitiveAlphaDataOffset ?
+                                                   MetalGeometry::kNoPrimitiveAlphaDataOffset :
+                                                   primitiveAlphaDataOffset / sizeof(PrimitiveAlphaData);
+        const bool usePrimitiveAlphaData = primitiveAlphaDataIndex <= GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK;
 
         NS::Object* geom = nullptr;
         if (skeletal && mBuildMotionBlas)
@@ -438,6 +445,10 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         if (materialNeedsUv)
         {
             entry.flags |= GEOM_FLAG_SURFACE_UV;
+        }
+        if (usePrimitiveAlphaData)
+        {
+            entry.flags |= static_cast<uint32_t>(primitiveAlphaDataIndex);
         }
         if (bakedTransform)
         {
@@ -794,6 +805,7 @@ bool MetalAccelStructure::step(double budgetMs)
 
         std::vector<uint32_t> meshUseCount(meshes.size(), 0u);
         std::vector<uint8_t> primitiveSurfaceMeshes(meshes.size(), 0u);
+        std::vector<uint8_t> primitiveAlphaMeshes(meshes.size(), 0u);
         for (const Instance& instance : instances)
         {
             if (instance.type == Instance::Type::eMesh && instance.mMeshId < meshUseCount.size())
@@ -804,16 +816,24 @@ bool MetalAccelStructure::step(double budgetMs)
                 {
                     primitiveSurfaceMeshes[instance.mMeshId] = 1u;
                 }
+                if (instance.mMaterialId < mMaterials->isCutout().size() &&
+                    mMaterials->isCutout()[instance.mMaterialId] != 0u)
+                {
+                    primitiveAlphaMeshes[instance.mMeshId] = 1u;
+                }
             }
         }
         if (mMetal4)
         {
             mMetal4->removeResident(mGeometry->primitiveDataBuffer());
+            mMetal4->removeResident(mGeometry->primitiveAlphaDataBuffer());
         }
         mGeometry->buildPrimitiveData(mScene, primitiveSurfaceMeshes);
+        mGeometry->buildPrimitiveAlphaData(mScene, primitiveAlphaMeshes);
         if (mMetal4)
         {
             mMetal4->addResident(mGeometry->primitiveDataBuffer());
+            mMetal4->addResident(mGeometry->primitiveAlphaDataBuffer());
             mMetal4->commitResidency();
         }
         std::vector<uint8_t> potentiallyAnimatedNode(nodes.size(), 0u);

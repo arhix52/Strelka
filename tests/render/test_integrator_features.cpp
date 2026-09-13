@@ -35,6 +35,10 @@ TEST_CASE("packWavefrontFeatures sets each independent flag")
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kUniformRectLightSampling));
 
     in = {};
+    in.hasPrimitiveAlphaData = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kPrimitiveAlphaData));
+
+    in = {};
     in.hasAlphaMaterials = true;
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAlpha));
 

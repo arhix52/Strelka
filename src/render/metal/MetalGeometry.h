@@ -56,6 +56,9 @@ public:
     void buildPrimitiveData(const Scene* scene, std::span<const uint8_t> enabledMeshes);
     static constexpr size_t kNoPrimitiveDataOffset = std::numeric_limits<size_t>::max();
     size_t primitiveDataOffset(size_t meshIndex, uint32_t firstTriangle = 0u) const;
+    void buildPrimitiveAlphaData(const Scene* scene, std::span<const uint8_t> enabledMeshes);
+    static constexpr size_t kNoPrimitiveAlphaDataOffset = std::numeric_limits<size_t>::max();
+    size_t primitiveAlphaDataOffset(size_t meshIndex, uint32_t firstTriangle = 0u) const;
 
     /// Take the scene arrays that a no-copy wrap is already using as backing store.
     void adoptAliasedHost(Scene* scene);
@@ -89,6 +92,10 @@ public:
     MTL::Buffer* primitiveDataBuffer() const
     {
         return mPrimitiveDataBuffer;
+    }
+    MTL::Buffer* primitiveAlphaDataBuffer() const
+    {
+        return mPrimitiveAlphaDataBuffer;
     }
     bool ownsPrevVertexBuffer() const
     {
@@ -168,6 +175,9 @@ private:
     // Byte offset of each mesh's first record in mPrimitiveDataBuffer, or
     // kNoPrimitiveDataOffset when that mesh uses the regular vertex path.
     std::vector<size_t> mPrimitiveDataOffsets;
+    MTL::Buffer* mPrimitiveAlphaDataBuffer = nullptr;
+    // Byte offset of each cutout mesh's first PrimitiveAlphaData record.
+    std::vector<size_t> mPrimitiveAlphaDataOffsets;
     bool mOwnsPrevVertexBuffer = false;
     // Scene arrays taken so a no-copy wrap can keep them alive after the scene
     // has dropped its own copy. Empty when the wrap aliased the scene, or when

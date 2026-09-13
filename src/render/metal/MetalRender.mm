@@ -749,6 +749,7 @@ bool MetalRender::memoryReport(MemoryReport& report) const
     add("Vertices", bufBytes(mGeometry.vertexBuffer()));
     add("Indices", bufBytes(mGeometry.indexBuffer()));
     add("Primitive surface data", bufBytes(mGeometry.primitiveDataBuffer()));
+    add("Primitive alpha data", bufBytes(mGeometry.primitiveAlphaDataBuffer()));
     // A second copy of every vertex, for motion blur and for the denoiser's
     // reprojection. Shared with the current one on a scene with nothing skinned,
     // in which case this reports zero rather than double-counting.
@@ -911,6 +912,7 @@ void MetalRender::init()
     static_assert(sizeof(ShadowRay) == 68, "ShadowRay host/Metal ABI changed");
     static_assert(sizeof(CompactShadowTraversal) == 32, "Compact shadow traversal host/Metal ABI changed");
     static_assert(sizeof(CompactShadowContribution) == 16, "Compact shadow contribution host/Metal ABI changed");
+    static_assert(sizeof(PrimitiveAlphaData) == 12, "Primitive alpha data host/Metal ABI changed");
     // The hot record stays at 24 bytes despite carrying the TLAS instance: its
     // 8-byte-aligned barycentrics come first, leaving no internal/tail padding.
     static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
@@ -1052,6 +1054,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mPrevFrameVertexBuffer);
     add(mGeometry.indexBuffer());
     add(mGeometry.primitiveDataBuffer());
+    add(mGeometry.primitiveAlphaDataBuffer());
     add(mAccel.instanceBuffer());
     add(mAccel.previousInstanceBuffer());
     add(mAccel.emissiveMeshBuffer());
@@ -1178,6 +1181,8 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
     b.primitiveAccelerationStructures = &mAccel.primitiveAccelerationStructures();
     b.materialBuffer = mMaterials.buffer() ? mMaterials.buffer() : mSceneTablePlaceholder;
+    b.primitiveAlphaDataBuffer =
+        mGeometry.primitiveAlphaDataBuffer() ? mGeometry.primitiveAlphaDataBuffer() : mSceneTablePlaceholder;
     b.lightBuffer = mLights.buffer();
     b.previousLightBuffer = mLights.previousBuffer();
     b.lightTemporalMappingBuffer = mLights.temporalMappingBuffer();
@@ -1972,6 +1977,7 @@ void MetalRender::render(Buffer* output)
                     analyticLights, [](const Scene::UniformLightDesc& light) { return light.type == LIGHT_TYPE_RECT; });
             featureIn.uniformRectLightSampling = pUniformData->rectLightSamplingMethod == 0u;
             featureIn.hasAlphaMaterials = mMaterials.hasAlphaMaterials();
+            featureIn.hasPrimitiveAlphaData = mGeometry.primitiveAlphaDataBuffer() != nullptr;
             featureIn.enableMotionBlur = pUniformData->enableMotionBlur;
             featureIn.motionBlasBuilt = mAccel.motionBlasBuilt();
             featureIn.enableCameraMotionBlur = pUniformData->enableCameraMotionBlur;

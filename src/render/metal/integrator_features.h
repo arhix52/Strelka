@@ -64,6 +64,7 @@ public:
     // Plain one-candidate Base NEE can generate its light proposal in a small
     // stage before OpenPBR prepare/eval, avoiding their combined register peak.
     static constexpr uint32_t kSplitBaseNee = 1u << 26;
+    static constexpr uint32_t kPrimitiveAlphaData = 1u << 27;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -125,6 +126,7 @@ struct IntegratorFeatureInputs
     bool allAnalyticLightsRect = false;
     bool uniformRectLightSampling = false;
     bool splitBaseNee = false;
+    bool hasPrimitiveAlphaData = false;
     uint32_t samplerType = 0u;
 };
 
@@ -177,6 +179,8 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kUniformRectLightSampling;
     if (in.splitBaseNee && in.risOne && !in.restir)
         features |= WavefrontFeatures::kSplitBaseNee;
+    if (in.hasPrimitiveAlphaData)
+        features |= WavefrontFeatures::kPrimitiveAlphaData;
     features |= (in.samplerType & 7u) << WavefrontFeatures::kSamplerShift;
     return WavefrontFeatures(features);
 }

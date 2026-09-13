@@ -95,6 +95,7 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.miss);
         safeRelease(kv.second.shadowMotion);
         safeRelease(kv.second.shadowStatic);
+        safeRelease(kv.second.shadowDirectStatic);
         safeRelease(kv.second.guideMotion);
         safeRelease(kv.second.guideStatic);
         safeRelease(kv.second.extendTableMotion);
@@ -772,6 +773,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const bool useMotion = frame.motionBlasBuilt || variant->extendStatic == nullptr ||
                            frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
     const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
+    const bool useDirectStaticShadow =
+        useDirectStatic && variant->shadowDirectStatic && !envFlag("STRELKA_NO_DIRECT_STATIC_SHADOW");
     const MTL::ComputePipelineState* const extendPso = useDirectStatic ? variant->extendDirectStatic :
                                                        useMotion       ? variant->extendMotion :
                                                                          variant->extendStatic;
@@ -1294,9 +1297,14 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             endStage(prepareShadowStage);
 
             const uint32_t shadowStage = beginStage(kStageShadow, bounce);
-            enc->setComputePipelineState(useMotion ? variant->shadowMotion : variant->shadowStatic);
+            enc->setComputePipelineState(useDirectStaticShadow ? variant->shadowDirectStatic :
+                                         useMotion             ? variant->shadowMotion :
+                                                                 variant->shadowStatic);
             bind(uniformBuffer, 0, 0);
-            table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 1);
+            table->setResource(
+                (useDirectStaticShadow ? scene.directStaticAccelerationStructure : scene.instanceAccelerationStructure)
+                    ->gpuResourceID(),
+                1);
             bind(mShadowRayBuffer, 0, 2);
             bind(mRadianceBuffer, 0, 3);
             bind(mControlBuffer, 0, 4);
@@ -1307,12 +1315,20 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.vertexBuffer, 0, 9);
             bind(scene.indexBuffer, 0, 10);
             bind(scene.lightBuffer, 0, 11);
-            table->setResource(
-                (useMotion ? variant->shadowTableMotion : variant->shadowTableStatic)->gpuResourceID(), 15);
+            if (!useDirectStaticShadow)
+            {
+                table->setResource(
+                    (useMotion ? variant->shadowTableMotion : variant->shadowTableStatic)->gpuResourceID(), 15);
+            }
             table->setAddress(bounceIdx, 16);
+            table->setAddress(directGeometryBase, 17);
+            table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 18);
+            bind(scene.primitiveAlphaDataBuffer, 0, 19);
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
-                auditDispatch(useMotion ? "wavefrontShadow" : "wavefrontShadowStatic");
+                auditDispatch(useDirectStaticShadow ? "wavefrontShadowDirectStatic" :
+                              useMotion             ? "wavefrontShadow" :
+                                                      "wavefrontShadowStatic");
                 table->setAddress(ring.push(batch * shadowBatchThreads), 12);
                 bind(mSharcUpdateStateBuffer, 0, 13);
                 bind(scene.sharcAccumulationBuffer, 0, 14);
@@ -1600,6 +1616,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         return enc;
     }
     const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
+    const bool useDirectStaticShadow =
+        useDirectStatic && variant->shadowDirectStatic && !envFlag("STRELKA_NO_DIRECT_STATIC_SHADOW");
     const MTL::ComputePipelineState* const extendPso = useDirectStatic ? variant->extendDirectStatic :
                                                        useMotion       ? variant->extendMotion :
                                                                          variant->extendStatic;
@@ -1958,9 +1976,12 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
             stamp(kStageShadow);
-            enc->setComputePipelineState(useMotion ? variant->shadowMotion : variant->shadowStatic);
+            enc->setComputePipelineState(useDirectStaticShadow ? variant->shadowDirectStatic :
+                                         useMotion             ? variant->shadowMotion :
+                                                                 variant->shadowStatic);
             enc->setBuffer(uniformBuffer, 0, 0);
-            enc->setAccelerationStructure(scene.instanceAccelerationStructure, 1);
+            enc->setAccelerationStructure(
+                useDirectStaticShadow ? scene.directStaticAccelerationStructure : scene.instanceAccelerationStructure, 1);
             enc->setBuffer(mShadowRayBuffer, 0, 2);
             enc->setBuffer(mRadianceBuffer, 0, 3);
             enc->setBuffer(mControlBuffer, 0, 4);
@@ -1975,11 +1996,21 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&traversalQueueOffset, sizeof(traversalQueueOffset), 12);
             enc->setBuffer(mSharcUpdateStateBuffer, 0, 13);
             enc->setBuffer(scene.sharcAccumulationBuffer, 0, 14);
-            MTL::IntersectionFunctionTable* shadowTable =
-                useMotion ? variant->shadowTableMotion : variant->shadowTableStatic;
-            enc->setIntersectionFunctionTable(shadowTable, 15);
+            MTL::IntersectionFunctionTable* shadowTable = useDirectStaticShadow ? nullptr :
+                                                          useMotion             ? variant->shadowTableMotion :
+                                                                                  variant->shadowTableStatic;
+            if (shadowTable)
+            {
+                enc->setIntersectionFunctionTable(shadowTable, 15);
+            }
             enc->setBytes(&bounce, sizeof(uint32_t), 16);
-            enc->useResource(shadowTable, MTL::ResourceUsageRead);
+            enc->setBytes(&scene.directStaticGeometryBase, sizeof(uint32_t), 17);
+            enc->setAccelerationStructure(scene.volumeAccelerationStructure, 18);
+            enc->setBuffer(scene.primitiveAlphaDataBuffer, 0, 19);
+            if (shadowTable)
+            {
+                enc->useResource(shadowTable, MTL::ResourceUsageRead);
+            }
             enc->dispatchThreadgroups(mControlBuffer, kShadowArgsOffset, tg);
         }
     }
@@ -2125,6 +2156,9 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&stochasticAlphaVisibility, MTL::DataTypeBool, (NS::UInteger)29);
     const bool prepareSurfaceGeometryInExtend = true;
     values->setConstantValue(&prepareSurfaceGeometryInExtend, MTL::DataTypeBool, (NS::UInteger)30);
+    const bool primitiveAlphaData =
+        (features & WavefrontFeatures::kPrimitiveAlphaData) != 0u && !envFlag("STRELKA_NO_PRIMITIVE_ALPHA_DATA");
+    values->setConstantValue(&primitiveAlphaData, MTL::DataTypeBool, (NS::UInteger)31);
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
@@ -2284,6 +2318,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.miss = make("wavefrontMiss");
     v.shadowMotion = makeTraversal(entry("wavefrontShadow"), "Shadow", true, v.shadowTableMotion);
     v.shadowStatic = makeTraversal(entry("wavefrontShadowStatic"), "Shadow", false, v.shadowTableStatic);
+    v.shadowDirectStatic = make("wavefrontShadowDirectStatic", "Shadow direct static");
     v.guideMotion = makeTraversal(entry("wavefrontGuide"), "Guide", true, v.guideTableMotion);
     v.guideStatic = makeTraversal(entry("wavefrontGuideStatic"), "Guide", false, v.guideTableStatic);
 
@@ -2305,11 +2340,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     };
     STRELKA_INFO(
         "  maxThreadsPerTG: generate {} extend {} (motion {}) sssWalk {} (motion {}) connect base {} shade base {} layer {} "
-        "translucent {} tail {} shadow {} (motion {}) guide {} (motion {}) miss {}",
+        "translucent {} tail {} shadow {} (direct {}, motion {}) guide {} (motion {}) miss {}",
         tgLimit(v.generate), tgLimit(v.extendStatic), tgLimit(v.extendMotion), tgLimit(v.sssWalkStatic),
         tgLimit(v.sssWalkMotion), tgLimit(v.connectBase), tgLimit(v.shadeBase), tgLimit(v.shadeLayer),
-        tgLimit(v.shadeTranslucent), tgLimit(v.shade), tgLimit(v.shadowStatic), tgLimit(v.shadowMotion),
-        tgLimit(v.guideStatic), tgLimit(v.guideMotion), tgLimit(v.miss));
+        tgLimit(v.shadeTranslucent), tgLimit(v.shade), tgLimit(v.shadowStatic), tgLimit(v.shadowDirectStatic),
+        tgLimit(v.shadowMotion), tgLimit(v.guideStatic), tgLimit(v.guideMotion), tgLimit(v.miss));
     return &mVariants.emplace(features, v).first->second;
 }
 

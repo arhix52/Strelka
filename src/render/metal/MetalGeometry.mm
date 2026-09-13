@@ -142,6 +142,8 @@ void MetalGeometry::release()
     safeRelease(mVertexBuffer);
     safeRelease(mPrimitiveDataBuffer);
     mPrimitiveDataOffsets.clear();
+    safeRelease(mPrimitiveAlphaDataBuffer);
+    mPrimitiveAlphaDataOffsets.clear();
     mOwnsPrevVertexBuffer = false;
     mVertexBufferAliased = false;
     mWrappedVertices = false;
@@ -187,6 +189,8 @@ void MetalGeometry::buildBuffers(Scene* scene)
         safeRelease(mVertexBuffer);
         safeRelease(mPrimitiveDataBuffer);
         mPrimitiveDataOffsets.clear();
+        safeRelease(mPrimitiveAlphaDataBuffer);
+        mPrimitiveAlphaDataOffsets.clear();
         mOwnsPrevVertexBuffer = false;
         mPrevVertexBuffer = nullptr;
     }
@@ -284,7 +288,6 @@ void MetalGeometry::buildPrimitiveData(const Scene* scene, std::span<const uint8
     {
         return;
     }
-
     // Geometry uploads use shared storage on both the copied and the no-copy
     // path, so rebuilds can regenerate this compact source even after the
     // headless loader has released its Scene vectors.
@@ -348,6 +351,94 @@ size_t MetalGeometry::primitiveDataOffset(size_t meshIndex, uint32_t firstTriang
         return kNoPrimitiveDataOffset;
     }
     return mPrimitiveDataOffsets[meshIndex] + static_cast<size_t>(firstTriangle) * sizeof(PrimitiveSurfaceData);
+}
+
+void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const uint8_t> enabledMeshes)
+{
+    if (mPrimitiveAlphaDataBuffer)
+    {
+        mPrimitiveAlphaDataBuffer->release();
+        mPrimitiveAlphaDataBuffer = nullptr;
+    }
+    mPrimitiveAlphaDataOffsets.assign(scene ? scene->getMeshes().size() : 0u, kNoPrimitiveAlphaDataOffset);
+    if (!scene || !mVertexBuffer || !mIndexBuffer || enabledMeshes.size() != scene->getMeshes().size())
+    {
+        return;
+    }
+
+    size_t triangleCount = 0u;
+    size_t enabledMeshCount = 0u;
+    for (size_t meshIndex = 0; meshIndex < enabledMeshes.size(); ++meshIndex)
+    {
+        if (enabledMeshes[meshIndex] != 0u)
+        {
+            triangleCount += scene->getMeshes()[meshIndex].mCount / 3u;
+            ++enabledMeshCount;
+        }
+    }
+    if (triangleCount == 0u)
+    {
+        return;
+    }
+    if (triangleCount > static_cast<size_t>(GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK) + 1u)
+    {
+        STRELKA_WARNING("Primitive alpha data disabled: {} cutout triangles exceed the {}-record geometry index",
+                        triangleCount, static_cast<size_t>(GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK) + 1u);
+        return;
+    }
+
+    const auto* vertices = static_cast<const Scene::Vertex*>(mVertexBuffer->contents());
+    const auto* indices = static_cast<const uint32_t*>(mIndexBuffer->contents());
+    if (!vertices || !indices)
+    {
+        STRELKA_ERROR("Cannot build primitive alpha data: geometry buffers are not CPU-visible");
+        return;
+    }
+
+    std::vector<PrimitiveAlphaData> alphaData(triangleCount);
+    size_t dstTriangle = 0u;
+    for (size_t meshIndex = 0; meshIndex < enabledMeshes.size(); ++meshIndex)
+    {
+        if (enabledMeshes[meshIndex] == 0u)
+        {
+            continue;
+        }
+        const oka::Mesh& mesh = scene->getMeshes()[meshIndex];
+        const uint32_t meshTriangleCount = mesh.mCount / 3u;
+        mPrimitiveAlphaDataOffsets[meshIndex] = dstTriangle * sizeof(PrimitiveAlphaData);
+        for (uint32_t triangle = 0; triangle < meshTriangleCount; ++triangle)
+        {
+            PrimitiveAlphaData& dst = alphaData[dstTriangle++];
+            const size_t firstIndex = static_cast<size_t>(mesh.mIndex) + static_cast<size_t>(triangle) * 3u;
+            for (uint32_t k = 0; k < 3u; ++k)
+            {
+                dst.uv[k] = vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]].uv;
+            }
+        }
+    }
+
+    mPrimitiveAlphaDataBuffer = mDevice->newBuffer(
+        alphaData.data(), alphaData.size() * sizeof(PrimitiveAlphaData), MTL::ResourceStorageModeShared);
+    if (!mPrimitiveAlphaDataBuffer)
+    {
+        STRELKA_ERROR("Cannot allocate {:.1f} MB of primitive alpha data",
+                      alphaData.size() * sizeof(PrimitiveAlphaData) / (1024.0 * 1024.0));
+        std::ranges::fill(mPrimitiveAlphaDataOffsets, kNoPrimitiveAlphaDataOffset);
+        return;
+    }
+    mPrimitiveAlphaDataBuffer->setLabel(NS::String::string("primitive alpha data", NS::UTF8StringEncoding));
+    STRELKA_INFO("Metal primitive alpha data: {} meshes, {} triangles, {:.1f} MB", enabledMeshCount, alphaData.size(),
+                 alphaData.size() * sizeof(PrimitiveAlphaData) / (1024.0 * 1024.0));
+}
+
+size_t MetalGeometry::primitiveAlphaDataOffset(size_t meshIndex, uint32_t firstTriangle) const
+{
+    if (!mPrimitiveAlphaDataBuffer || meshIndex >= mPrimitiveAlphaDataOffsets.size() ||
+        mPrimitiveAlphaDataOffsets[meshIndex] == kNoPrimitiveAlphaDataOffset)
+    {
+        return kNoPrimitiveAlphaDataOffset;
+    }
+    return mPrimitiveAlphaDataOffsets[meshIndex] + static_cast<size_t>(firstTriangle) * sizeof(PrimitiveAlphaData);
 }
 
 void MetalGeometry::adoptAliasedHost(Scene* scene)

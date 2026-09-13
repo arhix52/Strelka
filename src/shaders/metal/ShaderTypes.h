@@ -180,6 +180,15 @@ struct PrimitiveSurfaceData
 };
 static_assert(sizeof(PrimitiveSurfaceData) == 16, "Primitive surface data ABI changed");
 
+// UVs needed by an alpha candidate, stored outside the acceleration structure.
+// Each uint preserves the two packed 16-bit fields from Vertex::uv without any
+// additional quantisation.
+struct PrimitiveAlphaData
+{
+    uint32_t uv[3];
+};
+static_assert(sizeof(PrimitiveAlphaData) == 12, "Primitive alpha data ABI changed");
+
 struct Uniforms
 {
     simd::float4x4 viewToWorld;
@@ -761,6 +770,7 @@ struct GeometryEntry
 #define GEOM_FLAG_PRIMITIVE_SURFACE_DATA (1u << 27)
 #define GEOM_FLAG_BAKED_TRANSFORM (1u << 26)
 #define GEOM_FLAG_SURFACE_UV (1u << 25)
+#define GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK ((1u << 25) - 1u)
 #define GEOM_CURVE_STRAND_MASK 0x0000FFFFu
 
 // Wavefront path state is memory-traffic critical and fixed at 24 bytes; feature-specific state uses side tables.

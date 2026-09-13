@@ -42,6 +42,7 @@ struct WavefrontVariant
     MTL::ComputePipelineState* miss = nullptr;
     MTL::ComputePipelineState* shadowMotion = nullptr;
     MTL::ComputePipelineState* shadowStatic = nullptr;
+    MTL::ComputePipelineState* shadowDirectStatic = nullptr;
     MTL::ComputePipelineState* guideMotion = nullptr;
     MTL::ComputePipelineState* guideStatic = nullptr;
     MTL::IntersectionFunctionTable* extendTableMotion = nullptr;
@@ -65,6 +66,7 @@ struct IntegratorSceneBindings
     MTL::AccelerationStructure* volumeAccelerationStructure = nullptr;
     const std::vector<MTL::AccelerationStructure*>* primitiveAccelerationStructures = nullptr;
     MTL::Buffer* materialBuffer = nullptr;
+    MTL::Buffer* primitiveAlphaDataBuffer = nullptr;
     MTL::Buffer* lightBuffer = nullptr;
     MTL::Buffer* previousLightBuffer = nullptr;
     MTL::Buffer* lightTemporalMappingBuffer = nullptr;

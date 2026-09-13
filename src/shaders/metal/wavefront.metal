@@ -422,6 +422,47 @@ static inline float cutoutOpacityAt(uint primitive_id,
     return resolveOpacity(mat, uv);
 }
 
+static inline float cutoutOpacityAtPrimitive(uint primitive_id,
+                                             uint geometry_id,
+                                             uint geometry_entry_base,
+                                             float2 barycentric_coord,
+                                             device const Material* materials,
+                                             device const PrimitiveAlphaData* primitiveAlphaData,
+                                             device const GeometryEntry* geometryEntries)
+{
+    const GeometryEntry entry = geometryEntries[geometry_entry_base + geometry_id];
+    device const Material& mat = materials[entry.materialId];
+    if (mat.alpha_mode == ALPHA_MODE_OPAQUE)
+    {
+        return 1.0f;
+    }
+    const uint32_t base = entry.flags & GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK;
+    device const PrimitiveAlphaData& primitive = primitiveAlphaData[base + primitive_id];
+    const float2 uv = interpolateAttrib(
+        unpackUV(primitive.uv[0]), unpackUV(primitive.uv[1]), unpackUV(primitive.uv[2]), barycentric_coord);
+    return resolveOpacity(mat, uv);
+}
+
+static inline float cutoutOpacityAtSelected(uint primitive_id,
+                                            uint geometry_id,
+                                            uint geometry_entry_base,
+                                            float2 barycentric_coord,
+                                            device const Material* materials,
+                                            device const PrimitiveAlphaData* primitiveAlphaData,
+                                            device const GeometryEntry* geometryEntries,
+                                            device const char* vertexBuffer,
+                                            device const uint32_t* indexBuffer,
+                                            bool usePrimitiveAlphaData)
+{
+    if (usePrimitiveAlphaData)
+    {
+        return cutoutOpacityAtPrimitive(primitive_id, geometry_id, geometry_entry_base, barycentric_coord, materials,
+                                        primitiveAlphaData, geometryEntries);
+    }
+    return cutoutOpacityAt(primitive_id, geometry_id, geometry_entry_base, barycentric_coord, materials,
+                           geometryEntries, vertexBuffer, indexBuffer);
+}
+
 struct MotionTraversal
 {
     // intersection_query rejects the motion tags, so this one keeps the
@@ -495,6 +536,14 @@ struct StaticTraversal
     {
         return i.intersect(r, as, mask);
     }
+    static void resetShadowQuery(thread query& q, ray r, structure as, intersection_params params)
+    {
+        q.reset(r, as, RAY_MASK_SHADOW, params);
+    }
+    static uint32_t shadowGeometryEntryBase(thread query& q, uint32_t)
+    {
+        return q.get_candidate_user_instance_id();
+    }
 };
 
 // Fast path for a scene whose immutable geometry was baked into one world-space
@@ -503,8 +552,10 @@ struct StaticTraversal
 // instanced structure because medium boundaries are not necessarily flat.
 struct DirectStaticTraversal
 {
+    using query = intersection_query<triangle_data>;
     enum
     {
+        kInlineQuery = 1,
         kDirect = 1
     };
     using structure = primitive_acceleration_structure;
@@ -531,6 +582,14 @@ struct DirectStaticTraversal
     static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, volume_structure as, uint32_t mask, float)
     {
         return i.intersect(r, as, mask);
+    }
+    static void resetShadowQuery(thread query& q, ray r, structure as, intersection_params params)
+    {
+        q.reset(r, as, params);
+    }
+    static uint32_t shadowGeometryEntryBase(thread query&, uint32_t directGeometryBase)
+    {
+        return directGeometryBase;
     }
 };
 
@@ -6709,7 +6768,7 @@ kernel void wavefrontPrepareShadow(device uint32_t& controlRef [[buffer(0)]],
 // whether it began inside. A vertex within a fog volume and one just outside it
 // produce the same origin and direction.
 template <typename T>
-static float3 mediumTransmittance(typename T::structure accelerationStructure,
+static float3 mediumTransmittance(typename T::volume_structure accelerationStructure,
                                   constant Uniforms& uniforms,
                                   device const Material* materials,
                                   device const GeometryEntry* geometryEntries,
@@ -6824,10 +6883,13 @@ struct CutoutShadowWalk
                     float motionTime,
                     float cutoff,
                     device const Material* materials,
+                    device const PrimitiveAlphaData* primitiveAlphaData,
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
                     typename T::table functionTable,
+                    uint32_t,
+                    bool usePrimitiveAlphaData,
                     thread float& transmittance)
     {
         transmittance = 1.0f;
@@ -6854,9 +6916,9 @@ struct CutoutShadowWalk
             float opacity = 1.0f;
             if (hit.type == intersection_type::triangle)
             {
-                opacity = cutoutOpacityAt(hit.primitive_id, hit.geometry_id, hit.user_instance_id,
-                                          hit.triangle_barycentric_coord, materials, geometryEntries, vertexBuffer,
-                                          indexBuffer);
+                opacity = cutoutOpacityAtSelected(hit.primitive_id, hit.geometry_id, hit.user_instance_id,
+                                                  hit.triangle_barycentric_coord, materials, primitiveAlphaData,
+                                                  geometryEntries, vertexBuffer, indexBuffer, usePrimitiveAlphaData);
             }
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
@@ -6884,10 +6946,13 @@ struct CutoutShadowWalk<T, true>
                     float,
                     float cutoff,
                     device const Material* materials,
+                    device const PrimitiveAlphaData* primitiveAlphaData,
                     device const GeometryEntry* geometryEntries,
                     device const char* vertexBuffer,
                     device const uint32_t* indexBuffer,
                     typename T::table,
+                    uint32_t directGeometryBase,
+                    bool usePrimitiveAlphaData,
                     thread float& transmittance)
     {
         transmittance = 1.0f;
@@ -6899,7 +6964,7 @@ struct CutoutShadowWalk<T, true>
         // intersection-function table belongs on this path.
         params.assume_geometry_type(geometry_type::triangle);
         typename T::query q;
-        q.reset(shadowRay, as, RAY_MASK_SHADOW, params);
+        T::resetShadowQuery(q, shadowRay, as, params);
         while (q.next())
         {
             // Only geometry the builder left non-opaque surfaces as a candidate.
@@ -6908,9 +6973,11 @@ struct CutoutShadowWalk<T, true>
             // loop. Getting that wrong drops every opaque shadow caster in the
             // scene: the ground keeps its dappled canopy shade and loses the
             // trunks and rocks entirely, at 156 of this scene's 300 geometries.
-            const float opacity = cutoutOpacityAt(
-                q.get_candidate_primitive_id(), q.get_candidate_geometry_id(), q.get_candidate_user_instance_id(),
-                q.get_candidate_triangle_barycentric_coord(), materials, geometryEntries, vertexBuffer, indexBuffer);
+            const uint32_t geometryEntryBase = T::shadowGeometryEntryBase(q, directGeometryBase);
+            const float opacity =
+                cutoutOpacityAtSelected(q.get_candidate_primitive_id(), q.get_candidate_geometry_id(), geometryEntryBase,
+                                        q.get_candidate_triangle_barycentric_coord(), materials, primitiveAlphaData,
+                                        geometryEntries, vertexBuffer, indexBuffer, usePrimitiveAlphaData);
             if (cutoutRouletteDone(transmittance, opacity, cutoff))
             {
                 q.abort();
@@ -6957,8 +7024,8 @@ static bool restirDiagnosticVisible(constant Uniforms& uniforms,
     }
     float alphaTransmittance;
     const bool visible = CutoutShadowWalk<CurveStaticTraversal, false>::run(
-        uniforms, accelerationStructure, shadowRay, 0.0f, 0.0f, materials, geometryEntries, vertexBuffer, indexBuffer,
-        functionTable, alphaTransmittance);
+        uniforms, accelerationStructure, shadowRay, 0.0f, 0.0f, materials, nullptr, geometryEntries, vertexBuffer,
+        indexBuffer, functionTable, 0u, false, alphaTransmittance);
     transmittance = alphaTransmittance;
     return visible;
 }
@@ -6980,18 +7047,21 @@ template <typename T>
 static void shadowImpl(uint gid,
                        constant Uniforms& uniforms,
                        typename T::structure accelerationStructure,
+                       typename T::volume_structure volumeAccelerationStructure,
                        device const char* shadowRays,
                        device float4* radianceOut,
                        device const uint32_t* control,
                        constant uint32_t& sampleIdx,
                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                        device const Material* materials,
+                       device const PrimitiveAlphaData* primitiveAlphaData,
                        device const GeometryEntry* geometryEntries,
                        device const char* vertexBuffer,
                        device const uint32_t* indexBuffer,
                        typename T::table functionTable,
                        device SharcUpdateState* sharcUpdates,
                        device SharcAccumulationEntry* sharcAccumulation,
+                       uint32_t directGeometryBase,
                        uint32_t bounce)
 {
     if (gid >= control[WF_CTRL_SHADOW_N])
@@ -7073,7 +7143,7 @@ static void shadowImpl(uint gid,
         {
             const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
             const float3 transmittance =
-                mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries, instances,
+                mediumTransmittance<T>(volumeAccelerationStructure, uniforms, materials, geometryEntries, instances,
                                        float3(visibleRay.origin), float3(visibleRay.direction), visibleRay.maxDistance,
                                        loadShadowMedium(shadowRays, gid, capacity), motionTime);
             weight *= transmittance;
@@ -7112,8 +7182,9 @@ static void shadowImpl(uint gid,
     const float alphaCutoff = SPEC_STOCHASTIC_ALPHA_VISIBILITY ? traversal.alphaThreshold :
                                                                  traversal.alphaThreshold * kShadowTransmittanceCutoff;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(uniforms, accelerationStructure, shadowRay, motionTime,
-                                                        alphaCutoff, materials, geometryEntries, vertexBuffer,
-                                                        indexBuffer, functionTable, transmittance))
+                                                        alphaCutoff, materials, primitiveAlphaData, geometryEntries,
+                                                        vertexBuffer, indexBuffer, functionTable, directGeometryBase,
+                                                        SPEC_PRIMITIVE_ALPHA_DATA, transmittance))
     {
         if (SPEC_RESTIR)
         {
@@ -7168,7 +7239,7 @@ static void shadowImpl(uint gid,
     {
         const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
         const float3 mediumTr =
-            mediumTransmittance<T>(accelerationStructure, uniforms, materials, geometryEntries, instances,
+            mediumTransmittance<T>(volumeAccelerationStructure, uniforms, materials, geometryEntries, instances,
                                    float3(visibleRay.origin), float3(visibleRay.direction), visibleRay.maxDistance,
                                    loadShadowMedium(shadowRays, gid, capacity), motionTime);
         weight *= mediumTr;
@@ -7430,28 +7501,60 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
 }
 
 #define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                  \
-    kernel void NAME(uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                  \
-                     TRAITS::structure accelerationStructure [[buffer(1)]],                                            \
-                     device const char* shadowRays [[buffer(2)]], device float4* radianceOut [[buffer(3)]],            \
-                     device const uint32_t* control [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],         \
-                     constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],             \
-                     device const Material* materials [[buffer(7)]],                                                   \
-                     device const GeometryEntry* geometryEntries [[buffer(8)]],                                        \
-                     device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]], \
-                     device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],  \
-                     device SharcUpdateState* sharcUpdates [[buffer(13)]],                                             \
-                     device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]],                                  \
-                     TRAITS::table functionTable [[buffer(15)]], constant uint32_t& bounce [[buffer(16)]])             \
+    kernel void NAME(                                                                                                  \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
+        TRAITS::structure accelerationStructure [[buffer(1)]], device const char* shadowRays [[buffer(2)]],            \
+        device float4* radianceOut [[buffer(3)]], device const uint32_t* control [[buffer(4)]],                        \
+        constant uint32_t& sampleIdx [[buffer(5)]],                                                                    \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],                          \
+        device const Material* materials [[buffer(7)]], device const GeometryEntry* geometryEntries [[buffer(8)]],     \
+        device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],              \
+        device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],               \
+        device SharcUpdateState* sharcUpdates [[buffer(13)]],                                                          \
+        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]], TRAITS::table functionTable [[buffer(15)]],   \
+        constant uint32_t& bounce [[buffer(16)]], device const PrimitiveAlphaData* primitiveAlphaData [[buffer(19)]])  \
     {                                                                                                                  \
-        shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, shadowRays, radianceOut, control,       \
-                           sampleIdx, instances, materials, geometryEntries, vertexBuffer, indexBuffer, functionTable, \
-                           sharcUpdates, sharcAccumulation, bounce);                                                   \
+        shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, accelerationStructure, shadowRays,      \
+                           radianceOut, control, sampleIdx, instances, materials, primitiveAlphaData, geometryEntries, \
+                           vertexBuffer, indexBuffer, functionTable, sharcUpdates, sharcAccumulation, 0u, bounce);     \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStatic, StaticTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowCurve, CurveMotionTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStaticCurve, CurveStaticTraversal)
+
+// Immutable world-space geometry does not need a TLAS traversal, instance
+// transform, or intersection-function table. The volume structure remains a
+// separate argument because bounded-media crossings are an independent walk.
+kernel void wavefrontShadowDirectStatic(uint gid [[thread_position_in_grid]],
+                                        constant Uniforms& uniforms [[buffer(0)]],
+                                        DirectStaticTraversal::structure accelerationStructure [[buffer(1)]],
+                                        device const char* shadowRays [[buffer(2)]],
+                                        device float4* radianceOut [[buffer(3)]],
+                                        device const uint32_t* control [[buffer(4)]],
+                                        constant uint32_t& sampleIdx [[buffer(5)]],
+                                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances
+                                        [[buffer(6)]],
+                                        device const Material* materials [[buffer(7)]],
+                                        device const GeometryEntry* geometryEntries [[buffer(8)]],
+                                        device const char* vertexBuffer [[buffer(9)]],
+                                        device const uint32_t* indexBuffer [[buffer(10)]],
+                                        device const UniformLight* lights [[buffer(11)]],
+                                        constant uint32_t& queueOffset [[buffer(12)]],
+                                        device SharcUpdateState* sharcUpdates [[buffer(13)]],
+                                        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]],
+                                        constant uint32_t& bounce [[buffer(16)]],
+                                        constant uint32_t& directGeometryBase [[buffer(17)]],
+                                        DirectStaticTraversal::volume_structure volumeAccelerationStructure
+                                        [[buffer(18)]],
+                                        device const PrimitiveAlphaData* primitiveAlphaData [[buffer(19)]])
+{
+    shadowImpl<DirectStaticTraversal>(gid + queueOffset, uniforms, accelerationStructure, volumeAccelerationStructure,
+                                      shadowRays, radianceOut, control, sampleIdx, instances, materials,
+                                      primitiveAlphaData, geometryEntries, vertexBuffer, indexBuffer, 0u, sharcUpdates,
+                                      sharcAccumulation, directGeometryBase, bounce);
+}
 
 // ---------------------------------------------------------------------------
 // resolve -- average the samples and fold into the accumulation buffer
