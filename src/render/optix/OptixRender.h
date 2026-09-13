@@ -206,6 +206,10 @@ private:
         bool hasCurves = false;
         bool hasCutout = false;
         bool hasOpenPBR = false;
+        bool openpbrSheenAndCoat = false;
+        bool openpbrDispersion = false;
+        bool openpbrTranslucency = false;
+        bool openpbrMetallic = false;
         bool hasFog = false;
         bool enableMotionBlur = false;
         bool writeAov = false;

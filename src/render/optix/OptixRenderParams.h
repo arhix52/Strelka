@@ -439,6 +439,10 @@ struct Params
     /// 272-byte parameter block and its 720-byte prepared BSDF live in a scene
     /// that has no OpenPBR material.
     bool hasOpenPBR;
+    bool openpbrSheenAndCoat;
+    bool openpbrDispersion;
+    bool openpbrTranslucency;
+    bool openpbrMetallic;
 
     // --- Atmosphere ------------------------------------------------------
     //

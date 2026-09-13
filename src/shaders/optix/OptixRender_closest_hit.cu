@@ -17,6 +17,11 @@ static __device__ bool samplerBlueNoiseEnabled()
 {
     return params.hasBlueNoise != 0u;
 }
+#define STRELKA_OPENPBR_FEATURE_EnableSheenAndCoat params.openpbrSheenAndCoat
+#define STRELKA_OPENPBR_FEATURE_EnableDispersion params.openpbrDispersion
+#define STRELKA_OPENPBR_FEATURE_EnableTranslucency params.openpbrTranslucency
+#define STRELKA_OPENPBR_FEATURE_EnableMetallic params.openpbrMetallic
+#define OPENPBR_GET_SPECIALIZATION_CONSTANT(name) STRELKA_OPENPBR_FEATURE_##name
 #include <cuda_helpers/helpers.h>
 #include <cuda_helpers/curve.h>
 
@@ -95,6 +100,11 @@ static __forceinline__ __device__ float optixIorAfterPop(const OptixIorStack& st
     return stack.top > 0 ? params.materials[stack.materials[stack.top - 1]].ior : 1.0f;
 }
 #include "shading/shading_common.h"
+#undef OPENPBR_GET_SPECIALIZATION_CONSTANT
+#undef STRELKA_OPENPBR_FEATURE_EnableMetallic
+#undef STRELKA_OPENPBR_FEATURE_EnableTranslucency
+#undef STRELKA_OPENPBR_FEATURE_EnableDispersion
+#undef STRELKA_OPENPBR_FEATURE_EnableSheenAndCoat
 #include "shading/medium.h"
 #include "alpha.h"
 #include "fog.h"

@@ -221,6 +221,39 @@ static_assert(sizeof(OpenPBRColor) == 12, "OpenPBRColor must stay 12 bytes (host
 // zero coat_darkening and a zero anisotropy rotation cosine, which is a
 // degenerate basis rather than "no rotation". Always start here.
 #if !defined(__CUDA_ARCH__) && !defined(__METAL_VERSION__)
+enum OpenPBRFeature : unsigned int
+{
+    OPENPBR_FEATURE_SHEEN_AND_COAT = 1u << 0,
+    OPENPBR_FEATURE_DISPERSION = 1u << 1,
+    OPENPBR_FEATURE_TRANSLUCENCY = 1u << 2,
+    OPENPBR_FEATURE_METALLIC = 1u << 3
+};
+
+inline unsigned int openpbr_features(const OpenPBRParams& p)
+{
+    constexpr unsigned int layerMaps = (1u << OPENPBR_TEX_COAT_WEIGHT) |
+                                       (1u << OPENPBR_TEX_COAT_ROUGHNESS) |
+                                       (1u << OPENPBR_TEX_COAT_COLOR) | (1u << OPENPBR_TEX_FUZZ_WEIGHT) |
+                                       (1u << OPENPBR_TEX_FUZZ_ROUGHNESS) | (1u << OPENPBR_TEX_FUZZ_COLOR) |
+                                       (1u << OPENPBR_TEX_GEOMETRY_COAT_NORMAL);
+    constexpr unsigned int volumeMaps = (1u << OPENPBR_TEX_SUBSURFACE_WEIGHT) |
+                                        (1u << OPENPBR_TEX_SUBSURFACE_COLOR) |
+                                        (1u << OPENPBR_TEX_SUBSURFACE_RADIUS);
+
+    return ((p.coat_weight > 0.0f || p.fuzz_weight > 0.0f || p.thin_film_weight > 0.0f ||
+             (p.texture_mask & layerMaps) != 0u)
+                ? OPENPBR_FEATURE_SHEEN_AND_COAT
+                : 0u) |
+           (p.transmission_dispersion_scale > 0.0f ? OPENPBR_FEATURE_DISPERSION : 0u) |
+           ((p.transmission_weight > 0.0f || p.subsurface_weight > 0.0f ||
+             (p.texture_mask & volumeMaps) != 0u)
+                ? OPENPBR_FEATURE_TRANSLUCENCY
+                : 0u) |
+           ((p.base_metalness > 0.0f || (p.texture_mask & (1u << OPENPBR_TEX_BASE_METALNESS)) != 0u)
+                ? OPENPBR_FEATURE_METALLIC
+                : 0u);
+}
+
 inline OpenPBRParams openpbr_make_default_params()
 {
     OpenPBRParams p = {};

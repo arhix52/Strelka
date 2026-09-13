@@ -2175,6 +2175,8 @@ void OptiXRender::createModule()
         STRELKA_BOUND_VALUE(hasBoundedMedium),   STRELKA_BOUND_VALUE(hasFog),
         STRELKA_BOUND_VALUE(hasSubsurface),      STRELKA_BOUND_VALUE(hasCurves),
         STRELKA_BOUND_VALUE(hasCutout),          STRELKA_BOUND_VALUE(hasOpenPBR),
+        STRELKA_BOUND_VALUE(openpbrSheenAndCoat), STRELKA_BOUND_VALUE(openpbrDispersion),
+        STRELKA_BOUND_VALUE(openpbrTranslucency), STRELKA_BOUND_VALUE(openpbrMetallic),
         STRELKA_BOUND_VALUE(hasBlueNoise),
         STRELKA_BOUND_VALUE(enableMotionBlur),   STRELKA_BOUND_VALUE(writeAov),
         STRELKA_BOUND_VALUE(writeSplitAov),      STRELKA_BOUND_VALUE(guidePrimaryHit),
@@ -2486,6 +2488,10 @@ OptiXRender::PipelineSpec OptiXRender::specFor(const Params& params) const
     spec.hasCurves = params.hasCurves;
     spec.hasCutout = params.hasCutout;
     spec.hasOpenPBR = params.hasOpenPBR;
+    spec.openpbrSheenAndCoat = params.openpbrSheenAndCoat;
+    spec.openpbrDispersion = params.openpbrDispersion;
+    spec.openpbrTranslucency = params.openpbrTranslucency;
+    spec.openpbrMetallic = params.openpbrMetallic;
     spec.hasFog = params.hasFog;
     spec.hasBlueNoise = params.hasBlueNoise;
     spec.enableMotionBlur = params.enableMotionBlur;
@@ -6036,6 +6042,10 @@ void OptiXRender::publishOpenPBRParams()
     mOpenPBRTexturesBuffer.reset();
     mState.params.openpbrParams = nullptr;
     mState.params.openpbrTextures = nullptr;
+    mState.params.openpbrSheenAndCoat = false;
+    mState.params.openpbrDispersion = false;
+    mState.params.openpbrTranslucency = false;
+    mState.params.openpbrMetallic = false;
 
     // Which material model the scene shades with. A render setting rather than a
     // scene property on purpose: it makes the two models an A/B on one asset,
@@ -6107,6 +6117,12 @@ void OptiXRender::publishOpenPBRParams()
             }
         }
         openpbrParams.back().texture_mask = mask;
+
+        const unsigned int features = openpbr_features(openpbrParams.back());
+        mState.params.openpbrSheenAndCoat |= (features & OPENPBR_FEATURE_SHEEN_AND_COAT) != 0u;
+        mState.params.openpbrDispersion |= (features & OPENPBR_FEATURE_DISPERSION) != 0u;
+        mState.params.openpbrTranslucency |= (features & OPENPBR_FEATURE_TRANSLUCENCY) != 0u;
+        mState.params.openpbrMetallic |= (features & OPENPBR_FEATURE_METALLIC) != 0u;
 
         if (mMaterials[i].params.material_type != MATERIAL_TYPE_OPENPBR)
         {

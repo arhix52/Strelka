@@ -1145,12 +1145,16 @@ mode. A scene where only some materials are OpenPBR pays in proportion. The two
 rooms differ because kids_room spends more of its frame in traversal, so a more
 expensive shade kernel dilutes.
 
-No attempt has been made to reduce it. The obvious lever is Adobe's own
-specialisation constants -- `EnableSheenAndCoat`, `EnableDispersion`,
-`EnableTranslucency`, `EnableMetallic` -- which are wired to a macro that
-currently answers `true` unconditionally. Packing a scene-wide scan of which
-lobes any OpenPBR material actually uses into four more function constants is
-the same trick this file already records as worth 15-23% of the frame.
+OptiX now binds Adobe's own `EnableSheenAndCoat`, `EnableDispersion`,
+`EnableTranslucency` and `EnableMetallic` specialisation constants from a
+scene-wide material scan. On chess_set, which uses metallic and translucency
+but no coat/fuzz/thin-film or dispersion, the 1080p median fell **8.628 ->
+5.988 ms/sample (-30.6%)**. One steady-state NCU launch fell 8.870 -> 5.857 ms,
+DRAM read 1.666 -> 0.955 GB, write 3.292 -> 2.148 GB, and executed instructions
+849.8 -> 666.1 M. `no_instruction` fell 17.77 -> 11.88 and issue-active rose
+9.20 -> 11.19%. A 512-spp forced-all-features control and the specialised image
+have means within 0.0011%; sparse firefly paths diverge from changed floating-
+point topology, but there is no measured bias. The scan policy has a unit test.
 
 ## The measurement everything below is read against
 

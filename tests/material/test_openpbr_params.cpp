@@ -92,6 +92,23 @@ TEST_CASE("texture slot ids are the ABI the loader and both backends share")
     CHECK(MAX_OPENPBR_TEXTURES <= 32);
 }
 
+TEST_CASE("OpenPBR specialization keeps only scene features")
+{
+    OpenPBRParams p = openpbr_make_default_params();
+    CHECK(openpbr_features(p) == 0u);
+
+    p.coat_weight = 1.0f;
+    CHECK(openpbr_features(p) == OPENPBR_FEATURE_SHEEN_AND_COAT);
+    p.coat_weight = 0.0f;
+    p.transmission_dispersion_scale = 1.0f;
+    CHECK(openpbr_features(p) == OPENPBR_FEATURE_DISPERSION);
+    p.transmission_dispersion_scale = 0.0f;
+    p.texture_mask = 1u << OPENPBR_TEX_SUBSURFACE_RADIUS;
+    CHECK(openpbr_features(p) == OPENPBR_FEATURE_TRANSLUCENCY);
+    p.texture_mask = 1u << OPENPBR_TEX_BASE_METALNESS;
+    CHECK(openpbr_features(p) == OPENPBR_FEATURE_METALLIC);
+}
+
 TEST_CASE("openpbr_make_default_params matches the vendored spec defaults")
 {
     const OpenPBRParams p = openpbr_make_default_params();
