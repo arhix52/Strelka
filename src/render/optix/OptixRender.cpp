@@ -571,10 +571,12 @@ OptiXRender::~OptiXRender()
         optixProgramGroupDestroy(mState.occlusion_miss_group);
     if (mState.radiance_default_hit_group)
         optixProgramGroupDestroy(mState.radiance_default_hit_group);
+    if (mState.radiance_openpbr_hit_group)
+        optixProgramGroupDestroy(mState.radiance_openpbr_hit_group);
+    if (mState.radiance_curve_hit_group)
+        optixProgramGroupDestroy(mState.radiance_curve_hit_group);
     if (mState.radiance_linear_curve_hit_group)
         optixProgramGroupDestroy(mState.radiance_linear_curve_hit_group);
-    for (auto& pg : mState.radiance_hit_groups)
-        if (pg) optixProgramGroupDestroy(pg);
     if (mState.occlusion_hit_group)
         optixProgramGroupDestroy(mState.occlusion_hit_group);
     if (mState.occlusion_linear_curve_hit_group)
@@ -2296,9 +2298,9 @@ void OptiXRender::createProgramGroups()
     OptixProgramGroupDesc hit_prog_group_desc = {};
     hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hit_prog_group_desc.hitgroup.moduleCH = mState.closest_hit_module;
-    hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance";
-    hit_prog_group_desc.hitgroup.moduleIS = mState.m_catromCurveModule;
-    hit_prog_group_desc.hitgroup.entryFunctionNameIS = nullptr; // auto for built-in
+    // Mesh records need no curve intersector. They also know their material at
+    // SBT build time, so compile the inactive uber-BSDF branch out of each path.
+    hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance_gltf";
     sizeof_log = sizeof(log);
     OptixProgramGroup radiance_hit_group = nullptr;
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
@@ -2306,7 +2308,24 @@ void OptiXRender::createProgramGroups()
                                             &program_group_options, log, &sizeof_log, &radiance_hit_group));
     mState.radiance_default_hit_group = radiance_hit_group;
 
-    // Same closest hit, the linear intersector.
+    if (mPipelineSpec.hasOpenPBR)
+    {
+        hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance_openpbr";
+        sizeof_log = sizeof(log);
+        OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc, 1, &program_group_options, log,
+                                                &sizeof_log, &mState.radiance_openpbr_hit_group));
+    }
+
+    // Curves retain the dynamic material test: hair normally uses its own glTF
+    // BSDF, but authored scenes are allowed to put OpenPBR on curve geometry.
+    hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance";
+    hit_prog_group_desc.hitgroup.moduleIS = mState.m_catromCurveModule;
+    hit_prog_group_desc.hitgroup.entryFunctionNameIS = nullptr; // auto for built-in
+    sizeof_log = sizeof(log);
+    OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc, 1, &program_group_options, log,
+                                            &sizeof_log, &mState.radiance_curve_hit_group));
+
+    // Same dynamic closest hit, the linear intersector.
     hit_prog_group_desc.hitgroup.moduleIS = mState.m_linearCurveModule;
     sizeof_log = sizeof(log);
     OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc,
@@ -2380,6 +2399,9 @@ void OptiXRender::createPipeline()
     program_groups.push_back(mState.raygen_prog_group);
     program_groups.push_back(mState.radiance_miss_group);
     program_groups.push_back(mState.radiance_default_hit_group);
+    if (mState.radiance_openpbr_hit_group)
+        program_groups.push_back(mState.radiance_openpbr_hit_group);
+    program_groups.push_back(mState.radiance_curve_hit_group);
     program_groups.push_back(mState.radiance_linear_curve_hit_group);
     program_groups.push_back(mState.occlusion_miss_group);
     program_groups.push_back(mState.occlusion_hit_group);
@@ -2461,7 +2483,8 @@ void OptiXRender::destroyPipeline()
         mState.pipeline = nullptr;
     }
     for (OptixProgramGroup* group : { &mState.raygen_prog_group, &mState.radiance_miss_group,
-                                      &mState.radiance_default_hit_group, &mState.radiance_linear_curve_hit_group,
+                                      &mState.radiance_default_hit_group, &mState.radiance_openpbr_hit_group,
+                                      &mState.radiance_curve_hit_group, &mState.radiance_linear_curve_hit_group,
                                       &mState.occlusion_miss_group, &mState.occlusion_hit_group,
                                       &mState.occlusion_linear_curve_hit_group, &mState.light_hit_group,
                                       &mState.light_occlusion_group })
@@ -2701,9 +2724,17 @@ void OptiXRender::createSbt()
             }
             else
             {
-                OPTIX_CHECK(optixSbtRecordPackHeader(
-                    linearCurve ? mState.radiance_linear_curve_hit_group : mState.radiance_default_hit_group,
-                    &radiance_hit));
+                OptixProgramGroup group = mState.radiance_default_hit_group;
+                if (instance.type == oka::Instance::Type::eCurve)
+                {
+                    group = linearCurve ? mState.radiance_linear_curve_hit_group : mState.radiance_curve_hit_group;
+                }
+                else if (material_idx < mMaterials.size() &&
+                         mMaterials[material_idx].params.material_type == MATERIAL_TYPE_OPENPBR)
+                {
+                    group = mState.radiance_openpbr_hit_group;
+                }
+                OPTIX_CHECK(optixSbtRecordPackHeader(group, &radiance_hit));
                 radiance_hit.data.lightId = -1;
             }
 

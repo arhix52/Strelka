@@ -2372,7 +2372,15 @@ static __forceinline__ __device__ NextBounce sampleNextBounce(PerRayData* prd,
     return out;
 }
 
-extern "C" __global__ void __closesthit__radiance()
+enum class RadianceMaterialMode
+{
+    Dynamic,
+    Gltf,
+    OpenPBR
+};
+
+template <RadianceMaterialMode Mode>
+static __forceinline__ __device__ void closestHitRadiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
 
@@ -2670,7 +2678,9 @@ extern "C" __global__ void __closesthit__radiance()
     // material still carries a MaterialParams for emission, coverage, the
     // dielectric priority and the medium flags, and every one of those is read
     // below. Only the BSDF is replaced.
-    const bool isOpenPBR = isOpenPBRMaterial(matParams);
+    const bool isOpenPBR = Mode == RadianceMaterialMode::OpenPBR ? true :
+                           Mode == RadianceMaterialMode::Gltf ? false :
+                                                               isOpenPBRMaterial(matParams);
     // Zero-initialised, and read only under `isOpenPBR`. It is not a valid
     // material -- openpbr_params.h says so, and openpbr_make_default_params() is
     // deliberately host-only -- but every read below sits behind the flag, and
@@ -3021,4 +3031,19 @@ extern "C" __global__ void __closesthit__radiance()
         prd->throughput = make_float3(0.0f);
     }
 
+}
+
+extern "C" __global__ void __closesthit__radiance()
+{
+    closestHitRadiance<RadianceMaterialMode::Dynamic>();
+}
+
+extern "C" __global__ void __closesthit__radiance_gltf()
+{
+    closestHitRadiance<RadianceMaterialMode::Gltf>();
+}
+
+extern "C" __global__ void __closesthit__radiance_openpbr()
+{
+    closestHitRadiance<RadianceMaterialMode::OpenPBR>();
 }

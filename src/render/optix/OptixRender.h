@@ -61,8 +61,9 @@ struct PathTracerState
     OptixProgramGroup radiance_miss_group = nullptr;
     OptixProgramGroup occlusion_miss_group = nullptr;
     OptixProgramGroup radiance_default_hit_group = nullptr;
+    OptixProgramGroup radiance_openpbr_hit_group = nullptr;
+    OptixProgramGroup radiance_curve_hit_group = nullptr;
     OptixProgramGroup radiance_linear_curve_hit_group = nullptr;
-    std::vector<OptixProgramGroup> radiance_hit_groups;
     OptixProgramGroup occlusion_hit_group = nullptr;
     OptixProgramGroup occlusion_linear_curve_hit_group = nullptr;
     OptixProgramGroup light_hit_group = nullptr;

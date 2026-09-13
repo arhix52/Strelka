@@ -445,6 +445,14 @@ in this build -- but the ms rows are the two measured separately.
 
 Still open, in the order they look worth doing:
 
+- **OptiX material-model hit groups are specialised.** Mesh SBT records now
+  select glTF or OpenPBR closest-hit entry points and carry no curve intersection
+  program; only curves retain the dynamic material test. At 1920x1080, depth 8,
+  24 one-sample Sobol launches this changed ISO 9.11 -> 8.53 ms, kids 15.26 ->
+  14.76, chess 9.66 -> 8.66 and pine 19.65 -> 18.01. The three glTF scenes are
+  bit-identical; chess differs only by FP constant-propagation noise (normalised
+  RMSE 7.6e-7). NCU reports chess global loads down 4.2%, local loads 2.3% and
+  local stores 1.4%. Non-OpenPBR pipelines still retain their 256-byte stack.
 - **Metal prepares nothing.** `wavefront.metal` calls the entry points that
   prepare on the spot, so the same four preparations per vertex are still there.
   The behaviour is identical either way, which is why this is a performance item
@@ -453,9 +461,6 @@ Still open, in the order they look worth doing:
   for the glTF one, and the reordering only took 320 of it. `OpenPBRParams` is
   272 bytes and `OpenPBR_PreparedBsdf` is 720; which of them is still crossing a
   ray, and why, has not been established.
-- **`allOpenPBR`**, Metal's `kFcAllOpenPBR`: a scene where every material is
-  OpenPBR compiles the glTF lobe stack for nothing. Metal additionally requires
-  no curves, because hair keeps its own BSDF.
 - **`SurfaceInteraction` is 268 bytes.** It no longer crosses the shadow ray,
   but it is still built in full at every vertex; the sheen, iridescence,
   clearcoat, subsurface and diffuse-transmission fields -- about 84 bytes -- are
