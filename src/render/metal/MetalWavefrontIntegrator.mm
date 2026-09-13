@@ -81,9 +81,11 @@ void MetalWavefrontIntegrator::release()
     for (auto& kv : mVariants)
     {
         safeRelease(kv.second.generate);
+        safeRelease(kv.second.initPrimary);
         safeRelease(kv.second.extendMotion);
         safeRelease(kv.second.extendStatic);
         safeRelease(kv.second.extendDirectStatic);
+        safeRelease(kv.second.extendPrimaryStatic);
         safeRelease(kv.second.sssWalkMotion);
         safeRelease(kv.second.sssWalkStatic);
         safeRelease(kv.second.connectBase);
@@ -100,6 +102,7 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.guideStatic);
         safeRelease(kv.second.extendTableMotion);
         safeRelease(kv.second.extendTableStatic);
+        safeRelease(kv.second.extendPrimaryTableStatic);
         safeRelease(kv.second.shadowTableMotion);
         safeRelease(kv.second.shadowTableStatic);
         safeRelease(kv.second.guideTableMotion);
@@ -175,6 +178,7 @@ void MetalWavefrontIntegrator::addResidentAllocations(const std::function<void(M
     {
         add(entry.second.extendTableMotion);
         add(entry.second.extendTableStatic);
+        add(entry.second.extendPrimaryTableStatic);
         add(entry.second.shadowTableMotion);
         add(entry.second.shadowTableStatic);
         add(entry.second.guideTableMotion);
@@ -749,6 +753,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const MTL::Size generateTg = MTL::Size(32, 8, 1);
     const MTL::Size generateGrid = MTL::Size((generateWidth + generateTg.width - 1) / generateTg.width,
                                              (generateHeight + generateTg.height - 1) / generateTg.height, 1);
+    // Two scanlines per SIMD32 keep camera rays spatially local while avoiding
+    // the tall, narrow groups that were slower in foliage-heavy scenes.
+    const MTL::Size primaryTg = MTL::Size(16, 4, 1);
+    const MTL::Size primaryGrid = MTL::Size(
+        (width + primaryTg.width - 1) / primaryTg.width, (height + primaryTg.height - 1) / primaryTg.height, 1);
     const MTL::GPUAddress control = mControlBuffer->gpuAddress();
     const MTL::GPUAddress traversalDispatches = mTraversalDispatchBuffer->gpuAddress();
     const NS::UInteger kShadowCounterOffset = 6 * sizeof(uint32_t);
@@ -786,6 +795,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const bool fusedSss = uniforms && uniforms->maxDepth > 1u && (features & WavefrontFeatures::kSubsurface) != 0u &&
                           (features & WavefrontFeatures::kSharcUpdate) == 0u && variant->sssWalkMotion &&
                           variant->sssWalkStatic;
+    const MTL::ComputePipelineState* const primaryExtendPso = useDirectStatic ? nullptr : variant->extendPrimaryStatic;
+    const bool fusePrimary = chunk.generate && chunk.bounceBegin == 0u && chunk.phase != WavefrontChunkPhase::Finish &&
+                             traversalBatchCount == 1u && pixels == width * height && !useMotion && !fusedSss &&
+                             primaryExtendPso && variant->initPrimary && (features & WavefrontFeatures::kCurves) == 0u &&
+                             (features & WavefrontFeatures::kSharcUpdate) == 0u && !envFlag("STRELKA_NO_FUSED_PRIMARY");
 
     // Every dispatch here reads what the one before it wrote. Metal 4 does not
     // work that out, so say it: dispatch-to-dispatch, visible device-wide.
@@ -887,9 +901,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         ring.push((features & WavefrontFeatures::kSubsurface) != 0u ? 1u : 0u);
     if (chunk.generate)
     {
-        auditDispatch("wavefrontGenerate");
+        auditDispatch(fusePrimary ? "wavefrontInitPrimary" : "wavefrontGenerate");
         const uint32_t stage = beginStage(kStageGenerate);
-        enc->setComputePipelineState(variant->generate);
+        enc->setComputePipelineState(fusePrimary ? variant->initPrimary : variant->generate);
         bind(uniformBuffer, 0, 0);
         bind(mPathStateBuffer, 0, 1);
         bind(mRadianceBuffer, 0, 2);
@@ -902,7 +916,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(mIorStatsBuffer, 0, 9);
         bind(mSharcUpdateStateBuffer, 0, 10);
         bind(mMediumPathStateBuffer, 0, 11);
-        enc->dispatchThreadgroups(generateGrid, generateTg);
+        enc->dispatchThreadgroups(
+            fusePrimary ? MTL::Size(1, 1, 1) : generateGrid, fusePrimary ? MTL::Size(1, 1, 1) : generateTg);
         barrier();
         endStage(stage);
     }
@@ -920,6 +935,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
 
         if (encodeExtend)
         {
+            const bool fusedPrimaryBounce = fusePrimary && bounce == 0u;
+            const MTL::ComputePipelineState* const selectedExtendPso = fusedPrimaryBounce ? primaryExtendPso : extendPso;
             // Prepare owns clearing the append counters, so only the first
             // partial extend workload may run it. Later workloads append another
             // disjoint range of the source queue into the same hit/miss queues.
@@ -950,7 +967,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             }
 
             const uint32_t extendStage = beginStage(kStageExtend, bounce);
-            enc->setComputePipelineState(extendPso);
+            enc->setComputePipelineState(selectedExtendPso);
             bind(uniformBuffer, 0, 0);
             bind(scene.instanceBuffer, 0, 1);
             table->setResource(extendAs->gpuResourceID(), 2);
@@ -974,8 +991,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.geometryEntryBuffer, 0, 18);
             if (!useDirectStatic)
             {
-                table->setResource(
-                    (useMotion ? variant->extendTableMotion : variant->extendTableStatic)->gpuResourceID(), 19);
+                table->setResource((fusedPrimaryBounce ? variant->extendPrimaryTableStatic :
+                                    useMotion          ? variant->extendTableMotion :
+                                                         variant->extendTableStatic)
+                                       ->gpuResourceID(),
+                                   19);
             }
             bind(scene.vertexBuffer, 0, 20);
             bind(scene.prevVertexBuffer, 0, 21);
@@ -983,6 +1003,11 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             bind(scene.lightBuffer, 0, 23);
             table->setAddress(directGeometryBase, 24);
             table->setAddress(directInstanceIndex, 25);
+            if (fusedPrimaryBounce)
+            {
+                bind(mRadianceBuffer, 0, 26);
+                bind(mAovBuffer, 0, 27);
+            }
             const uint32_t batchBegin = chunk.phase == WavefrontChunkPhase::Complete ? 0u : chunk.traversalBatchBegin;
             const uint32_t batchEnd = chunk.phase == WavefrontChunkPhase::Complete ?
                                           traversalBatchCount :
@@ -1006,7 +1031,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     traversalBatchBarrier();
                     // All Metal 4 kernels share one argument table. Classification
                     // overwrote its first slots, so restore extend's bindings.
-                    enc->setComputePipelineState(extendPso);
+                    enc->setComputePipelineState(selectedExtendPso);
                     bind(uniformBuffer, 0, 0);
                     bind(scene.instanceBuffer, 0, 1);
                     table->setResource(extendAs->gpuResourceID(), 2);
@@ -1037,12 +1062,20 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     table->setAddress(directGeometryBase, 24);
                     table->setAddress(directInstanceIndex, 25);
                 }
-                auditDispatch(useDirectStatic ? "wavefrontExtendDirectStatic" :
-                              useMotion       ? "wavefrontExtend" :
-                                                "wavefrontExtendStatic");
+                auditDispatch(fusedPrimaryBounce ? "wavefrontExtendPrimaryStatic" :
+                                                   (useDirectStatic ? "wavefrontExtendDirectStatic" :
+                                                    useMotion       ? "wavefrontExtend" :
+                                                                      "wavefrontExtendStatic"));
                 table->setAddress(ring.push(batch * traversalBatchThreads), 16);
-                enc->dispatchThreadgroups(
-                    traversalDispatches + static_cast<MTL::GPUAddress>(batch) * 3u * sizeof(uint32_t), tg);
+                if (fusedPrimaryBounce)
+                {
+                    enc->dispatchThreadgroups(primaryGrid, primaryTg);
+                }
+                else
+                {
+                    enc->dispatchThreadgroups(
+                        traversalDispatches + static_cast<MTL::GPUAddress>(batch) * 3u * sizeof(uint32_t), tg);
+                }
                 if (batch + 1 < batchEnd)
                 {
                     traversalBatchBarrier();
@@ -2310,6 +2343,12 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.extendMotion = makeTraversal(entry("wavefrontExtend"), "Extend", true, v.extendTableMotion);
     v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), "Extend", false, v.extendTableStatic);
     v.extendDirectStatic = make("wavefrontExtendDirectStatic");
+    if (useMetal4 && !curves && !motionBlur && !sharcUpdate)
+    {
+        v.initPrimary = make("wavefrontInitPrimary", "Init primary");
+        v.extendPrimaryStatic =
+            makeTraversal("wavefrontExtendPrimaryStatic", "Extend", false, v.extendPrimaryTableStatic);
+    }
     if (subsurface && !sharcUpdate)
     {
         v.sssWalkMotion = make("wavefrontSssWalk");

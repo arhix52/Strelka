@@ -28,9 +28,11 @@ namespace oka::metal
 struct WavefrontVariant
 {
     MTL::ComputePipelineState* generate = nullptr;
+    MTL::ComputePipelineState* initPrimary = nullptr;
     MTL::ComputePipelineState* extendMotion = nullptr;
     MTL::ComputePipelineState* extendStatic = nullptr;
     MTL::ComputePipelineState* extendDirectStatic = nullptr;
+    MTL::ComputePipelineState* extendPrimaryStatic = nullptr;
     MTL::ComputePipelineState* sssWalkMotion = nullptr;
     MTL::ComputePipelineState* sssWalkStatic = nullptr;
     MTL::ComputePipelineState* connectBase = nullptr;
@@ -47,6 +49,7 @@ struct WavefrontVariant
     MTL::ComputePipelineState* guideStatic = nullptr;
     MTL::IntersectionFunctionTable* extendTableMotion = nullptr;
     MTL::IntersectionFunctionTable* extendTableStatic = nullptr;
+    MTL::IntersectionFunctionTable* extendPrimaryTableStatic = nullptr;
     MTL::IntersectionFunctionTable* shadowTableMotion = nullptr;
     MTL::IntersectionFunctionTable* shadowTableStatic = nullptr;
     MTL::IntersectionFunctionTable* guideTableMotion = nullptr;

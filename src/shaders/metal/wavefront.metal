@@ -1139,77 +1139,25 @@ static MediumProps mediumPropsFor(constant Uniforms& uniforms,
     return out;
 }
 
-kernel void wavefrontGenerate(uint2 gridPosition [[thread_position_in_grid]],
-                              constant Uniforms& uniforms [[buffer(0)]],
-                              device PathState* paths [[buffer(1)]],
-                              device PathRay* rays [[buffer(8)]],
-                              device float4* radianceOut [[buffer(2)]],
-                              device IorStack* iorStacks [[buffer(3)]],
-                              constant uint32_t& sampleIdx [[buffer(4)]],
-                              device uint32_t* queueOut [[buffer(5)]],
-                              device uint32_t* control [[buffer(6)]],
-                              device AovSample* aov [[buffer(7)]],
-                              // Zeroed here rather than on the host: `generate` already owns resetting the
-                              // per-sample counters, and a host-side clear would race the frame in flight.
-                              // The tally is therefore per sample, which is the rate rather than a total.
-                              device uint32_t* iorStats [[buffer(9)]],
-                              device SharcUpdateState* sharcUpdates [[buffer(10)]],
-                              device MediumPathState* mediumPaths [[buffer(11)]])
+struct PrimaryPathData
 {
-    const uint32_t pixelCount = uniforms.width * uniforms.height;
-    const uint32_t scale = SPEC_SHARC_UPDATE ? max(uniforms.sharcUpdateDownscale, 1u) : 1u;
-    const uint32_t gridWidth = (uniforms.width + scale - 1u) / scale;
-    const uint32_t gridHeight = (uniforms.height + scale - 1u) / scale;
-    if (gridPosition.x >= gridWidth || gridPosition.y >= gridHeight)
-    {
-        return;
-    }
-    const uint32_t tid = gridPosition.y * gridWidth + gridPosition.x;
-    const uint32_t pathCount = SPEC_SHARC_UPDATE ? uniforms.sharcUpdatePathCount : pixelCount;
-    if (tid == 0u)
-    {
-        control[WF_CTRL_COUNT0] = pathCount;
-        control[WF_CTRL_COUNT1] = 0u;
-        control[WF_CTRL_SHADOW] = 0u;
-        control[WF_CTRL_HIT] = 0u;
-        control[WF_CTRL_MISS] = 0u;
-        if (!SPEC_SHARC_UPDATE && sampleIdx == 0u)
-        {
-            control[WF_CTRL_GUIDE] = 0u;
-        }
-        control[WF_CTRL_CAPACITY] = pathCount;
-        iorStats[IOR_STAT_OVERFLOW] = 0u;
-        iorStats[IOR_STAT_UNMATCHED] = 0u;
-        iorStats[IOR_STAT_ESCAPED_INSIDE] = 0u;
-        if (!SPEC_SHARC_UPDATE)
-        {
-            // The primary queue size is known before launch; audit mode needs
-            // one counter update, not one contended atomic per camera ray.
-            auditWork(uniforms, WORK_PRIMARY_RAYS, pathCount);
-        }
-    }
-    if (tid >= pathCount)
-    {
-        return;
-    }
+    PathRay ray;
+    float motionTime;
+};
 
-    uint2 pixel = gridPosition;
-    uint32_t pixelIndex = pixel.y * uniforms.width + pixel.x;
-    if (SPEC_SHARC_UPDATE)
-    {
-        const uint32_t scramble = sharcHash(tid ^ (uniforms.sharcFrameIndex * 0x9e3779b9u));
-        const uint2 offset = uint2(scramble % scale, (scramble / scale) % scale);
-        pixel = min(gridPosition * scale + offset, uint2(uniforms.width - 1u, uniforms.height - 1u));
-        pixelIndex = pixel.y * uniforms.width + pixel.x;
-        SharcUpdateState updateState;
-        sharcInitUpdateState(updateState, pixelIndex);
-        sharcUpdates[tid] = updateState;
-    }
-
-    // Sparse updates preserve the same tile order while queueing the selected
-    // full-resolution path slots.
-    queueOut[tid] = pixelIndex;
-
+// Initialise the state consumed after the first intersection. Keeping this in
+// one routine lets the ordinary generate pass and the fused static-primary
+// traversal share exactly the same sampling and AOV semantics.
+static inline PrimaryPathData initializePrimaryPath(uint2 pixel,
+                                                    uint32_t pixelIndex,
+                                                    constant Uniforms& uniforms,
+                                                    constant uint32_t& sampleIdx,
+                                                    device PathState* paths,
+                                                    device PathRay* rays,
+                                                    device float4* radianceOut,
+                                                    device AovSample* aov,
+                                                    device MediumPathState* mediumPaths)
+{
     if (sampleIdx == 0u)
     {
         radianceOut[pixelIndex] = float4(0.0f);
@@ -1271,6 +1219,104 @@ kernel void wavefrontGenerate(uint2 gridPosition [[thread_position_in_grid]],
         mediumState.mediumAlbedo = 0u;
         mediumPaths[pixelIndex] = mediumState;
     }
+
+    PrimaryPathData result;
+    result.ray = r;
+    result.motionTime = motionTime;
+    return result;
+}
+
+static inline void initializePrimaryControl(constant Uniforms& uniforms,
+                                            constant uint32_t& sampleIdx,
+                                            uint32_t pathCount,
+                                            device uint32_t* control,
+                                            device uint32_t* iorStats)
+{
+    control[WF_CTRL_COUNT0] = pathCount;
+    control[WF_CTRL_COUNT1] = 0u;
+    control[WF_CTRL_SHADOW] = 0u;
+    control[WF_CTRL_HIT] = 0u;
+    control[WF_CTRL_MISS] = 0u;
+    if (!SPEC_SHARC_UPDATE && sampleIdx == 0u)
+    {
+        control[WF_CTRL_GUIDE] = 0u;
+    }
+    control[WF_CTRL_CAPACITY] = pathCount;
+    iorStats[IOR_STAT_OVERFLOW] = 0u;
+    iorStats[IOR_STAT_UNMATCHED] = 0u;
+    iorStats[IOR_STAT_ESCAPED_INSIDE] = 0u;
+    if (!SPEC_SHARC_UPDATE)
+    {
+        // The primary queue size is known before launch; audit mode needs one
+        // counter update, not one contended atomic per camera ray.
+        auditWork(uniforms, WORK_PRIMARY_RAYS, pathCount);
+    }
+}
+
+// Counter-only companion for the fused Metal 4 camera traversal. Keeping this
+// separate from wavefrontGenerate avoids running camera RNG for a token lane
+// just to publish the known full-frame path count.
+kernel void wavefrontInitPrimary(constant Uniforms& uniforms [[buffer(0)]],
+                                 constant uint32_t& sampleIdx [[buffer(4)]],
+                                 device uint32_t* control [[buffer(6)]],
+                                 device uint32_t* iorStats [[buffer(9)]])
+{
+    initializePrimaryControl(uniforms, sampleIdx, uniforms.width * uniforms.height, control, iorStats);
+}
+
+kernel void wavefrontGenerate(uint2 gridPosition [[thread_position_in_grid]],
+                              constant Uniforms& uniforms [[buffer(0)]],
+                              device PathState* paths [[buffer(1)]],
+                              device PathRay* rays [[buffer(8)]],
+                              device float4* radianceOut [[buffer(2)]],
+                              device IorStack* iorStacks [[buffer(3)]],
+                              constant uint32_t& sampleIdx [[buffer(4)]],
+                              device uint32_t* queueOut [[buffer(5)]],
+                              device uint32_t* control [[buffer(6)]],
+                              device AovSample* aov [[buffer(7)]],
+                              // Zeroed here rather than on the host: `generate` already owns resetting the
+                              // per-sample counters, and a host-side clear would race the frame in flight.
+                              // The tally is therefore per sample, which is the rate rather than a total.
+                              device uint32_t* iorStats [[buffer(9)]],
+                              device SharcUpdateState* sharcUpdates [[buffer(10)]],
+                              device MediumPathState* mediumPaths [[buffer(11)]])
+{
+    const uint32_t pixelCount = uniforms.width * uniforms.height;
+    const uint32_t scale = SPEC_SHARC_UPDATE ? max(uniforms.sharcUpdateDownscale, 1u) : 1u;
+    const uint32_t gridWidth = (uniforms.width + scale - 1u) / scale;
+    const uint32_t gridHeight = (uniforms.height + scale - 1u) / scale;
+    if (gridPosition.x >= gridWidth || gridPosition.y >= gridHeight)
+    {
+        return;
+    }
+    const uint32_t tid = gridPosition.y * gridWidth + gridPosition.x;
+    const uint32_t pathCount = SPEC_SHARC_UPDATE ? uniforms.sharcUpdatePathCount : pixelCount;
+    if (tid == 0u)
+    {
+        initializePrimaryControl(uniforms, sampleIdx, pathCount, control, iorStats);
+    }
+    if (tid >= pathCount)
+    {
+        return;
+    }
+
+    uint2 pixel = gridPosition;
+    uint32_t pixelIndex = pixel.y * uniforms.width + pixel.x;
+    if (SPEC_SHARC_UPDATE)
+    {
+        const uint32_t scramble = sharcHash(tid ^ (uniforms.sharcFrameIndex * 0x9e3779b9u));
+        const uint2 offset = uint2(scramble % scale, (scramble / scale) % scale);
+        pixel = min(gridPosition * scale + offset, uint2(uniforms.width - 1u, uniforms.height - 1u));
+        pixelIndex = pixel.y * uniforms.width + pixel.x;
+        SharcUpdateState updateState;
+        sharcInitUpdateState(updateState, pixelIndex);
+        sharcUpdates[tid] = updateState;
+    }
+
+    // Sparse updates preserve the same tile order while queueing the selected
+    // full-resolution path slots.
+    queueOut[tid] = pixelIndex;
+    initializePrimaryPath(pixel, pixelIndex, uniforms, sampleIdx, paths, rays, radianceOut, aov, mediumPaths);
 
     // The inactive bit in PathState makes stale IOR side-table bytes
     // unreachable. Initialise the table lazily if this path actually enters a
@@ -1772,8 +1818,9 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
     return true;
 }
 
-template <typename T>
+template <typename T, bool InitializePrimary = false>
 static void extendImpl(uint gid,
+                       uint2 primaryPixel,
                        constant Uniforms& uniforms,
                        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances,
                        typename T::structure accelerationStructure,
@@ -1806,45 +1853,70 @@ static void extendImpl(uint gid,
                        // is the camera bounce from the rest, and `extend` is encoded once per
                        // bounce anyway. Reading the path's depth here to answer the same question
                        // would put a load in the hottest kernel in the renderer.
-                       uint32_t rayMask)
+                       uint32_t rayMask,
+                       device PathState* primaryPaths,
+                       device PathRay* primaryRays,
+                       device MediumPathState* primaryMediumPaths,
+                       device float4* primaryRadiance,
+                       device AovSample* primaryAov)
 {
-    // Indirect dispatch can only launch whole threadgroups, so the tail of the
-    // last one runs past the queue and has to be discarded here.
-    if (gid >= control[WF_CTRL_ACTIVE])
-    {
-        return;
-    }
-    const uint32_t tid = queue[gid];
-    // A corrupted append count must not turn into an out-of-bounds PathRay load
-    // and then an invalid hardware traversal. This is cold-path protection: a
-    // valid queue always contains the pixel slot its path owns.
-    if (tid >= uniforms.width * uniforms.height)
-    {
-        return;
-    }
+    uint32_t tid;
     MediumPathState mediumState = {};
-    if (SPEC_SSS)
+    PathRay pr;
+    uint32_t pathFlags;
+    float motionTime;
+    const bool primaryRay = (rayMask & GEOMETRY_MASK_LIGHT_HIDDEN) == 0u;
+    if (InitializePrimary)
     {
-        mediumState = mediumPaths[tid];
-        const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
-        if (!SPEC_SHARC_UPDATE && medium != 0u && (materials[medium - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
+        if (primaryPixel.x >= uniforms.width || primaryPixel.y >= uniforms.height)
         {
             return;
         }
+        tid = primaryPixel.y * uniforms.width + primaryPixel.x;
+        const PrimaryPathData primary =
+            initializePrimaryPath(primaryPixel, tid, uniforms, sampleIdx, primaryPaths, primaryRays, primaryRadiance,
+                                  primaryAov, primaryMediumPaths);
+        pr = primary.ray;
+        pathFlags = 0u;
+        motionTime = primary.motionTime;
     }
-    const PathRay pr = rays[tid];
-    // The host excludes camera-hidden lights only on bounce zero. Camera rays
-    // therefore need no PathState load: their depth is zero and the cone code
-    // already treats depth zero as specular. Secondary iterations retain the
-    // per-path depth because transparent and medium crossings need not advance
-    // in lockstep with the host's bounce loop.
-    const bool primaryRay = (rayMask & GEOMETRY_MASK_LIGHT_HIDDEN) == 0u;
-    const uint32_t pathFlags = primaryRay ? 0u : paths[tid].depthAndFlags;
+    else
+    {
+        // Indirect dispatch can only launch whole threadgroups, so the tail of
+        // the last one runs past the queue and has to be discarded here.
+        if (gid >= control[WF_CTRL_ACTIVE])
+        {
+            return;
+        }
+        tid = queue[gid];
+        // A corrupted append count must not turn into an out-of-bounds PathRay
+        // load and then an invalid hardware traversal. This is cold-path
+        // protection: a valid queue always contains the pixel slot its path owns.
+        if (tid >= uniforms.width * uniforms.height)
+        {
+            return;
+        }
+        if (SPEC_SSS)
+        {
+            mediumState = mediumPaths[tid];
+            const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
+            if (!SPEC_SHARC_UPDATE && medium != 0u && (materials[medium - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
+            {
+                return;
+            }
+        }
+        pr = rays[tid];
+        // The host excludes camera-hidden lights only on bounce zero. Camera
+        // rays therefore need no PathState load: their depth is zero and the cone
+        // code already treats depth zero as specular. Secondary iterations retain
+        // the per-path depth because transparent and medium crossings need not
+        // advance in lockstep with the host's bounce loop.
+        pathFlags = primaryRay ? 0u : paths[tid].depthAndFlags;
+        motionTime = motionTimeFor(uniforms, tid, sampleIdx);
+    }
 
     const uint32_t auditBounce = min(pathDepth(pathFlags), WORK_BOUNCE_SLOTS - 1u);
     auditExtendWork(uniforms, auditBounce);
-
-    const float motionTime = motionTimeFor(uniforms, tid, sampleIdx);
 
     ray r;
     // Match Apple's curve sample: an offset origin and a positive lower bound
@@ -2056,10 +2128,11 @@ static void extendImpl(uint gid,
         device const uint32_t* indexBuffer [[buffer(22)]], device const UniformLight* lights [[buffer(23)]],            \
         constant uint32_t& directGeometryBase [[buffer(24)]], constant uint32_t& directInstanceIndex [[buffer(25)]])    \
     {                                                                                                                   \
-        extendImpl<TRAITS>(gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure,  \
-                           rays, hits, sampleIdx, queue, control, hitQueue, missQueue, missCounter, paths, materials,   \
-                           mediumPaths, geometryEntries, functionTable, vertexBuffer, prevVertexBuffer, indexBuffer,    \
-                           lights, directGeometryBase, directInstanceIndex, rayMask);                                   \
+        extendImpl<TRAITS>(gid + queueOffset, uint2(0u), uniforms, instances, accelerationStructure,                    \
+                           volumeAccelerationStructure, rays, hits, sampleIdx, queue, control, hitQueue, missQueue,     \
+                           missCounter, paths, materials, mediumPaths, geometryEntries, functionTable, vertexBuffer,    \
+                           prevVertexBuffer, indexBuffer, lights, directGeometryBase, directInstanceIndex, rayMask,     \
+                           nullptr, nullptr, nullptr, nullptr, nullptr);                                                \
     }
 
 WF_EXTEND_ENTRY(wavefrontExtend, MotionTraversal)
@@ -2096,11 +2169,44 @@ kernel void wavefrontExtendDirectStatic(uint gid [[thread_position_in_grid]],
                                         constant uint32_t& directGeometryBase [[buffer(24)]],
                                         constant uint32_t& directInstanceIndex [[buffer(25)]])
 {
-    extendImpl<DirectStaticTraversal>(
-        gid + queueOffset, uniforms, instances, accelerationStructure, volumeAccelerationStructure, rays, hits,
-        sampleIdx, queue, control, hitQueue, missQueue, missCounter, paths, materials, mediumPaths, geometryEntries, 0u,
-        vertexBuffer, prevVertexBuffer, indexBuffer, lights, directGeometryBase, directInstanceIndex, rayMask);
+    extendImpl<DirectStaticTraversal>(gid + queueOffset, uint2(0u), uniforms, instances, accelerationStructure,
+                                      volumeAccelerationStructure, rays, hits, sampleIdx, queue, control, hitQueue,
+                                      missQueue, missCounter, paths, materials, mediumPaths, geometryEntries, 0u,
+                                      vertexBuffer, prevVertexBuffer, indexBuffer, lights, directGeometryBase,
+                                      directInstanceIndex, rayMask, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
+
+// Camera-only static traversal. The host runs wavefrontGenerate for one lane so
+// it can initialise the shared queue counters, then this kernel creates each
+// camera path immediately before tracing it. Camera RNG and state stores die
+// before the intersector, while the identity queue and PathRay reload disappear.
+#define WF_EXTEND_PRIMARY_ENTRY(NAME, TRAITS)                                                                           \
+    kernel void NAME(                                                                                                   \
+        uint2 pixel [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                             \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(1)]],                           \
+        TRAITS::structure accelerationStructure [[buffer(2)]], device PathRay* rays [[buffer(3)]],                      \
+        device char* hits [[buffer(4)]], constant uint32_t& sampleIdx [[buffer(5)]],                                    \
+        device const uint32_t* queue [[buffer(6)]], device const uint32_t* control [[buffer(7)]],                       \
+        device uint32_t* hitQueue [[buffer(8)]], device atomic_uint* hitCounter [[buffer(9)]],                          \
+        device uint32_t* missQueue [[buffer(10)]], device atomic_uint* missCounter [[buffer(11)]],                      \
+        device PathState* paths [[buffer(12)]], device const Material* materials [[buffer(13)]],                        \
+        constant uint32_t& rayMask [[buffer(14)]], TRAITS::volume_structure volumeAccelerationStructure [[buffer(15)]], \
+        device MediumPathState* mediumPaths [[buffer(17)]],                                                             \
+        device const GeometryEntry* geometryEntries [[buffer(18)]], TRAITS::table functionTable [[buffer(19)]],         \
+        device const char* vertexBuffer [[buffer(20)]], device const char* prevVertexBuffer [[buffer(21)]],             \
+        device const uint32_t* indexBuffer [[buffer(22)]], device const UniformLight* lights [[buffer(23)]],            \
+        constant uint32_t& directGeometryBase [[buffer(24)]], constant uint32_t& directInstanceIndex [[buffer(25)]],    \
+        device float4* radianceOut [[buffer(26)]], device AovSample* aov [[buffer(27)]])                                \
+    {                                                                                                                   \
+        const uint32_t gid = pixel.y * uniforms.width + pixel.x;                                                        \
+        extendImpl<TRAITS, true>(gid, pixel, uniforms, instances, accelerationStructure, volumeAccelerationStructure,   \
+                                 rays, hits, sampleIdx, queue, control, hitQueue, missQueue, missCounter, paths,        \
+                                 materials, mediumPaths, geometryEntries, functionTable, vertexBuffer,                  \
+                                 prevVertexBuffer, indexBuffer, lights, directGeometryBase, directInstanceIndex,        \
+                                 rayMask, paths, rays, mediumPaths, radianceOut, aov);                                  \
+    }
+
+WF_EXTEND_PRIMARY_ENTRY(wavefrontExtendPrimaryStatic, StaticTraversal)
 
 // Rebuild the triangle's vertex attributes from the vertex buffer.
 //
