@@ -22,6 +22,7 @@ static inline float3 sampleEnvMap(const uint2 aliasWords,
                                   uint32_t envMapWidth,
                                   uint32_t envMapHeight,
                                   float envMapRotation,
+                                  thread float2& uv,
                                   thread float& pdf)
 {
     const uint32_t w = envMapWidth;
@@ -42,7 +43,8 @@ static inline float3 sampleEnvMap(const uint2 aliasWords,
     // ray is substantially more expensive than the alias-table loads.
     const float u = envSampleTexelU((int)x, (int)w, jitter.x);
     const float v = envSampleSolidAngleV((int)y, (int)h, jitter.y);
-    const float3 dir = envUVToDir(float2(u, v), envMapRotation);
+    uv = float2(u, v);
+    const float3 dir = envUVToDir(uv, envMapRotation);
 
     pdf = aliasTable[draw.texel].solidAnglePdf;
 

@@ -255,6 +255,13 @@ inline float3 reflect_dir(float3 incident, float3 normal)
 // support never depends on which compiler implements length().
 DEVICE_FUNC float3 normalizeFiniteVectorOrZero(float3 v)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        const float lengthSquared = dot(v, v);
+        return lengthSquared > 0.0f ? v / sqrtf(lengthSquared) : make_float3(0.0f);
+    }
+#endif
     const float scale = fmaxf(fabsf(v.x), fmaxf(fabsf(v.y), fabsf(v.z)));
     if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
     {
@@ -277,14 +284,20 @@ DEVICE_FUNC float3 orthonormalizeTangent(float3 normal, float3 transformedTangen
         return make_float3(0.0f);
     }
     const float projection = dot(transformedTangent, n);
-    const float3 tangent = make_float3(fmaf(-projection, n.x, transformedTangent.x),
-                                       fmaf(-projection, n.y, transformedTangent.y),
-                                       fmaf(-projection, n.z, transformedTangent.z));
+    const float3 tangent =
+        make_float3(fmaf(-projection, n.x, transformedTangent.x), fmaf(-projection, n.y, transformedTangent.y),
+                    fmaf(-projection, n.z, transformedTangent.z));
     return normalizeFiniteVectorOrZero(tangent);
 }
 
 DEVICE_FUNC float finiteVectorLength(float3 v)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return sqrtf(dot(v, v));
+    }
+#endif
     const float scale = fmaxf(fabsf(v.x), fmaxf(fabsf(v.y), fabsf(v.z)));
     if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
     {
@@ -306,6 +319,12 @@ DEVICE_FUNC float differenceOfProducts(float a, float b, float c, float d)
 {
     const float cd = c * d;
     const float difference = fmaf(a, b, -cd);
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return difference;
+    }
+#endif
     return difference + fmaf(-c, d, cd);
 }
 
@@ -319,6 +338,12 @@ DEVICE_FUNC CompensatedFloat compensatedSum(float a, float b)
 {
     CompensatedFloat result{};
     result.high = a + b;
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return result;
+    }
+#endif
     const float virtualB = result.high - a;
     result.low = (a - (result.high - virtualB)) + (b - virtualB);
     return result;
@@ -328,12 +353,24 @@ DEVICE_FUNC CompensatedFloat compensatedProduct(float a, float b)
 {
     CompensatedFloat result{};
     result.high = a * b;
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return result;
+    }
+#endif
     result.low = fmaf(a, b, -result.high);
     return result;
 }
 
 DEVICE_FUNC CompensatedFloat addCompensated(CompensatedFloat a, CompensatedFloat b)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return compensatedSum(a.high, b.high);
+    }
+#endif
     const CompensatedFloat highSum = compensatedSum(a.high, b.high);
     const CompensatedFloat lowSum = compensatedSum(a.low, b.low);
     const CompensatedFloat middle = compensatedSum(highSum.low, lowSum.high);
@@ -346,6 +383,12 @@ DEVICE_FUNC CompensatedFloat addCompensated(CompensatedFloat a, CompensatedFloat
 
 DEVICE_FUNC CompensatedFloat scaleCompensated(CompensatedFloat value, float scale)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return compensatedProduct(value.high, scale);
+    }
+#endif
     CompensatedFloat result = compensatedProduct(value.high, scale);
     const CompensatedFloat correction = compensatedSum(result.low, value.low * scale);
     const CompensatedFloat leading = compensatedSum(result.high, correction.high);
@@ -355,6 +398,12 @@ DEVICE_FUNC CompensatedFloat scaleCompensated(CompensatedFloat value, float scal
 
 DEVICE_FUNC CompensatedFloat multiplyCompensated(CompensatedFloat a, CompensatedFloat b)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return compensatedProduct(a.high, b.high);
+    }
+#endif
     CompensatedFloat result = compensatedProduct(a.high, b.high);
     result = addCompensated(result, compensatedProduct(a.high, b.low));
     result = addCompensated(result, compensatedProduct(a.low, b.high));
@@ -381,12 +430,24 @@ DEVICE_FUNC CompensatedFloat compensatedDot3(CompensatedFloat ax,
 
 DEVICE_FUNC float compensatedValue(CompensatedFloat value)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return value.high;
+    }
+#endif
     return value.high + value.low;
 }
 
 DEVICE_FUNC CompensatedFloat divideCompensated(CompensatedFloat numerator, CompensatedFloat denominator)
 {
     const float denominatorValue = compensatedValue(denominator);
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return compensatedSum(compensatedValue(numerator) / denominatorValue, 0.0f);
+    }
+#endif
     CompensatedFloat quotient = compensatedSum(compensatedValue(numerator) / denominatorValue, 0.0f);
     for (unsigned int iteration = 0u; iteration < 2u; ++iteration)
     {
@@ -401,6 +462,12 @@ DEVICE_FUNC CompensatedFloat sqrtCompensated(CompensatedFloat value)
 {
     const float root = sqrtf(fmaxf(compensatedValue(value), 0.0f));
     CompensatedFloat result = compensatedSum(root, 0.0f);
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return result;
+    }
+#endif
     if (root > 0.0f)
     {
         const CompensatedFloat residual = addCompensated(value, negateCompensated(multiplyCompensated(result, result)));
@@ -462,6 +529,13 @@ DEVICE_FUNC CompensatedFloat exactScalarTransmittedCosineSquared(float incidentC
 
 DEVICE_FUNC CompensatedFloat dielectricTransmittedCosineSquared(CompensatedFloat incidentCosine, float eta)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        const float cosine = compensatedValue(incidentCosine);
+        return compensatedSum(fmaf(eta * eta, cosine * cosine - 1.0f, 1.0f), 0.0f);
+    }
+#endif
     // 1 - eta^2 (1 - c^2) = (eta c)^2 - (eta - 1)(eta + 1).
     // This avoids first rounding two values near one and then subtracting them
     // at the critical angle. eta-1 is exact by Sterbenz for neighbouring media.
@@ -551,6 +625,12 @@ DEVICE_FUNC float3 accurateCross(float3 a, float3 b)
 
 DEVICE_FUNC float accurateDot(float3 a, float3 b)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return dot(a, b);
+    }
+#endif
     return compensatedValue(addCompensated(
         addCompensated(compensatedProduct(a.x, b.x), compensatedProduct(a.y, b.y)), compensatedProduct(a.z, b.z)));
 }
@@ -586,6 +666,12 @@ DEVICE_FUNC CompensatedFloat scaleCompensatedExponent(CompensatedFloat value, in
 
 DEVICE_FUNC float3 finiteCrossDirection(float3 a, float3 b)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return normalizeFiniteVectorOrZero(accurateCross(a, b));
+    }
+#endif
     const float scaleA = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
     const float scaleB = fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z)));
     if (!(scaleA > 0.0f) || !(scaleA <= 3.402823466e38f) || !(scaleB > 0.0f) || !(scaleB <= 3.402823466e38f))
@@ -609,6 +695,13 @@ DEVICE_FUNC float3 finiteCrossDirection(float3 a, float3 b)
 // long as the final density does.
 DEVICE_FUNC float finiteCrossReciprocal(float3 a, float3 b, float numerator)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        const float crossLength = finiteVectorLength(accurateCross(a, b));
+        return crossLength > 0.0f ? numerator / crossLength : 0.0f;
+    }
+#endif
     const float scaleA = fmaxf(fabsf(a.x), fmaxf(fabsf(a.y), fabsf(a.z)));
     const float scaleB = fmaxf(fabsf(b.x), fmaxf(fabsf(b.y), fabsf(b.z)));
     if (!(numerator > 0.0f) || !(numerator <= 3.402823466e38f) || !(scaleA > 0.0f) || !(scaleA <= 3.402823466e38f) ||

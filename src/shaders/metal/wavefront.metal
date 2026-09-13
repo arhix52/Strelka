@@ -1,3 +1,8 @@
+// Real render inputs are finite and range-checked on the host. Keep the robust
+// CPU arithmetic available for reference tests, but never carry its
+// double-float/exponent machinery through a production GPU material lobe.
+#define STRELKA_FAST_FINITE_GPU_MATH 1
+
 #include "shading_common.h"
 
 // The OpenPBR BSDF. Included unconditionally, and it has to be: SPEC_OPENPBR is
@@ -538,20 +543,29 @@ static inline bool cutoutShadowAccept(float2 barycentricCoord,
     float2 uv = decodeInterpolatedCutoutUv(primitive.uv[0], primitive.uv[1], primitive.uv[2], barycentricCoord);
     if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
     {
-        uv = float2(dot(uv, float2(material.uvTransformX)), dot(uv, float2(material.uvTransformY))) +
-             float2(material.uvOffset);
+        if (!SPEC_ALPHA_UV_IDENTITY)
+        {
+            uv = float2(dot(uv, float2(material.uvTransformX)), dot(uv, float2(material.uvTransformY))) +
+                 float2(material.uvOffset);
+        }
     }
     constexpr sampler alphaLinearSampler(mag_filter::linear, min_filter::linear, address::repeat);
     constexpr sampler alphaNearestSampler(mag_filter::nearest, min_filter::nearest, address::repeat);
-    float opacity = material.baseColorAlpha;
+    float opacity = SPEC_ALPHA_BASE_COLOR_ONE ? 1.0f : material.baseColorAlpha;
     if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
     {
         // Match the current fast foliage path for BLEND while retaining the
-        // linear lookup required by thresholded MASK materials.
-        opacity *= material.alphaMode == ALPHA_MODE_MASK ? material.baseColorTexture.sample(alphaLinearSampler, uv).a :
-                                                           material.baseColorTexture.sample(alphaNearestSampler, uv).a;
+        // linear lookup required by thresholded MASK materials. Hoisting scene
+        // facts into function constants removes the material-mode branch and
+        // unused transform/factor loads from the hot intersection function.
+        opacity *= SPEC_NEAREST_ALPHA_TEXTURE ? material.baseColorTexture.sample(alphaNearestSampler, uv).a :
+                                                material.baseColorTexture.sample(alphaLinearSampler, uv).a;
     }
-    opacity = material.alphaMode == ALPHA_MODE_MASK ? (opacity >= material.alphaCutoff ? 1.0f : 0.0f) : saturate(opacity);
+    if (!SPEC_ALL_ALPHA_BLEND && material.alphaMode == ALPHA_MODE_MASK)
+    {
+        opacity = opacity >= material.alphaCutoff ? 1.0f : 0.0f;
+    }
+    opacity = saturate(opacity);
     uint32_t randomBits = primitiveId * 0x9e3779b9u ^ geometryId * 0x85ebca6bu ^ geometryEntryBase * 0xc2b2ae35u;
     randomBits ^= as_type<uint32_t>(origin.x) ^ as_type<uint32_t>(origin.y) ^ as_type<uint32_t>(origin.z);
     randomBits ^= as_type<uint32_t>(direction.x) * 0x27d4eb2du ^ as_type<uint32_t>(direction.y) * 0x165667b1u ^
@@ -2366,6 +2380,44 @@ kernel void wavefrontExtendDirectStatic(uint gid [[thread_position_in_grid]],
     }
 
 WF_EXTEND_PRIMARY_ENTRY(wavefrontExtendPrimaryStatic, StaticTraversal)
+
+kernel void wavefrontExtendPrimaryDirectStatic(uint2 pixel [[thread_position_in_grid]],
+                                               constant Uniforms& uniforms [[buffer(0)]],
+                                               constant MTLIndirectAccelerationStructureInstanceDescriptor* instances
+                                               [[buffer(1)]],
+                                               DirectStaticTraversal::structure accelerationStructure [[buffer(2)]],
+                                               device PathRay* rays [[buffer(3)]],
+                                               device char* hits [[buffer(4)]],
+                                               constant uint32_t& sampleIdx [[buffer(5)]],
+                                               device const uint32_t* queue [[buffer(6)]],
+                                               device const uint32_t* control [[buffer(7)]],
+                                               device uint32_t* hitQueue [[buffer(8)]],
+                                               device atomic_uint* hitCounter [[buffer(9)]],
+                                               device uint32_t* missQueue [[buffer(10)]],
+                                               device atomic_uint* missCounter [[buffer(11)]],
+                                               device PathState* paths [[buffer(12)]],
+                                               device const Material* materials [[buffer(13)]],
+                                               constant uint32_t& rayMask [[buffer(14)]],
+                                               DirectStaticTraversal::volume_structure volumeAccelerationStructure
+                                               [[buffer(15)]],
+                                               device MediumPathState* mediumPaths [[buffer(17)]],
+                                               device const GeometryEntry* geometryEntries [[buffer(18)]],
+                                               device const char* vertexBuffer [[buffer(20)]],
+                                               device const char* prevVertexBuffer [[buffer(21)]],
+                                               device const uint32_t* indexBuffer [[buffer(22)]],
+                                               device const UniformLight* lights [[buffer(23)]],
+                                               constant uint32_t& directGeometryBase [[buffer(24)]],
+                                               constant uint32_t& directInstanceIndex [[buffer(25)]],
+                                               device float4* radianceOut [[buffer(26)]],
+                                               device AovSample* aov [[buffer(27)]])
+{
+    const uint32_t gid = pixel.y * uniforms.width + pixel.x;
+    extendImpl<DirectStaticTraversal, true>(gid, pixel, uniforms, instances, accelerationStructure,
+                                            volumeAccelerationStructure, rays, hits, sampleIdx, queue, control, hitQueue,
+                                            missQueue, missCounter, paths, materials, mediumPaths, geometryEntries, 0u,
+                                            vertexBuffer, prevVertexBuffer, indexBuffer, lights, directGeometryBase,
+                                            directInstanceIndex, rayMask, paths, rays, mediumPaths, radianceOut, aov);
+}
 
 // Rebuild the triangle's vertex attributes from the vertex buffer.
 //

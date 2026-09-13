@@ -95,11 +95,8 @@ DEVICE_FUNC EmissiveScaledTerm emissiveNormalizeTerm(float value, int exponent)
     return term;
 }
 
-DEVICE_FUNC void emissiveAppendProduct(float a,
-                                       float b,
-                                       float sign,
-                                       THREAD_REF EmissiveScaledTerm* terms,
-                                       THREAD_REF unsigned int& count)
+DEVICE_FUNC void emissiveAppendProduct(
+    float a, float b, float sign, THREAD_REF EmissiveScaledTerm* terms, THREAD_REF unsigned int& count)
 {
     if (a == 0.0f || b == 0.0f)
     {
@@ -156,8 +153,7 @@ DEVICE_FUNC void emissiveAddTerms(EmissiveScaledTerm a,
 // Exact products of the original float vertices are retained as separately
 // exponent-scaled terms. This avoids both an overflowing p1-p0 and the loss of
 // a small endpoint that determines the area after large products cancel.
-DEVICE_FUNC EmissiveScaledTerm
-emissiveTriangleCrossComponent(float a0, float a1, float a2, float b0, float b1, float b2)
+DEVICE_FUNC EmissiveScaledTerm emissiveTriangleCrossComponent(float a0, float a1, float a2, float b0, float b1, float b2)
 {
     EmissiveScaledTerm terms[12];
     unsigned int count = 0u;
@@ -176,9 +172,9 @@ emissiveTriangleCrossComponent(float a0, float a1, float a2, float b0, float b1,
     {
         const EmissiveScaledTerm term = terms[i];
         unsigned int j = i;
-        while (j > 0u && (term.exponent < terms[j - 1u].exponent ||
-                          (term.exponent == terms[j - 1u].exponent &&
-                           fabsf(term.mantissa) < fabsf(terms[j - 1u].mantissa))))
+        while (j > 0u &&
+               (term.exponent < terms[j - 1u].exponent ||
+                (term.exponent == terms[j - 1u].exponent && fabsf(term.mantissa) < fabsf(terms[j - 1u].mantissa))))
         {
             terms[j] = terms[j - 1u];
             --j;
@@ -213,6 +209,21 @@ DEVICE_FUNC EmissiveTriangleMeasure emissiveTriangleMeasure(float3 p0, float3 p1
     measure.normal = make_float3(0.0f);
     measure.areaPdf = 0.0f;
 
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        const float3 areaVector = cross(p1 - p0, p2 - p0);
+        const float twiceAreaSquared = dot(areaVector, areaVector);
+        if (twiceAreaSquared > 0.0f)
+        {
+            const float twiceArea = sqrtf(twiceAreaSquared);
+            measure.normal = areaVector / twiceArea;
+            measure.areaPdf = 2.0f / twiceArea;
+        }
+        return measure;
+    }
+#endif
+
     constexpr float maxFinite = 3.402823466e38f;
     if (!(fabsf(p0.x) <= maxFinite) || !(fabsf(p0.y) <= maxFinite) || !(fabsf(p0.z) <= maxFinite) ||
         !(fabsf(p1.x) <= maxFinite) || !(fabsf(p1.y) <= maxFinite) || !(fabsf(p1.z) <= maxFinite) ||
@@ -220,12 +231,9 @@ DEVICE_FUNC EmissiveTriangleMeasure emissiveTriangleMeasure(float3 p0, float3 p1
     {
         return measure;
     }
-    const EmissiveScaledTerm crossX =
-        emissiveTriangleCrossComponent(p0.y, p1.y, p2.y, p0.z, p1.z, p2.z);
-    const EmissiveScaledTerm crossY =
-        emissiveTriangleCrossComponent(p0.z, p1.z, p2.z, p0.x, p1.x, p2.x);
-    const EmissiveScaledTerm crossZ =
-        emissiveTriangleCrossComponent(p0.x, p1.x, p2.x, p0.y, p1.y, p2.y);
+    const EmissiveScaledTerm crossX = emissiveTriangleCrossComponent(p0.y, p1.y, p2.y, p0.z, p1.z, p2.z);
+    const EmissiveScaledTerm crossY = emissiveTriangleCrossComponent(p0.z, p1.z, p2.z, p0.x, p1.x, p2.x);
+    const EmissiveScaledTerm crossZ = emissiveTriangleCrossComponent(p0.x, p1.x, p2.x, p0.y, p1.y, p2.y);
     int commonExponent = crossX.mantissa != 0.0f ? crossX.exponent : -1000000;
     if (crossY.mantissa != 0.0f)
     {
@@ -269,6 +277,12 @@ DEVICE_FUNC float emissiveTriangleAreaPdf(float3 p0, float3 p1, float3 p2)
 
 DEVICE_FUNC float finiteConvexLerp(float a, float b, float t)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return fmaf(t, b - a, a);
+    }
+#endif
     const bool crossesZero = (a < 0.0f && b > 0.0f) || (a > 0.0f && b < 0.0f);
     const float value = crossesZero ? fmaf(t, b, (1.0f - t) * a) : fmaf(t, b - a, a);
     return fminf(fmaxf(value, fminf(a, b)), fmaxf(a, b));
@@ -310,20 +324,18 @@ sampleEmissiveTriangle(float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, 
 
     const float root = sqrtf(fminf(fmaxf(u0, 0.0f), 1.0f));
     const float edgeCoordinate = fminf(fmaxf(u1, 0.0f), 1.0f);
-    const float3 edgePoint = make_float3(finiteConvexLerp(p1.x, p2.x, edgeCoordinate),
-                                         finiteConvexLerp(p1.y, p2.y, edgeCoordinate),
-                                         finiteConvexLerp(p1.z, p2.z, edgeCoordinate));
-    sample.point = make_float3(finiteConvexLerp(p0.x, edgePoint.x, root),
-                               finiteConvexLerp(p0.y, edgePoint.y, root),
+    const float3 edgePoint =
+        make_float3(finiteConvexLerp(p1.x, p2.x, edgeCoordinate), finiteConvexLerp(p1.y, p2.y, edgeCoordinate),
+                    finiteConvexLerp(p1.z, p2.z, edgeCoordinate));
+    sample.point = make_float3(finiteConvexLerp(p0.x, edgePoint.x, root), finiteConvexLerp(p0.y, edgePoint.y, root),
                                finiteConvexLerp(p0.z, edgePoint.z, root));
     sample.normal = measure.normal;
-    const float2 edgeUv = make_float2(finiteConvexLerp(uv1.x, uv2.x, edgeCoordinate),
-                                      finiteConvexLerp(uv1.y, uv2.y, edgeCoordinate));
+    const float2 edgeUv =
+        make_float2(finiteConvexLerp(uv1.x, uv2.x, edgeCoordinate), finiteConvexLerp(uv1.y, uv2.y, edgeCoordinate));
     sample.uv = make_float2(finiteConvexLerp(uv0.x, edgeUv.x, root), finiteConvexLerp(uv0.y, edgeUv.y, root));
     constexpr float maxFinite = 3.402823466e38f;
     if (!(fabsf(sample.point.x) <= maxFinite) || !(fabsf(sample.point.y) <= maxFinite) ||
-        !(fabsf(sample.point.z) <= maxFinite) || !(fabsf(sample.uv.x) <= maxFinite) ||
-        !(fabsf(sample.uv.y) <= maxFinite))
+        !(fabsf(sample.point.z) <= maxFinite) || !(fabsf(sample.uv.x) <= maxFinite) || !(fabsf(sample.uv.y) <= maxFinite))
     {
         return sample;
     }

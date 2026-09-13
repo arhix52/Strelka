@@ -680,12 +680,14 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(MTL::Lib
     };
 
     MTL4::FunctionDescriptor* compute = describe(functionName, true);
-    // The intersection wrappers do not read function constants. Specialising
-    // each one makes Xcode's replayer emit the same AIR module twice and reject
-    // the pipeline with a duplicate-symbol error.
+    // The analytic wrappers do not read function constants. Specialising each
+    // one makes Xcode's replayer emit the same AIR module twice and reject the
+    // pipeline with a duplicate-symbol error. The optional triangle function
+    // is the alpha IFT and does use scene-level alpha constants, so it must be
+    // specialised together with the compute entry point.
     MTL4::FunctionDescriptor* linked0 = describe(linkedFunctionName0, false);
     MTL4::FunctionDescriptor* linked1 = describe(linkedFunctionName1, false);
-    MTL4::FunctionDescriptor* linked2 = linkedFunctionName2 ? describe(linkedFunctionName2, false) : nullptr;
+    MTL4::FunctionDescriptor* linked2 = linkedFunctionName2 ? describe(linkedFunctionName2, true) : nullptr;
     auto* pipelineDescriptor = MTL4::ComputePipelineDescriptor::alloc()->init();
     pipelineDescriptor->setComputeFunctionDescriptor(compute);
     const NS::Object* functions[] = { linked0, linked1, linked2 };

@@ -1184,12 +1184,13 @@ LightConnection connectLight(constant Uniforms& uniforms,
                               localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
 }
 
-LightConnection connectEnvDirection(constant Uniforms& uniforms,
-                                    float3 dir,
-                                    float envPdf,
-                                    thread SurfaceInteraction& si,
-                                    texture2d<float> envMapTexture,
-                                    bool volumeEvent)
+LightConnection connectEnvDirectionAtUv(constant Uniforms& uniforms,
+                                        float3 dir,
+                                        float2 uv,
+                                        float envPdf,
+                                        thread SurfaceInteraction& si,
+                                        texture2d<float> envMapTexture,
+                                        bool volumeEvent)
 {
     LightConnection c = makeEmptyConnection();
     c.sample = restirDirectionSample(RESTIR_SAMPLE_ENVIRONMENT, 0u, dir);
@@ -1203,7 +1204,6 @@ LightConnection connectEnvDirection(constant Uniforms& uniforms,
 
     constexpr sampler envSampler(
         mag_filter::linear, min_filter::linear, s_address::repeat, t_address::clamp_to_edge, coord::normalized);
-    const float2 uv = dirToEnvUV(dir, uniforms.envMapRotation);
     const float4 envSample = envMapTexture.sample(envSampler, uv);
     const float3 Li = envSample.xyz * uniforms.envMapIntensity * uniforms.envMapColorTint.xyz;
 
@@ -1212,6 +1212,17 @@ LightConnection connectEnvDirection(constant Uniforms& uniforms,
     c.tMax = 1e16f;
     c.needsRay = true;
     return c;
+}
+
+LightConnection connectEnvDirection(constant Uniforms& uniforms,
+                                    float3 dir,
+                                    float envPdf,
+                                    thread SurfaceInteraction& si,
+                                    texture2d<float> envMapTexture,
+                                    bool volumeEvent)
+{
+    return connectEnvDirectionAtUv(
+        uniforms, dir, dirToEnvUV(dir, uniforms.envMapRotation), envPdf, si, envMapTexture, volumeEvent);
 }
 
 LightConnection connectEnvLight(constant Uniforms& uniforms,
@@ -1228,10 +1239,14 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
     const float2 jitter = envRandom.value.zw;
 
     float envPdf = 0.0f;
+    float2 envUv;
     float3 dir = sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
-                              uniforms.envMapRotation, envPdf);
+                              uniforms.envMapRotation, envUv, envPdf);
 
-    return connectEnvDirection(uniforms, dir, envPdf, si, envMapTexture, volumeEvent);
+    // The alias sample already owns the exact texture coordinate. Reversing
+    // its direction through atan2/asin only to recover that coordinate adds
+    // SFU latency and can move a boundary value into the adjacent texel.
+    return connectEnvDirectionAtUv(uniforms, dir, envUv, envPdf, si, envMapTexture, volumeEvent);
 }
 
 struct EmissiveTriangleGeometry

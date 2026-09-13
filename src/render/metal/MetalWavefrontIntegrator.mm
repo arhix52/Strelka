@@ -86,6 +86,7 @@ void MetalWavefrontIntegrator::release()
         safeRelease(kv.second.extendStatic);
         safeRelease(kv.second.extendDirectStatic);
         safeRelease(kv.second.extendPrimaryStatic);
+        safeRelease(kv.second.extendPrimaryDirectStatic);
         safeRelease(kv.second.sssWalkMotion);
         safeRelease(kv.second.sssWalkStatic);
         safeRelease(kv.second.connectBase);
@@ -800,11 +801,12 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const bool fusedSss = uniforms && uniforms->maxDepth > 1u && (features & WavefrontFeatures::kSubsurface) != 0u &&
                           (features & WavefrontFeatures::kSharcUpdate) == 0u && variant->sssWalkMotion &&
                           variant->sssWalkStatic;
-    const MTL::ComputePipelineState* const primaryExtendPso = useDirectStatic ? nullptr : variant->extendPrimaryStatic;
+    const MTL::ComputePipelineState* const primaryExtendPso =
+        useDirectStatic ? variant->extendPrimaryDirectStatic : variant->extendPrimaryStatic;
     const bool fusePrimary = chunk.generate && chunk.bounceBegin == 0u && chunk.phase != WavefrontChunkPhase::Finish &&
-                             traversalBatchCount == 1u && pixels == width * height && !useMotion && !fusedSss &&
-                             primaryExtendPso && variant->initPrimary && (features & WavefrontFeatures::kCurves) == 0u &&
-                             (features & WavefrontFeatures::kSharcUpdate) == 0u && !envFlag("STRELKA_NO_FUSED_PRIMARY");
+                             traversalBatchCount == 1u && pixels == width * height && !useMotion && primaryExtendPso &&
+                             variant->initPrimary && (features & WavefrontFeatures::kSharcUpdate) == 0u &&
+                             !envFlag("STRELKA_NO_FUSED_PRIMARY");
 
     // Every dispatch here reads what the one before it wrote. Metal 4 does not
     // work that out, so say it: dispatch-to-dispatch, visible device-wide.
@@ -1019,7 +1021,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                                           std::min(chunk.traversalBatchEnd, traversalBatchCount);
             for (uint32_t batch = batchBegin; batch < batchEnd; ++batch)
             {
-                if (fusedSss)
+                if (fusedSss && !fusedPrimaryBounce)
                 {
                     auditDispatch("wavefrontClassifySss");
                     enc->setComputePipelineState(mClassifySssPSO4);
@@ -1067,7 +1069,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     table->setAddress(directGeometryBase, 24);
                     table->setAddress(directInstanceIndex, 25);
                 }
-                auditDispatch(fusedPrimaryBounce ? "wavefrontExtendPrimaryStatic" :
+                auditDispatch(fusedPrimaryBounce ? (useDirectStatic ? "wavefrontExtendPrimaryDirectStatic" :
+                                                                      "wavefrontExtendPrimaryStatic") :
                                                    (useDirectStatic ? "wavefrontExtendDirectStatic" :
                                                     useMotion       ? "wavefrontExtend" :
                                                                       "wavefrontExtendStatic"));
@@ -2257,6 +2260,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     const bool nearestAlphaTexture =
         stochasticAlphaVisibility && allAlphaBlend && !envFlag("STRELKA_LINEAR_ALPHA_TEXTURE");
     values->setConstantValue(&nearestAlphaTexture, MTL::DataTypeBool, (NS::UInteger)37);
+    constexpr bool fastFiniteMath = true;
     const bool genericShadeSplit = (features & WavefrontFeatures::kGenericShadeSplit) != 0u;
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
@@ -2312,7 +2316,8 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
             disc = mLibrary->newFunction(NS::String::string(discName.c_str(), NS::UTF8StringEncoding), values, &err);
             if (triangleIntersectionName)
             {
-                triangle = mLibrary->newFunction(NS::String::string(triangleIntersectionName, NS::UTF8StringEncoding));
+                triangle = mLibrary->newFunction(
+                    NS::String::string(triangleIntersectionName, NS::UTF8StringEncoding), values, &err);
             }
             MTL::Function* kernel =
                 mLibrary->newFunction(NS::String::string(name.c_str(), NS::UTF8StringEncoding), values, &err);
@@ -2398,11 +2403,15 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.extendMotion = makeTraversal(entry("wavefrontExtend"), "Extend", true, v.extendTableMotion);
     v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), "Extend", false, v.extendTableStatic);
     v.extendDirectStatic = make("wavefrontExtendDirectStatic");
-    if (useMetal4 && !curves && !motionBlur && !sharcUpdate)
+    // Curve traversal already carries enough live state that folding camera
+    // generation into it regresses the primary pass on M4 Pro. Keep the fused
+    // path for the lean triangle-only traversal where it wins.
+    if (useMetal4 && !motionBlur && !sharcUpdate && !curves)
     {
         v.initPrimary = make("wavefrontInitPrimary", "Init primary");
         v.extendPrimaryStatic =
-            makeTraversal("wavefrontExtendPrimaryStatic", "Extend", false, v.extendPrimaryTableStatic);
+            makeTraversal(entry("wavefrontExtendPrimaryStatic"), "Extend", false, v.extendPrimaryTableStatic);
+        v.extendPrimaryDirectStatic = make("wavefrontExtendPrimaryDirectStatic", "Extend primary direct static");
     }
     if (subsurface && !sharcUpdate)
     {
@@ -2492,9 +2501,9 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     STRELKA_INFO(
         "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
         "curves={} sharcUpdate={} openpbr={} allOpenpbr={} allNativeOpenpbr={} risOne={} aov={} genericSplit={} "
-        "sampler={} metal4={} alphaIft={}",
+        "sampler={} metal4={} alphaIft={} fastFiniteMath={}",
         envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, allOpenPBR,
-        allNativeOpenPBR, risOne, aov, genericShadeSplit, samplerType, useMetal4, alphaIft);
+        allNativeOpenPBR, risOne, aov, genericShadeSplit, samplerType, useMetal4, alphaIft, fastFiniteMath);
     // maxTotalThreadsPerThreadgroup is Metal's available proxy for per-pipeline register pressure.
     auto tgLimit = [](MTL::ComputePipelineState* p) -> uint32_t {
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;

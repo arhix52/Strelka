@@ -24,6 +24,138 @@ namespace oka::metal
 /// read as colour loses the two-channel encoding the BC5 path depends on.
 namespace
 {
+bool allFinite(std::initializer_list<float> values)
+{
+    return std::ranges::all_of(values, [](float value) { return std::isfinite(value); });
+}
+
+bool materialParamsAreFinite(const MaterialParams& p)
+{
+    return allFinite({ p.base_color.x,
+                       p.base_color.y,
+                       p.base_color.z,
+                       p.metallic,
+                       p.roughness,
+                       p.ior,
+                       p.specular,
+                       p.transmission,
+                       p.clearcoat,
+                       p.clearcoat_roughness,
+                       p.anisotropy,
+                       p.emission.x,
+                       p.emission.y,
+                       p.emission.z,
+                       p.emission_strength,
+                       p.normal_scale,
+                       p.occlusion_strength,
+                       p.alpha_cutoff,
+                       p.base_color_alpha,
+                       p.anisotropy_rotation,
+                       p.attenuation_distance,
+                       p.attenuation_color.x,
+                       p.attenuation_color.y,
+                       p.attenuation_color.z,
+                       p.uv_rotation,
+                       p.uv_offset_x,
+                       p.uv_offset_y,
+                       p.uv_scale_x,
+                       p.uv_scale_y,
+                       p.diffuse_transmission_color.x,
+                       p.diffuse_transmission_color.y,
+                       p.diffuse_transmission_color.z,
+                       p.diffuse_transmission,
+                       p.sheen_color.x,
+                       p.sheen_color.y,
+                       p.sheen_color.z,
+                       p.sheen,
+                       p.subsurface_radius.x,
+                       p.subsurface_radius.y,
+                       p.subsurface_radius.z,
+                       p.sheen_roughness,
+                       p.subsurface,
+                       p.subsurface_anisotropy,
+                       p.clearcoat_ior,
+                       p.medium_emission.x,
+                       p.medium_emission.y,
+                       p.medium_emission.z,
+                       p.specular_color.x,
+                       p.specular_color.y,
+                       p.specular_color.z,
+                       p.subsurface_reference.x,
+                       p.subsurface_reference.y,
+                       p.subsurface_reference.z,
+                       p.iridescence,
+                       p.iridescence_ior,
+                       p.iridescence_thickness });
+}
+
+bool openPbrParamsAreFinite(const OpenPBRParams& p)
+{
+    return allFinite({ p.base_color.r,
+                       p.base_color.g,
+                       p.base_color.b,
+                       p.base_weight,
+                       p.base_diffuse_roughness,
+                       p.base_metalness,
+                       p.specular_weight,
+                       p.specular_roughness,
+                       p.specular_color.r,
+                       p.specular_color.g,
+                       p.specular_color.b,
+                       p.specular_roughness_anisotropy,
+                       p.specular_ior,
+                       p.specular_anisotropy_rotation_cos,
+                       p.specular_anisotropy_rotation_sin,
+                       p.coat_weight,
+                       p.coat_color.r,
+                       p.coat_color.g,
+                       p.coat_color.b,
+                       p.coat_roughness,
+                       p.coat_roughness_anisotropy,
+                       p.coat_ior,
+                       p.coat_darkening,
+                       p.coat_anisotropy_rotation_cos,
+                       p.coat_anisotropy_rotation_sin,
+                       p.fuzz_weight,
+                       p.fuzz_roughness,
+                       p.transmission_weight,
+                       p.fuzz_color.r,
+                       p.fuzz_color.g,
+                       p.fuzz_color.b,
+                       p.transmission_depth,
+                       p.transmission_color.r,
+                       p.transmission_color.g,
+                       p.transmission_color.b,
+                       p.transmission_scatter_anisotropy,
+                       p.transmission_scatter.r,
+                       p.transmission_scatter.g,
+                       p.transmission_scatter.b,
+                       p.transmission_dispersion_scale,
+                       p.transmission_dispersion_abbe_number,
+                       p.subsurface_weight,
+                       p.subsurface_radius,
+                       p.subsurface_scatter_anisotropy,
+                       p.subsurface_color.r,
+                       p.subsurface_color.g,
+                       p.subsurface_color.b,
+                       p.thin_film_weight,
+                       p.subsurface_radius_scale.r,
+                       p.subsurface_radius_scale.g,
+                       p.subsurface_radius_scale.b,
+                       p.thin_film_thickness,
+                       p.emission_color.r,
+                       p.emission_color.g,
+                       p.emission_color.b,
+                       p.thin_film_ior,
+                       p.emission_luminance,
+                       p.geometry_opacity,
+                       p.uv_offset_x,
+                       p.uv_offset_y,
+                       p.uv_scale_x,
+                       p.uv_scale_y,
+                       p.uv_rotation });
+}
+
 bool isNativeOpenPBRDescription(const Scene::MaterialDescription& desc)
 {
     // MaterialX may bind over an existing glTF material and intentionally
@@ -419,6 +551,11 @@ void MetalMaterials::publishParameters(Scene* scene)
     for (const Scene::MaterialDescription& desc : matDescs)
     {
         const auto& p = desc.params;
+        if (!materialParamsAreFinite(p))
+        {
+            STRELKA_WARNING(
+                "Material '{}' contains non-finite parameters; Metal shading expects finite host input", desc.name);
+        }
         st.gpuMaterials.push_back(makeMaterialParams(desc));
         if (!isNativeOpenPBRDescription(desc))
         {
@@ -445,6 +582,13 @@ void MetalMaterials::publishParameters(Scene* scene)
             else
             {
                 openpbrParams.push_back(openpbr_make_default_params());
+            }
+
+            if (!openPbrParamsAreFinite(openpbrParams.back()))
+            {
+                STRELKA_WARNING(
+                    "OpenPBR material '{}' contains non-finite parameters; Metal shading expects finite host input",
+                    desc.name);
             }
 
             // The mask is derived rather than authored, so it cannot disagree

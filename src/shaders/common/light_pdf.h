@@ -73,10 +73,9 @@ DEVICE_FUNC OrthonormalLightFrame makeOrthonormalLightFrame(float3 axisX, float3
     frame.x = orthonormalizeTangent(frame.emissionAxis, axisX);
     const float yAlongNormal = dot(axisY, frame.emissionAxis);
     const float yAlongX = dot(axisY, frame.x);
-    const float3 yResidual = make_float3(
-        fmaf(-yAlongX, frame.x.x, fmaf(-yAlongNormal, frame.emissionAxis.x, axisY.x)),
-        fmaf(-yAlongX, frame.x.y, fmaf(-yAlongNormal, frame.emissionAxis.y, axisY.y)),
-        fmaf(-yAlongX, frame.x.z, fmaf(-yAlongNormal, frame.emissionAxis.z, axisY.z)));
+    const float3 yResidual = make_float3(fmaf(-yAlongX, frame.x.x, fmaf(-yAlongNormal, frame.emissionAxis.x, axisY.x)),
+                                         fmaf(-yAlongX, frame.x.y, fmaf(-yAlongNormal, frame.emissionAxis.y, axisY.y)),
+                                         fmaf(-yAlongX, frame.x.z, fmaf(-yAlongNormal, frame.emissionAxis.z, axisY.z)));
     frame.y = normalizeFiniteVectorOrZero(yResidual);
     frame.valid = dot(frame.emissionAxis, frame.emissionAxis) > 0.0f && dot(frame.x, frame.x) > 0.0f &&
                   dot(frame.y, frame.y) > 0.0f;
@@ -154,9 +153,13 @@ DEVICE_FUNC bool multiplyPdfFactor(THREAD_REF PdfProductAccumulator& product, fl
     {
         return false;
     }
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    product.mantissa *= factor;
+#else
     int exponent = 0;
     product.mantissa *= decomposeFloatExponent(factor, exponent);
     product.exponent += exponent;
+#endif
     return true;
 }
 
@@ -167,9 +170,13 @@ DEVICE_FUNC bool dividePdfFactor(THREAD_REF PdfProductAccumulator& product, floa
     {
         return false;
     }
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    product.mantissa /= factor;
+#else
     int exponent = 0;
     product.mantissa /= decomposeFloatExponent(factor, exponent);
     product.exponent -= exponent;
+#endif
     return true;
 }
 
@@ -180,17 +187,25 @@ DEVICE_FUNC bool multiplySquaredPdfFactor(THREAD_REF PdfProductAccumulator& prod
     {
         return false;
     }
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    product.mantissa *= factor * factor;
+#else
     int exponent = 0;
     const float mantissa = decomposeFloatExponent(factor, exponent);
     product.mantissa *= mantissa * mantissa;
     product.exponent += 2 * exponent;
+#endif
     return true;
 }
 
 DEVICE_FUNC float finishPdfProduct(const THREAD_REF PdfProductAccumulator& product)
 {
     constexpr float maxFinite = 3.402823466e38f;
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float result = product.mantissa;
+#else
     const float result = scaleFloatExponent(product.mantissa, product.exponent);
+#endif
     if (!(result > 0.0f))
     {
         return 0.0f;
@@ -369,12 +384,8 @@ DEVICE_FUNC float lightRetryUniform(uint32_t word)
 /// recovering the tangent length with `sqrt(1-cosTheta^2)` loses the complete
 /// sample once cosTheta rounds to one. The identity below computes sinTheta
 /// directly from the half angle and the same solid-angle variate.
-DEVICE_FUNC float3 sampleDistantLightDirection(float uPhi,
-                                               float uSolidAngle,
-                                               uint32_t retryPhi,
-                                               uint32_t retrySolidAngle,
-                                               float halfAngle,
-                                               float3 direction)
+DEVICE_FUNC float3 sampleDistantLightDirection(
+    float uPhi, float uSolidAngle, uint32_t retryPhi, uint32_t retrySolidAngle, float halfAngle, float3 direction)
 {
     // Scene packing stores a canonical unit axis. Do not renormalize it here:
     // an additional binary32 normalization can move a narrow cap by more than
@@ -455,10 +466,7 @@ DEVICE_FUNC bool distantLightDeltaDirectionMatches(float3 direction, float3 axis
     return direction.x == axisDirection.x && direction.y == axisDirection.y && direction.z == axisDirection.z;
 }
 
-DEVICE_FUNC bool distantLightDeltaPathMatches(uint32_t depth,
-                                              bool specularBounce,
-                                              float3 direction,
-                                              float3 axisDirection)
+DEVICE_FUNC bool distantLightDeltaPathMatches(uint32_t depth, bool specularBounce, float3 direction, float3 axisDirection)
 {
     return (depth == 0u || specularBounce) && distantLightDeltaDirectionMatches(direction, axisDirection);
 }

@@ -33,6 +33,7 @@ struct WavefrontVariant
     MTL::ComputePipelineState* extendStatic = nullptr;
     MTL::ComputePipelineState* extendDirectStatic = nullptr;
     MTL::ComputePipelineState* extendPrimaryStatic = nullptr;
+    MTL::ComputePipelineState* extendPrimaryDirectStatic = nullptr;
     MTL::ComputePipelineState* sssWalkMotion = nullptr;
     MTL::ComputePipelineState* sssWalkStatic = nullptr;
     MTL::ComputePipelineState* connectBase = nullptr;

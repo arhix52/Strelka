@@ -219,6 +219,12 @@ DEVICE_FUNC float ggx_smith_visibility(float alpha, float NdotV, float NdotL)
 DEVICE_FUNC float saturating_nonnegative_product(float a, float b)
 {
     const float maxFloat = 3.402823466e+38f;
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return fminf(a * b, maxFloat);
+    }
+#endif
     if (!(a >= 0.0f) || !(a <= maxFloat) || !(b >= 0.0f) || !(b <= maxFloat))
         return 0.0f;
     if (!(a > 0.0f) || !(b > 0.0f))
@@ -229,6 +235,12 @@ DEVICE_FUNC float saturating_nonnegative_product(float a, float b)
 DEVICE_FUNC float saturating_nonnegative_sum(float a, float b)
 {
     const float maxFloat = 3.402823466e+38f;
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        return fminf(a + b, maxFloat);
+    }
+#endif
     if (!(a >= 0.0f) || !(a <= maxFloat) || !(b >= 0.0f) || !(b <= maxFloat))
         return 0.0f;
     return a > maxFloat - b ? maxFloat : a + b;
@@ -452,6 +464,15 @@ DEVICE_FUNC RefractionResidualExpansion refraction_residual_expansion(float3 V, 
 DEVICE_FUNC void refraction_residual_metrics(
     float3 V, float3 wt, float eta, THREAD_REF float& residualLength, THREAD_REF CompensatedFloat& signedVdotH)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        const float3 residual = refraction_residual(V, wt, eta);
+        residualLength = length(residual);
+        signedVdotH = compensatedSum(residualLength > 0.0f ? dot(V, residual) / residualLength : 0.0f, 0.0f);
+        return;
+    }
+#endif
     const RefractionResidualExpansion residual = refraction_residual_expansion(V, wt, eta);
     const float x = compensatedValue(residual.x);
     const float y = compensatedValue(residual.y);
@@ -502,6 +523,24 @@ DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3
     // non-equal indices close to one, where the residual is the half vector.
     const float etaSafe = fmaxf(eta, 1e-6f);
     float3 residual = refraction_residual(V, wt, etaSafe);
+#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+    if (STRELKA_FAST_FINITE_GPU_MATH)
+    {
+        const float lengthSquared = dot(residual, residual);
+        if (!(lengthSquared > 0.0f))
+        {
+            robustVdotH = compensatedSum(saturate(dot(V, Nf)), 0.0f);
+            return Nf;
+        }
+        float3 H = residual / sqrtf(lengthSquared);
+        if (dot(V, H) < 0.0f)
+        {
+            H = -H;
+        }
+        robustVdotH = compensatedSum(saturate(dot(V, H)), 0.0f);
+        return H;
+    }
+#endif
     float residualLength = 0.0f;
     CompensatedFloat signedVdotH = compensatedSum(0.0f, 0.0f);
     refraction_residual_metrics(V, wt, etaSafe, residualLength, signedVdotH);

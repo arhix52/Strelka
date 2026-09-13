@@ -78,8 +78,10 @@ DEVICE_FUNC float3 sampleCanonicalSphere(float u1, float u2)
     return make_float3(radial * cosf(phi), radial * sinf(phi), z);
 }
 
-DEVICE_FUNC CanonicalAnalyticIntersection intersectCanonicalSphere(
-    float3 origin, float3 direction, float minDistance, float maxDistance)
+DEVICE_FUNC CanonicalAnalyticIntersection intersectCanonicalSphere(float3 origin,
+                                                                   float3 direction,
+                                                                   float minDistance,
+                                                                   float maxDistance)
 {
     CanonicalAnalyticIntersection result;
     const float a = dot(direction, direction);
@@ -97,8 +99,10 @@ DEVICE_FUNC CanonicalAnalyticIntersection intersectCanonicalSphere(
     return result;
 }
 
-DEVICE_FUNC CanonicalAnalyticIntersection intersectCanonicalDisc(
-    float3 origin, float3 direction, float minDistance, float maxDistance)
+DEVICE_FUNC CanonicalAnalyticIntersection intersectCanonicalDisc(float3 origin,
+                                                                 float3 direction,
+                                                                 float minDistance,
+                                                                 float maxDistance)
 {
     CanonicalAnalyticIntersection result;
     if (direction.z == 0.0f)
@@ -277,6 +281,17 @@ DEVICE_FUNC bool affineEllipsoidPointMapIsRepresentable(const THREAD_REF ScaledA
 DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, float3 axisZ)
 {
     ScaledAffineBasis result;
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    result.x = axisX;
+    result.y = axisY;
+    result.z = axisZ;
+    result.cofactorX = cross(axisY, axisZ);
+    result.cofactorY = cross(axisZ, axisX);
+    result.cofactorZ = cross(axisX, axisY);
+    result.determinant = compensatedSum(dot(axisX, result.cofactorX), 0.0f);
+    result.valid = fabsf(result.determinant.high) > 0.0f;
+    return result;
+#else
     if (!affineVectorIsFinite(axisX) || !affineVectorIsFinite(axisY) || !affineVectorIsFinite(axisZ))
     {
         return result;
@@ -312,14 +327,13 @@ DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, floa
         const float3 fastCofactorX = accurateCross(axisY, axisZ);
         const float3 fastCofactorY = accurateCross(axisZ, axisX);
         const float3 fastCofactorZ = accurateCross(axisX, axisY);
-        const float fastMatrixNorm = fmaxf(fabsf(axisX.x) + fabsf(axisY.x) + fabsf(axisZ.x),
-                                           fmaxf(fabsf(axisX.y) + fabsf(axisY.y) + fabsf(axisZ.y),
-                                                 fabsf(axisX.z) + fabsf(axisY.z) + fabsf(axisZ.z)));
-        const float fastAdjugateNorm = fmaxf(fabsf(fastCofactorX.x) + fabsf(fastCofactorX.y) + fabsf(fastCofactorX.z),
-                                             fmaxf(fabsf(fastCofactorY.x) + fabsf(fastCofactorY.y) +
-                                                       fabsf(fastCofactorY.z),
-                                                   fabsf(fastCofactorZ.x) + fabsf(fastCofactorZ.y) +
-                                                       fabsf(fastCofactorZ.z)));
+        const float fastMatrixNorm = fmaxf(
+            fabsf(axisX.x) + fabsf(axisY.x) + fabsf(axisZ.x),
+            fmaxf(fabsf(axisX.y) + fabsf(axisY.y) + fabsf(axisZ.y), fabsf(axisX.z) + fabsf(axisY.z) + fabsf(axisZ.z)));
+        const float fastAdjugateNorm =
+            fmaxf(fabsf(fastCofactorX.x) + fabsf(fastCofactorX.y) + fabsf(fastCofactorX.z),
+                  fmaxf(fabsf(fastCofactorY.x) + fabsf(fastCofactorY.y) + fabsf(fastCofactorY.z),
+                        fabsf(fastCofactorZ.x) + fabsf(fastCofactorZ.y) + fabsf(fastCofactorZ.z)));
         if (fabsf(fastDeterminant) > 9.313225746154785e-10f * fastMatrixNorm * fastAdjugateNorm)
         {
             result.cofactorX = fastCofactorX;
@@ -405,13 +419,19 @@ DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, floa
     result.worldExponentZ = rowExponentZ + globalExponent;
     result.valid = true;
     return result;
+#endif
 }
 
 DEVICE_FUNC float analyticAffineOrientation(float3 axisX, float3 axisY, float3 axisZ)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float determinant = dot(axisX, cross(axisY, axisZ));
+    return determinant > 0.0f ? 1.0f : (determinant < 0.0f ? -1.0f : 0.0f);
+#else
     const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
     const float determinant = compensatedValue(basis.determinant);
     return basis.valid ? (determinant > 0.0f ? 1.0f : -1.0f) : 0.0f;
+#endif
 }
 
 DEVICE_FUNC int compensatedExponent(CompensatedFloat value, int externalExponent)
@@ -440,6 +460,19 @@ DEVICE_FUNC float affineCofactorReciprocalAndDirection(float3 axisX,
                                                        THREAD_REF float3& direction)
 {
     direction = make_float3(0.0f);
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float3 object = make_float3(objectX.high, objectY.high, objectZ.high);
+    const float inputLengthSquared = dot(object, object);
+    const float3 cofactor = affineSphereCofactor(axisX, axisY, axisZ, object);
+    const float cofactorLengthSquared = dot(cofactor, cofactor);
+    if (!(inputLengthSquared > 0.0f) || !(cofactorLengthSquared > 0.0f) || !(numerator > 0.0f))
+    {
+        return 0.0f;
+    }
+    const float inverseCofactorLength = 1.0f / sqrtf(cofactorLengthSquared);
+    direction = cofactor * inverseCofactorLength;
+    return numerator * sqrtf(inputLengthSquared) * inverseCofactorLength;
+#else
     const float3 rowX = make_float3(axisX.x, axisY.x, axisZ.x);
     const float3 rowY = make_float3(axisX.y, axisY.y, axisZ.y);
     const float3 rowZ = make_float3(axisX.z, axisY.z, axisZ.z);
@@ -517,6 +550,7 @@ DEVICE_FUNC float affineCofactorReciprocalAndDirection(float3 axisX,
         scaleFloatExponent(numeratorMantissa * inputLengthMantissa / lengthMantissa,
                            numeratorExponent + inputLengthExponent - lengthExponent - commonExponent);
     return reciprocal >= 1.175494351e-38f && reciprocal <= 3.402823466e38f ? reciprocal : 0.0f;
+#endif
 }
 
 DEVICE_FUNC float affineCofactorReciprocalAndDirection(
@@ -531,6 +565,20 @@ DEVICE_FUNC float affineSphereAreaPdfAndNormal(
     float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal, THREAD_REF float3& normal)
 {
     normal = make_float3(0.0f);
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float3 cofactorX = cross(axisY, axisZ);
+    const float3 cofactor =
+        objectNormal.x * cofactorX + objectNormal.y * cross(axisZ, axisX) + objectNormal.z * cross(axisX, axisY);
+    const float cofactorLengthSquared = dot(cofactor, cofactor);
+    const float determinant = dot(axisX, cofactorX);
+    if (!(cofactorLengthSquared > 0.0f) || determinant == 0.0f)
+    {
+        return 0.0f;
+    }
+    const float inverseCofactorLength = 1.0f / sqrtf(cofactorLengthSquared);
+    normal = copysignf(1.0f, determinant) * cofactor * inverseCofactorLength;
+    return inverseCofactorLength * (1.0f / (4.0f * M_PI_F));
+#else
     const float orientation = analyticAffineOrientation(axisX, axisY, axisZ);
     float3 cofactorDirection;
     const float areaPdf = affineCofactorReciprocalAndDirection(
@@ -542,6 +590,7 @@ DEVICE_FUNC float affineSphereAreaPdfAndNormal(
         return 0.0f;
     }
     return areaPdf;
+#endif
 }
 
 // Unit inverse-transpose normal for an affine map whose columns are the three
@@ -549,6 +598,18 @@ DEVICE_FUNC float affineSphereAreaPdfAndNormal(
 // cancels during normalization.
 DEVICE_FUNC float3 transformAffineNormal(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float3 cofactorX = cross(axisY, axisZ);
+    const float3 cofactor =
+        objectNormal.x * cofactorX + objectNormal.y * cross(axisZ, axisX) + objectNormal.z * cross(axisX, axisY);
+    const float lengthSquared = dot(cofactor, cofactor);
+    const float determinant = dot(axisX, cofactorX);
+    if (!(lengthSquared > 0.0f) || determinant == 0.0f)
+    {
+        return make_float3(0.0f);
+    }
+    return copysignf(1.0f, determinant) * cofactor / sqrtf(lengthSquared);
+#else
     const float orientation = analyticAffineOrientation(axisX, axisY, axisZ);
     float3 cofactorDirection;
     affineCofactorReciprocalAndDirection(axisX, axisY, axisZ, objectNormal, 1.0f, cofactorDirection);
@@ -557,11 +618,25 @@ DEVICE_FUNC float3 transformAffineNormal(float3 axisX, float3 axisY, float3 axis
         return make_float3(0.0f);
     }
     return orientation * cofactorDirection;
+#endif
 }
 
 DEVICE_FUNC bool solveAffineCoordinates(
     float3 axisX, float3 axisY, float3 axisZ, float3 worldOffset, THREAD_REF float3& objectCoordinates)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float3 cofactorX = cross(axisY, axisZ);
+    const float determinant = dot(axisX, cofactorX);
+    if (!(fabsf(determinant) > 0.0f))
+    {
+        objectCoordinates = make_float3(0.0f);
+        return false;
+    }
+    objectCoordinates = make_float3(dot(worldOffset, cofactorX), dot(worldOffset, cross(axisZ, axisX)),
+                                    dot(worldOffset, cross(axisX, axisY))) /
+                        determinant;
+    return true;
+#else
     const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
     if (!basis.valid)
     {
@@ -608,6 +683,7 @@ DEVICE_FUNC bool solveAffineCoordinates(
                                     scaleFloatExponent(scaledCoordinates.y, -basis.objectExponentY),
                                     scaleFloatExponent(scaledCoordinates.z, -basis.objectExponentZ));
     return affineVectorIsFinite(objectCoordinates);
+#endif
 }
 
 DEVICE_FUNC bool analyticAffineTransformIsNonsingular(float3 axisX, float3 axisY, float3 axisZ)
@@ -729,6 +805,17 @@ sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ,
 DEVICE_FUNC float analyticEllipsoidAreaPdfUnchecked(
     float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
 {
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    float3 objectNormal = affineSphereCoordinates(axisX, axisY, axisZ, point - center);
+    const float objectLengthSquared = dot(objectNormal, objectNormal);
+    if (!(objectLengthSquared > 0.0f))
+    {
+        normal = make_float3(0.0f);
+        return 0.0f;
+    }
+    objectNormal *= 1.0f / sqrtf(objectLengthSquared);
+    return affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, normal);
+#else
     float3 objectNormal;
     if (!solveAffineCoordinates(axisX, axisY, axisZ, point - center, objectNormal))
     {
@@ -742,6 +829,7 @@ DEVICE_FUNC float analyticEllipsoidAreaPdfUnchecked(
         return 0.0f;
     }
     return affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, normal);
+#endif
 }
 
 DEVICE_FUNC float analyticEllipsoidAreaPdf(
@@ -805,6 +893,39 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
     result.areaPdf = 0.0f;
     result.hit = false;
 
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float3 plane = cross(axisX, axisY);
+    const float area = sqrtf(dot(plane, plane));
+    const float denominator = dot(rayDirection, plane);
+    if (!(area > 0.0f) || denominator == 0.0f)
+    {
+        return result;
+    }
+    const float distance = dot(center - rayOrigin, plane) / denominator;
+    if (!(distance >= minDistance && distance < maxDistance))
+    {
+        return result;
+    }
+    const float3 offset = rayOrigin + distance * rayDirection - center;
+    const float xx = dot(axisX, axisX);
+    const float xy = dot(axisX, axisY);
+    const float yy = dot(axisY, axisY);
+    const float gramDeterminant = xx * yy - xy * xy;
+    const float projectedX = dot(offset, axisX);
+    const float projectedY = dot(offset, axisY);
+    const float u = (yy * projectedX - xy * projectedY) / gramDeterminant;
+    const float v = (xx * projectedY - xy * projectedX) / gramDeterminant;
+    if (!(u * u + v * v <= 1.0f))
+    {
+        return result;
+    }
+    result.distance = distance;
+    result.point = center + u * axisX + v * axisY;
+    result.normal = emissionNormal;
+    result.areaPdf = 1.0f / (M_PI_F * area);
+    result.hit = true;
+    return result;
+#else
     const float3 planeNormal = finiteCrossDirection(axisX, axisY);
     const float areaPdf = analyticDiscAreaPdf(axisX, axisY);
     if (!affineSamplePointRangeIsFinite(center, axisX, axisY, make_float3(0.0f)) ||
@@ -847,6 +968,7 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
     result.areaPdf = areaPdf;
     result.hit = true;
     return result;
+#endif
 }
 
 /// Intersect the exact affine parallelogram sampled by a rectangle light.
@@ -871,6 +993,39 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticRectangle(float3 rayOrigi
     result.areaPdf = 0.0f;
     result.hit = false;
 
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float3 plane = cross(edgeX, edgeY);
+    const float area = sqrtf(dot(plane, plane));
+    const float denominator = dot(rayDirection, plane);
+    if (!(area > 0.0f) || denominator == 0.0f)
+    {
+        return result;
+    }
+    const float distance = dot(corner - rayOrigin, plane) / denominator;
+    if (!(distance >= minDistance && distance < maxDistance))
+    {
+        return result;
+    }
+    const float3 offset = rayOrigin + distance * rayDirection - corner;
+    const float xx = dot(edgeX, edgeX);
+    const float xy = dot(edgeX, edgeY);
+    const float yy = dot(edgeY, edgeY);
+    const float gramDeterminant = xx * yy - xy * xy;
+    const float projectedX = dot(offset, edgeX);
+    const float projectedY = dot(offset, edgeY);
+    const float u = (yy * projectedX - xy * projectedY) / gramDeterminant;
+    const float v = (xx * projectedY - xy * projectedX) / gramDeterminant;
+    if (!(u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f))
+    {
+        return result;
+    }
+    result.distance = distance;
+    result.point = corner + u * edgeX + v * edgeY;
+    result.normal = emissionNormal;
+    result.areaPdf = 1.0f / area;
+    result.hit = true;
+    return result;
+#else
     const float3 planeNormal = finiteCrossDirection(edgeX, edgeY);
     const float areaPdf = inverseFiniteCrossLength(edgeX, edgeY);
     if (!affineSamplePointRangeIsFinite(corner, edgeX, edgeY, make_float3(0.0f)) ||
@@ -910,6 +1065,7 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticRectangle(float3 rayOrigi
     result.areaPdf = areaPdf;
     result.hit = true;
     return result;
+#endif
 }
 
 DEVICE_FUNC bool affineSphereHitCoordinateHasSmallResidual(float center,
@@ -977,13 +1133,13 @@ DEVICE_FUNC bool affineSphereHitHasSmallResidual(float3 center,
 }
 
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3 rayOrigin,
-                                                                 float3 rayDirection,
-                                                                 float minDistance,
-                                                                 float maxDistance,
-                                                                 float3 center,
-                                                                 float3 axisX,
-                                                                 float3 axisY,
-                                                                 float3 axisZ)
+                                                                          float3 rayDirection,
+                                                                          float minDistance,
+                                                                          float maxDistance,
+                                                                          float3 center,
+                                                                          float3 axisX,
+                                                                          float3 axisY,
+                                                                          float3 axisZ)
 {
     AnalyticLightIntersection result;
     result.distance = maxDistance;
@@ -992,6 +1148,62 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3
     result.areaPdf = 0.0f;
     result.hit = false;
 
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float3 cofactorX = cross(axisY, axisZ);
+    const float3 cofactorY = cross(axisZ, axisX);
+    const float3 cofactorZ = cross(axisX, axisY);
+    const float determinant = dot(axisX, cofactorX);
+    if (!(fabsf(determinant) > 0.0f))
+    {
+        return result;
+    }
+    const float inverseDeterminant = 1.0f / determinant;
+    const float3 relativeOrigin = rayOrigin - center;
+    const float3 objectOrigin =
+        make_float3(dot(relativeOrigin, cofactorX), dot(relativeOrigin, cofactorY), dot(relativeOrigin, cofactorZ)) *
+        inverseDeterminant;
+    const float3 objectDirection =
+        make_float3(dot(rayDirection, cofactorX), dot(rayDirection, cofactorY), dot(rayDirection, cofactorZ)) *
+        inverseDeterminant;
+    const float a = dot(objectDirection, objectDirection);
+    const float halfB = dot(objectOrigin, objectDirection);
+    const float c = dot(objectOrigin, objectOrigin) - 1.0f;
+    const float discriminant = fmaf(-a, c, halfB * halfB);
+    if (!(a > 0.0f) || !(discriminant >= 0.0f))
+    {
+        return result;
+    }
+    const float root = sqrtf(discriminant);
+    float distance = (-halfB - root) / a;
+    if (!(distance >= minDistance && distance < maxDistance))
+    {
+        distance = (-halfB + root) / a;
+    }
+    if (!(distance >= minDistance && distance < maxDistance))
+    {
+        return result;
+    }
+    float3 objectNormal = objectOrigin + distance * objectDirection;
+    const float objectLengthSquared = dot(objectNormal, objectNormal);
+    if (!(objectLengthSquared > 0.0f))
+    {
+        return result;
+    }
+    objectNormal *= 1.0f / sqrtf(objectLengthSquared);
+    const float3 cofactorNormal = objectNormal.x * cofactorX + objectNormal.y * cofactorY + objectNormal.z * cofactorZ;
+    const float cofactorLengthSquared = dot(cofactorNormal, cofactorNormal);
+    if (!(cofactorLengthSquared > 0.0f))
+    {
+        return result;
+    }
+    const float inverseCofactorLength = 1.0f / sqrtf(cofactorLengthSquared);
+    result.distance = distance;
+    result.point = center + objectNormal.x * axisX + objectNormal.y * axisY + objectNormal.z * axisZ;
+    result.normal = copysignf(1.0f, determinant) * cofactorNormal * inverseCofactorLength;
+    result.areaPdf = inverseCofactorLength * (1.0f / (4.0f * M_PI_F));
+    result.hit = true;
+    return result;
+#else
     const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
     if (!basis.valid)
     {
@@ -1150,6 +1362,7 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3
     result.areaPdf = areaPdf;
     result.hit = true;
     return result;
+#endif
 }
 
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigin,
@@ -1163,8 +1376,8 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
 {
     if (analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
     {
-        return intersectAnalyticEllipsoidUnchecked(rayOrigin, rayDirection, minDistance, maxDistance, center, axisX,
-                                                   axisY, axisZ);
+        return intersectAnalyticEllipsoidUnchecked(
+            rayOrigin, rayDirection, minDistance, maxDistance, center, axisX, axisY, axisZ);
     }
     AnalyticLightIntersection miss;
     miss.distance = maxDistance;
@@ -1179,15 +1392,15 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigi
 /// has already tested analyticLightVisibilityAllowsRay(). See the note above
 /// sampleAnalyticEllipsoidUnchecked() for what that buys and why it is sound.
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurfaceUnchecked(int lightType,
-                                                                    float3 point0,
-                                                                    float3 point1,
-                                                                    float3 point2,
-                                                                    float3 point3,
-                                                                    float3 emissionNormal,
-                                                                    float3 rayOrigin,
-                                                                    float3 rayDirection,
-                                                                    float minDistance,
-                                                                    float maxDistance)
+                                                                             float3 point0,
+                                                                             float3 point1,
+                                                                             float3 point2,
+                                                                             float3 point3,
+                                                                             float3 emissionNormal,
+                                                                             float3 rayOrigin,
+                                                                             float3 rayDirection,
+                                                                             float minDistance,
+                                                                             float maxDistance)
 {
     if (lightType == LIGHT_TYPE_RECT)
     {
@@ -1208,8 +1421,8 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurfaceUnchecked(int
     if (lightIsPunctual(lightType) && punctualLightIsSoft(radius))
     {
         return intersectAnalyticEllipsoidUnchecked(rayOrigin, rayDirection, minDistance, maxDistance, point1,
-                                          make_float3(radius, 0.0f, 0.0f), make_float3(0.0f, radius, 0.0f),
-                                          make_float3(0.0f, 0.0f, radius));
+                                                   make_float3(radius, 0.0f, 0.0f), make_float3(0.0f, radius, 0.0f),
+                                                   make_float3(0.0f, 0.0f, radius));
     }
     AnalyticLightIntersection miss;
     miss.distance = maxDistance;
