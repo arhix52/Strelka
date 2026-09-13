@@ -69,6 +69,9 @@ public:
     // Base/Tail split; on deeper paths Tail stops being sparse and the extra
     // queue pass/dispatches outweigh the smaller Base kernel.
     static constexpr uint32_t kGenericShadeSplit = 1u << 28;
+    static constexpr uint32_t kAllAlphaBlend = 1u << 29;
+    static constexpr uint32_t kAlphaUvIdentity = 1u << 30;
+    static constexpr uint32_t kAlphaBaseColorOne = 1u << 31;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -132,6 +135,9 @@ struct IntegratorFeatureInputs
     bool splitBaseNee = false;
     bool hasPrimitiveAlphaData = false;
     bool genericShadeSplit = false;
+    bool allAlphaBlend = false;
+    bool alphaUvIdentity = false;
+    bool alphaBaseColorOne = false;
     uint32_t samplerType = 0u;
 };
 
@@ -188,6 +194,12 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kPrimitiveAlphaData;
     if (in.genericShadeSplit)
         features |= WavefrontFeatures::kGenericShadeSplit;
+    if (in.allAlphaBlend)
+        features |= WavefrontFeatures::kAllAlphaBlend;
+    if (in.alphaUvIdentity)
+        features |= WavefrontFeatures::kAlphaUvIdentity;
+    if (in.alphaBaseColorOne)
+        features |= WavefrontFeatures::kAlphaBaseColorOne;
     features |= (in.samplerType & 7u) << WavefrontFeatures::kSamplerShift;
     return WavefrontFeatures(features);
 }

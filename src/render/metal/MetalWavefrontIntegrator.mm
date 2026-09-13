@@ -1330,6 +1330,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setAddress(directGeometryBase, 17);
             table->setResource(scene.mediumAccelerationStructure->gpuResourceID(), 18);
             bind(scene.primitiveAlphaDataBuffer, 0, 19);
+            bind(scene.alphaMaterialBuffer, 0, 20);
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
                 auditDispatch(useDirectStaticShadow ? "wavefrontShadowDirectStatic" :
@@ -2025,6 +2026,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setBytes(&scene.directStaticGeometryBase, sizeof(uint32_t), 17);
             enc->setAccelerationStructure(scene.mediumAccelerationStructure, 18);
             enc->setBuffer(scene.primitiveAlphaDataBuffer, 0, 19);
+            enc->setBuffer(scene.alphaMaterialBuffer, 0, 20);
             if (shadowTable)
             {
                 enc->useResource(shadowTable, MTL::ResourceUsageRead);
@@ -2179,6 +2181,24 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     values->setConstantValue(&primitiveAlphaData, MTL::DataTypeBool, (NS::UInteger)31);
     const bool fastRectLightData = !envFlag("STRELKA_NO_FAST_RECT_LIGHT_DATA");
     values->setConstantValue(&fastRectLightData, MTL::DataTypeBool, (NS::UInteger)32);
+    const bool allAlphaBlend =
+        (features & WavefrontFeatures::kAllAlphaBlend) != 0u && !envFlag("STRELKA_NO_ALL_ALPHA_BLEND");
+    values->setConstantValue(&allAlphaBlend, MTL::DataTypeBool, (NS::UInteger)33);
+    const bool alphaUvIdentity =
+        (features & WavefrontFeatures::kAlphaUvIdentity) != 0u && !envFlag("STRELKA_NO_ALPHA_UV_IDENTITY");
+    values->setConstantValue(&alphaUvIdentity, MTL::DataTypeBool, (NS::UInteger)34);
+    const bool alphaBaseColorOne =
+        (features & WavefrontFeatures::kAlphaBaseColorOne) != 0u && !envFlag("STRELKA_NO_ALPHA_BASE_COLOR_ONE");
+    values->setConstantValue(&alphaBaseColorOne, MTL::DataTypeBool, (NS::UInteger)35);
+    const bool compactAlphaMaterials = !envFlag("STRELKA_NO_COMPACT_ALPHA_MATERIALS");
+    values->setConstantValue(&compactAlphaMaterials, MTL::DataTypeBool, (NS::UInteger)36);
+    // BLEND visibility is already sampled stochastically. A nearest alpha
+    // lookup turns the usual binary foliage texture into one texel fetch and,
+    // more importantly, avoids long runs of fractional boundary candidates.
+    // Keep MASK and deterministic compatibility paths bilinear.
+    const bool nearestAlphaTexture =
+        stochasticAlphaVisibility && allAlphaBlend && !envFlag("STRELKA_LINEAR_ALPHA_TEXTURE");
+    values->setConstantValue(&nearestAlphaTexture, MTL::DataTypeBool, (NS::UInteger)37);
     const bool genericShadeSplit = (features & WavefrontFeatures::kGenericShadeSplit) != 0u;
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);

@@ -1292,4 +1292,25 @@ struct Material
 };
 static_assert(sizeof(Material) == 296, "Material host/Metal ABI changed");
 
+// Dense view of the fields needed while an alpha shadow query is suspended on
+// a triangle candidate. Material is deliberately shading-oriented and spreads
+// these fields over several cache lines; walking foliage should not fetch the
+// other 248 bytes merely to decide whether traversal may continue.
+struct AlphaMaterialData
+{
+#ifdef __METAL_VERSION__
+    texture2d<float> baseColorTexture;
+#else
+    MTL::ResourceID baseColorTexture;
+#endif
+    float baseColorAlpha;
+    float alphaCutoff;
+    uint32_t alphaMode;
+    uint32_t features;
+    vector_float2 uvOffset;
+    vector_float2 uvTransformX;
+    vector_float2 uvTransformY;
+};
+static_assert(sizeof(AlphaMaterialData) == 48, "Alpha material host/Metal ABI changed");
+
 #endif

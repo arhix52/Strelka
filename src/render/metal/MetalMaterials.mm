@@ -175,6 +175,20 @@ Material makeMaterialParams(const Scene::MaterialDescription& currMatDesc)
 
     return material;
 }
+
+AlphaMaterialData makeAlphaMaterialData(const Material& material)
+{
+    AlphaMaterialData alpha = {};
+    alpha.baseColorTexture = material.baseColorTexture;
+    alpha.baseColorAlpha = material.base_color_alpha;
+    alpha.alphaCutoff = material.alpha_cutoff;
+    alpha.alphaMode = material.alpha_mode;
+    alpha.features = material.features;
+    alpha.uvOffset = material.uv_offset;
+    alpha.uvTransformX = material.uv_transform_x;
+    alpha.uvTransformY = material.uv_transform_y;
+    return alpha;
+}
 } // namespace
 
 MetalMaterials::~MetalMaterials()
@@ -198,6 +212,11 @@ void MetalMaterials::release()
         mMaterialBuffer->release();
         mMaterialBuffer = nullptr;
     }
+    if (mAlphaMaterialBuffer)
+    {
+        mAlphaMaterialBuffer->release();
+        mAlphaMaterialBuffer = nullptr;
+    }
     if (mOpenPBRBuffer)
     {
         mOpenPBRBuffer->release();
@@ -212,6 +231,9 @@ void MetalMaterials::release()
     mSceneAllOpenPBRMaterials = false;
     mSceneAllNativeOpenPBRMaterials = false;
     mSceneHasAlphaMaterials = false;
+    mSceneAllAlphaMaterialsBlend = false;
+    mSceneAllAlphaUvTransformsIdentity = false;
+    mSceneAllAlphaBaseColorFactorsOne = false;
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
     mMaterialIsMediumBoundary.clear();
@@ -287,6 +309,30 @@ void MetalMaterials::uploadMaterialBuffer(const std::vector<Material>& materials
     }
 }
 
+void MetalMaterials::uploadAlphaMaterialBuffer(const std::vector<Material>& materials)
+{
+    if (mAlphaMaterialBuffer)
+    {
+        mAlphaMaterialBuffer->release();
+        mAlphaMaterialBuffer = nullptr;
+    }
+    if (materials.empty())
+    {
+        return;
+    }
+    const size_t bytes = sizeof(AlphaMaterialData) * materials.size();
+    mAlphaMaterialBuffer = mDevice->newBuffer(bytes, MTL::ResourceStorageModeShared);
+    if (!mAlphaMaterialBuffer)
+    {
+        return;
+    }
+    auto* table = static_cast<AlphaMaterialData*>(mAlphaMaterialBuffer->contents());
+    for (size_t i = 0; i < materials.size(); ++i)
+    {
+        table[i] = makeAlphaMaterialData(materials[i]);
+    }
+}
+
 void MetalMaterials::patchMaterial(size_t index, const Material& material)
 {
     if (!mMaterialBuffer || (index + 1) * sizeof(Material) > mMaterialBuffer->length())
@@ -295,6 +341,16 @@ void MetalMaterials::patchMaterial(size_t index, const Material& material)
     }
     auto* table = static_cast<Material*>(mMaterialBuffer->contents());
     table[index] = material;
+}
+
+void MetalMaterials::patchAlphaMaterial(size_t index, const Material& material)
+{
+    if (!mAlphaMaterialBuffer || (index + 1) * sizeof(AlphaMaterialData) > mAlphaMaterialBuffer->length())
+    {
+        return;
+    }
+    auto* table = static_cast<AlphaMaterialData*>(mAlphaMaterialBuffer->contents());
+    table[index] = makeAlphaMaterialData(material);
 }
 
 void MetalMaterials::publishParameters(Scene* scene)
@@ -322,6 +378,9 @@ void MetalMaterials::publishParameters(Scene* scene)
     mMaterialNeedsSurfaceUv.clear();
     mMaterialNeedsSurfaceUv.reserve(matDescs.size());
     mSceneHasAlphaMaterials = false;
+    mSceneAllAlphaMaterialsBlend = true;
+    mSceneAllAlphaUvTransformsIdentity = true;
+    mSceneAllAlphaBaseColorFactorsOne = true;
     mSceneHasBoundedMedium = false;
     mSceneHasSubsurfaceMaterials = false;
     mSceneAllOpenPBRMaterials = !matDescs.empty();
@@ -574,7 +633,14 @@ void MetalMaterials::publishParameters(Scene* scene)
         ++shadeBucketCounts[shadeBucket];
 
         if (p.alpha_mode != ALPHA_MODE_OPAQUE)
+        {
             mSceneHasAlphaMaterials = true;
+            mSceneAllAlphaMaterialsBlend = mSceneAllAlphaMaterialsBlend && p.alpha_mode == ALPHA_MODE_BLEND;
+            mSceneAllAlphaUvTransformsIdentity = mSceneAllAlphaUvTransformsIdentity && p.uv_offset_x == 0.0f &&
+                                                 p.uv_offset_y == 0.0f && p.uv_scale_x == 1.0f &&
+                                                 p.uv_scale_y == 1.0f && p.uv_rotation == 0.0f;
+            mSceneAllAlphaBaseColorFactorsOne = mSceneAllAlphaBaseColorFactorsOne && p.base_color_alpha == 1.0f;
+        }
         // Both kinds of medium compile into the same free-flight path.
         if (p.subsurface > 0.0f || (p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
             mSceneHasSubsurfaceMaterials = true;
@@ -590,6 +656,7 @@ void MetalMaterials::publishParameters(Scene* scene)
     STRELKA_INFO("Material shade buckets: base {}, layer {}, translucent {}, tail {}", shadeBucketCounts[0],
                  shadeBucketCounts[1], shadeBucketCounts[2], shadeBucketCounts[3]);
     uploadMaterialBuffer(st.gpuMaterials);
+    uploadAlphaMaterialBuffer(st.gpuMaterials);
     uploadOpenPBRBuffer(openpbrParams);
     allocOpenPBRTextureBuffer(openpbrParams.empty() ? 0 : openpbrParams.size());
 }
@@ -698,6 +765,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         material.emissionTexture = loadTex(currMatDesc.emissionTexPath, true);
         material.occlusionTexture = loadTex(currMatDesc.occlusionTexPath, false, TextureKind::NonColor);
         patchMaterial(index, material);
+        patchAlphaMaterial(index, material);
 
         // The OpenPBR maps go into the parallel table, written straight into the
         // buffer the tracer is already reading -- same contract as the material

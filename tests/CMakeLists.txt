@@ -40,6 +40,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_materialx_loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_materialx_inputs.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_static_blas_partition.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sceneloader/test_alpha_geometry_analysis.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_pick_ray.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_skinned_bounds.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/test_world_bounds.cpp

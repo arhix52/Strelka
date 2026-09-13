@@ -1216,10 +1216,34 @@ Two mechanisms behind that, both now measured rather than inferred:
   144 meshes log `opacity micromap resolves nothing, skipped`, which is a
   separate question (does that scene have alpha cutouts at all?) rather than a
   cost.
-- **`sort_rays`.** It is the Metal wavefront's key. OptiX reorders
-  unconditionally (`params.enableShaderReorder`, gated only on hardware support
-  and on the `render/pt/shaderReorder` kill switch), so the flag measures
-  nothing on this backend.
+- **Software alpha microgeometry/contours, measured 2026-09-13.**
+  `StrelkaAlphaGeometryAnalyzer` now evaluates the actual pine inputs with
+  transformed UVs, repeat addressing, BC3-decoded alpha, and the renderer's
+  nearest BLEND sampling. Adaptive barycentric subdivision through level 3
+  moves instance-weighted unknown coverage only **90.91% -> 90.18%**, while
+  surviving unique geometry grows **1.00x -> 1.63x**. Forcing all-mixed parents
+  through level 5 reaches only 81.28% unknown at the full 3x geometry budget.
+  Regular software micromaps are therefore rejected. A texture-space contour is
+  not secretly cheap either: after merging collinear texel edges, `pine_cover`
+  has 324,802 runs (3,474 runs/source triangle across its six mesh/material
+  pairs), `moss_01` 212,930 (105x across 17 pairs), and `fir_twig` 48,969
+  (2.93x across 34 pairs) before adding opaque interiors or clipping contours to
+  source triangles. Aggressive curve simplification could change the last
+  number, but all three high-instance masks already exhaust or vastly exceed a
+  sensible geometry budget. Keep the analyzer as a gate; do not build a
+  production remesher for this asset.
+- **`sort_rays`.** The config key used to be silently inert: neither backend
+  consumed `render/pt/sortRays`. A bounded Metal experiment sorted the 64 shadow
+  rays in each threadgroup into eight direction octants, reused the dead SSS
+  queue for 4-byte indices, and copied no ray records. On Apple M4 Pro, Release,
+  Metal validation off, pine at 1280x720, Sobol, 64 spp in 16-spp launches, the
+  median was **19.6 -> 19.9 ms/sample at depth 1** and **60.3 -> 60.6 at depth
+  8**. The extra traversal-record read plus index store/gather costs more than
+  the local coherence recovers. The prototype was removed and the CLI now warns
+  when the compatibility key is requested. A future experiment would need a
+  stronger global key -- light ID plus Morton-quantized origin/direction -- and
+  must pay for a real radix/binning pass; an octant shuffle is not evidence for
+  adding that machinery.
 
 ---
 

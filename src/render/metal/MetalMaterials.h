@@ -16,6 +16,7 @@
 /// declared here so the table can be written and patched without this header
 /// pulling the shader types in.
 struct Material;
+struct AlphaMaterialData;
 /// The OpenPBR argument block (material/openpbr/openpbr_params.h), forward
 /// declared for the same reason: only its name is needed here.
 struct OpenPBRParams;
@@ -53,12 +54,15 @@ public:
 private:
     /// Writes the whole table. Called once, before any texture is opened.
     void uploadMaterialBuffer(const std::vector<Material>& materials);
+    /// Writes the compact alpha-only table indexed by the same material id.
+    void uploadAlphaMaterialBuffer(const std::vector<Material>& materials);
     /// Writes the parallel OpenPBR table, or drops it when the scene has none.
     void uploadOpenPBRBuffer(const std::vector<OpenPBRParams>& params);
     /// Allocates the bindless map table, all handles null, one entry per material.
     void allocOpenPBRTextureBuffer(size_t materialCount);
     /// Writes one entry into the live table, for a texture that has just landed.
     void patchMaterial(size_t index, const Material& material);
+    void patchAlphaMaterial(size_t index, const Material& material);
 
 public:
     bool buildActive() const
@@ -69,6 +73,10 @@ public:
     MTL::Buffer* buffer() const
     {
         return mMaterialBuffer;
+    }
+    MTL::Buffer* alphaBuffer() const
+    {
+        return mAlphaMaterialBuffer;
     }
     /// The parallel OpenPBR parameter table, or null when no material uses it.
     /// Reached from the shader through Uniforms::openpbrParams rather than a
@@ -98,6 +106,18 @@ public:
     bool hasAlphaMaterials() const
     {
         return mSceneHasAlphaMaterials;
+    }
+    bool allAlphaMaterialsBlend() const
+    {
+        return mSceneHasAlphaMaterials && mSceneAllAlphaMaterialsBlend;
+    }
+    bool allAlphaUvTransformsIdentity() const
+    {
+        return mSceneHasAlphaMaterials && mSceneAllAlphaUvTransformsIdentity;
+    }
+    bool allAlphaBaseColorFactorsOne() const
+    {
+        return mSceneHasAlphaMaterials && mSceneAllAlphaBaseColorFactorsOne;
     }
     bool hasBoundedMedium() const
     {
@@ -134,12 +154,16 @@ private:
     SettingsManager* mSettings = nullptr;
 
     MTL::Buffer* mMaterialBuffer = nullptr;
+    MTL::Buffer* mAlphaMaterialBuffer = nullptr;
     MTL::Buffer* mOpenPBRBuffer = nullptr;
     MTL::Buffer* mOpenPBRTexBuffer = nullptr;
     bool mSceneHasOpenPBRMaterials = false;
     bool mSceneAllOpenPBRMaterials = false;
     bool mSceneAllNativeOpenPBRMaterials = false;
     bool mSceneHasAlphaMaterials = false;
+    bool mSceneAllAlphaMaterialsBlend = false;
+    bool mSceneAllAlphaUvTransformsIdentity = false;
+    bool mSceneAllAlphaBaseColorFactorsOne = false;
     bool mSceneHasBoundedMedium = false;
     bool mSceneHasSubsurfaceMaterials = false;
     std::vector<uint32_t> mMaterialIsMediumBoundary;

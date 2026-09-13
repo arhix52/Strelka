@@ -43,6 +43,18 @@ TEST_CASE("packWavefrontFeatures sets each independent flag")
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kGenericShadeSplit));
 
     in = {};
+    in.allAlphaBlend = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAllAlphaBlend));
+
+    in = {};
+    in.alphaUvIdentity = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAlphaUvIdentity));
+
+    in = {};
+    in.alphaBaseColorOne = true;
+    CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAlphaBaseColorOne));
+
+    in = {};
     in.hasAlphaMaterials = true;
     CHECK(packWavefrontFeatures(in).has(WavefrontFeatures::kAlpha));
 

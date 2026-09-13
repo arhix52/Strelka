@@ -72,10 +72,23 @@ constant bool kFcStochasticAlphaVisibility [[function_constant(29)]];
 // would leave the shade payload undefined.
 constant bool kFcPrepareSurfaceGeometryInExtend [[function_constant(30)]];
 constant bool kFcPrimitiveAlphaData [[function_constant(31)]];
+constant bool kFcAllAlphaBlend [[function_constant(33)]];
+constant bool kFcAlphaUvIdentity [[function_constant(34)]];
+constant bool kFcAlphaBaseColorOne [[function_constant(35)]];
+constant bool kFcCompactAlphaMaterials [[function_constant(36)]];
+constant bool kFcNearestAlphaTexture [[function_constant(37)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_STOCHASTIC_ALPHA_VISIBILITY =
     is_function_constant_defined(kFcStochasticAlphaVisibility) ? kFcStochasticAlphaVisibility : true;
+constant bool SPEC_ALL_ALPHA_BLEND = is_function_constant_defined(kFcAllAlphaBlend) ? kFcAllAlphaBlend : false;
+constant bool SPEC_ALPHA_UV_IDENTITY = is_function_constant_defined(kFcAlphaUvIdentity) ? kFcAlphaUvIdentity : false;
+constant bool SPEC_ALPHA_BASE_COLOR_ONE =
+    is_function_constant_defined(kFcAlphaBaseColorOne) ? kFcAlphaBaseColorOne : false;
+constant bool SPEC_COMPACT_ALPHA_MATERIALS =
+    is_function_constant_defined(kFcCompactAlphaMaterials) ? kFcCompactAlphaMaterials : true;
+constant bool SPEC_NEAREST_ALPHA_TEXTURE =
+    is_function_constant_defined(kFcNearestAlphaTexture) ? kFcNearestAlphaTexture : false;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
 constant bool SPEC_SSS = is_function_constant_defined(kFcSubsurface) ? kFcSubsurface : false;
 constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;

@@ -40,6 +40,29 @@ target_link_libraries(StrelkaCLI
         strelka_sceneloader
 )
 
+# Host-only feasibility probe for the software opacity-micromap path. It loads
+# scene geometry and alpha maps but deliberately does not create a Metal device
+# or link the renderer: running the analysis must not perturb the profile it is
+# intended to guide.
+add_executable(StrelkaAlphaGeometryAnalyzer
+    ${CMAKE_SOURCE_DIR}/tools/alpha_geometry_analyzer.cpp
+)
+strelka_apply_warnings(StrelkaAlphaGeometryAnalyzer)
+set_target_properties(StrelkaAlphaGeometryAnalyzer PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED TRUE
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(StrelkaAlphaGeometryAnalyzer
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/render
+)
+target_link_libraries(StrelkaAlphaGeometryAnalyzer
+    PRIVATE
+        cxxopts::cxxopts
+        strelka_sceneloader
+        stb::stb
+)
+
 # On Apple, strelka_shaders is a custom_target (metallib compilation), not a library.
 if(APPLE)
     add_dependencies(StrelkaCLI strelka_shaders)
