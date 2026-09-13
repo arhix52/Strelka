@@ -388,7 +388,6 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         const bool materialNeedsUv = inst.mMaterialId < mMaterials->needsSurfaceUv().size() &&
                                      mMaterials->needsSurfaceUv()[inst.mMaterialId] != 0u;
         static const bool forceAllOpaque = envFlag("STRELKA_ALL_GEOM_OPAQUE");
-        static const bool alphaIntersectionFunctions = envFlag("STRELKA_ALPHA_IFT");
         static const bool embedAlphaUv = envFlag("STRELKA_ALPHA_IFT_EMBEDDED_UV");
         const bool isLightProxy = inst.type == oka::Instance::Type::eLight;
         const bool isCutout = !isLightProxy && !forceAllOpaque && inst.mMaterialId < mMaterials->isCutout().size() &&
@@ -405,12 +404,11 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
                                                    MetalGeometry::kNoPrimitiveAlphaDataOffset :
                                                    primitiveAlphaDataOffset / sizeof(PrimitiveAlphaData);
         const bool usePrimitiveAlphaData = primitiveAlphaDataIndex <= GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK;
-        // First bring-up path for hardware any-hit alpha. The production
-        // experiment keeps UVs in their dense external buffer after the
+        // Keep every compatible static BLAS ready for hardware any-hit alpha.
+        // The production path keeps UVs in their dense external buffer after the
         // AS-resident form inflated pine's compacted BLAS by 34%. The embedded
         // form remains available as a controlled Metal-version A/B.
-        const bool useHardwareAlpha =
-            alphaIntersectionFunctions && isCutout && usePrimitiveAlphaData && !(skeletal && mBuildMotionBlas);
+        const bool useHardwareAlpha = isCutout && usePrimitiveAlphaData && !(skeletal && mBuildMotionBlas);
         if (useHardwareAlpha)
         {
             ++mHardwareAlphaGeometryCount;
@@ -1406,10 +1404,20 @@ bool MetalAccelStructure::step(double budgetMs)
     STRELKA_INFO("Geometry opacity: {} opaque, {} cutout ({:.1f}% of geometries need the alpha test)",
                  mOpaqueGeometryCount, mCutoutGeometryCount,
                  100.0 * mCutoutGeometryCount / std::max<uint32_t>(1u, mOpaqueGeometryCount + mCutoutGeometryCount));
-    if (envFlag("STRELKA_ALPHA_IFT"))
+    if (mCutoutGeometryCount != 0u)
     {
-        STRELKA_INFO("Hardware alpha IFT: {}/{} cutout geometries eligible{}", mHardwareAlphaGeometryCount,
-                     mCutoutGeometryCount, allCutoutGeometrySupportsHardwareAlpha() ? "" : "; using the inline fallback");
+        if (!allCutoutGeometrySupportsHardwareAlpha())
+        {
+            STRELKA_WARNING(
+                "Hardware alpha IFT unavailable for {}/{} cutout geometries; using the inline shadow walk for "
+                "correctness",
+                mCutoutGeometryCount - mHardwareAlphaGeometryCount, mCutoutGeometryCount);
+        }
+        else
+        {
+            STRELKA_INFO("Hardware alpha IFT ready for all {} cutout geometries (external 12-byte UV records)",
+                         mCutoutGeometryCount);
+        }
     }
     STRELKA_INFO("Primitive surface data: {} geometries, {} triangles embedded in BLAS", mPrimitiveSurfaceGeometryCount,
                  mPrimitiveSurfaceTriangleCount);

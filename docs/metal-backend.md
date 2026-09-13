@@ -54,13 +54,14 @@ GPU-chained: replacing it with submit-and-wait added about 19 ms of CPU blocking
 per BrainStem frame and increased playback frames from roughly 100 ms to
 300–600 ms.
 
-## Experimental payload-free alpha IFT
+## Payload-free alpha IFT
 
-`STRELKA_ALPHA_IFT=1` enables a static-shadow experiment that resolves cutout
-triangles through a Metal intersection function table. It is deliberately
-limited to static triangle scenes without curves or motion BLASes; unsupported
-variants retain the existing inline/restart walk. Camera and continuation rays
-are unchanged.
+Static triangle scenes resolve cutout shadow hits through a Metal intersection
+function table by default. The setting is exposed as **Advanced > Metal ray
+tracing > Hardware alpha test (IFT)**. Motion and incomplete alpha data retain
+the existing inline/restart walk. `STRELKA_NO_ALPHA_IFT=1` is the command
+line opt-out; the old `STRELKA_ALPHA_IFT=1` force-on override remains accepted by
+profiling scripts. Camera and continuation rays are unchanged.
 
 The intersection function has no ray payload. It reads compact alpha material,
 geometry, and 12-byte per-triangle UV records from the existing dense buffers.

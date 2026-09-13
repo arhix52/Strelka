@@ -1986,9 +1986,7 @@ void MetalRender::render(Buffer* output)
             featureIn.allAlphaBlend = mMaterials.allAlphaMaterialsBlend();
             featureIn.alphaUvIdentity = mMaterials.allAlphaUvTransformsIdentity();
             featureIn.alphaBaseColorOne = mMaterials.allAlphaBaseColorFactorsOne();
-            featureIn.hasPrimitiveAlphaData =
-                mGeometry.primitiveAlphaDataBuffer() != nullptr &&
-                (!envFlag("STRELKA_ALPHA_IFT") || mAccel.allCutoutGeometrySupportsHardwareAlpha());
+            featureIn.hasPrimitiveAlphaData = mGeometry.primitiveAlphaDataBuffer() != nullptr;
             featureIn.enableMotionBlur = pUniformData->enableMotionBlur;
             featureIn.motionBlasBuilt = mAccel.motionBlasBuilt();
             featureIn.enableCameraMotionBlur = pUniformData->enableCameraMotionBlur;
@@ -2068,6 +2066,15 @@ void MetalRender::render(Buffer* output)
             frameReq.motionBlasBuilt = mAccel.motionBlasBuilt();
             frameReq.profileStages = profileStages;
             frameReq.auditRenderWork = auditRenderWork;
+            frameReq.enableAlphaIft = getSettings()->getAs<bool>("render/pt/alphaIft") &&
+                                      !envFlag("STRELKA_NO_ALPHA_IFT") &&
+                                      mAccel.allCutoutGeometrySupportsHardwareAlpha();
+            // Keep the original bring-up flag as a force-on override for old
+            // profiling scripts. The explicit opt-out wins when both are set.
+            if (envFlag("STRELKA_ALPHA_IFT") && !envFlag("STRELKA_NO_ALPHA_IFT"))
+            {
+                frameReq.enableAlphaIft = mAccel.allCutoutGeometrySupportsHardwareAlpha();
+            }
             frameReq.settings = getSettings();
             const uint32_t iterationsPerChunk = metal::wavefrontChunkIterations(width, height);
             const std::vector<metal::WavefrontChunk> logicalWavefrontChunks =

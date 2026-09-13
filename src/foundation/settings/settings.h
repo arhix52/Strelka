@@ -121,6 +121,10 @@ inline void seedCommonRenderSettings(SettingsManager& settings)
     settings.setAs<bool>("render/pt/denoisePlaybackMotionBlur", false);
     settings.setAs<bool>("render/pt/prewarmDenoiser", false);
     settings.setAs<uint32_t>("render/pt/staticTraversal", 1);
+    // Metal resolves alpha-cutout shadow candidates in an intersection
+    // function by default. The renderer falls back to its inline walk for
+    // unsupported motion geometry or incomplete alpha data.
+    settings.setAs<bool>("render/pt/alphaIft", true);
     // HDR environment values are radiance and must not be normalized away.
     settings.setAs<bool>("render/env/autoCalibrate", false);
     // These expensive/manual SHARC actions start idle in both applications.

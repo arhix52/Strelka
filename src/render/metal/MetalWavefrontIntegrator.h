@@ -126,6 +126,7 @@ struct IntegratorFrameRequest
     bool motionBlasBuilt = false;
     bool profileStages = false;
     bool auditRenderWork = false;
+    bool enableAlphaIft = true;
     SettingsManager* settings = nullptr;
 };
 

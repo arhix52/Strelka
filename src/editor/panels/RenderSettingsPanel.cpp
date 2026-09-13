@@ -855,6 +855,24 @@ void EditorApp::drawRenderSettingsPanel()
                 ImGui::TextDisabled("Controlled by ReSTIR DI while it is enabled");
             }
 
+            if (m_render && m_render->denoiserKind() == Render::DenoiserKind::eMetalFx)
+            {
+                ImGui::SeparatorText("Metal ray tracing");
+                bool alphaIft = m_settingsManager->getAs<bool>("render/pt/alphaIft");
+                if (ImGui::Checkbox("Hardware alpha test (IFT)", &alphaIft))
+                {
+                    m_settingsManager->setAs<bool>("render/pt/alphaIft", alphaIft);
+                    m_sharedCtx->mSubframeIndex = 0;
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Resolve static alpha-cutout shadow hits in a payload-free intersection function.\n"
+                        "Uses external 12-byte UV records and is enabled by default.\n"
+                        "Motion or incomplete alpha data fall back to the inline walk.");
+                }
+            }
+
             ImGui::EndTabItem();
         }
 

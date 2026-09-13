@@ -785,7 +785,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const bool useMotion = frame.motionBlasBuilt || variant->extendStatic == nullptr ||
                            frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
     const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
-    const bool useAlphaIftShadow = !useMotion && variant->shadowStaticIft && variant->shadowTableStaticIft;
+    const bool useAlphaIftShadow =
+        frame.enableAlphaIft && !useMotion && variant->shadowStaticIft && variant->shadowTableStaticIft;
     const bool useDirectStaticShadow = useDirectStatic && !useAlphaIftShadow && variant->shadowDirectStatic &&
                                        !envFlag("STRELKA_NO_DIRECT_STATIC_SHADOW");
     const MTL::ComputePipelineState* const extendPso = useDirectStatic ? variant->extendDirectStatic :
@@ -1676,7 +1677,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         return enc;
     }
     const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
-    const bool useAlphaIftShadow = !useMotion && variant->shadowStaticIft && variant->shadowTableStaticIft;
+    const bool useAlphaIftShadow =
+        frame.enableAlphaIft && !useMotion && variant->shadowStaticIft && variant->shadowTableStaticIft;
     const bool useDirectStaticShadow = useDirectStatic && !useAlphaIftShadow && variant->shadowDirectStatic &&
                                        !envFlag("STRELKA_NO_DIRECT_STATIC_SHADOW");
     const MTL::ComputePipelineState* const extendPso = useDirectStatic ? variant->extendDirectStatic :
@@ -2341,8 +2343,11 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         else
         {
             auto* descriptor = MTL::IntersectionFunctionTableDescriptor::alloc()->init();
-            descriptor->setFunctionCount(triangleIntersectionName ? SHADOW_INTERSECTION_FUNCTION_COUNT :
-                                                                    ANALYTIC_INTERSECTION_FUNCTION_COUNT);
+            // Compatible triangle BLASes always carry the cutout offset so the
+            // UI can switch alpha traversal without rebuilding the scene. A
+            // non-alpha traversal must explicitly accept that slot: Metal
+            // ignores a triangle when a required table entry is empty.
+            descriptor->setFunctionCount(SHADOW_INTERSECTION_FUNCTION_COUNT);
             table = pso->newIntersectionFunctionTable(descriptor);
             descriptor->release();
             const MTL::FunctionHandle* sphereHandle =
@@ -2366,6 +2371,16 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
                 if (triangleHandle)
                 {
                     table->setFunction(triangleHandle, CUTOUT_INTERSECTION_SHADOW);
+                }
+                else
+                {
+                    MTL::IntersectionFunctionSignature signature =
+                        MTL::IntersectionFunctionSignatureTriangleData | MTL::IntersectionFunctionSignatureInstancing;
+                    if (motion)
+                    {
+                        signature |= MTL::IntersectionFunctionSignaturePrimitiveMotion;
+                    }
+                    table->setOpaqueTriangleIntersectionFunction(signature, CUTOUT_INTERSECTION_SHADOW);
                 }
             }
         }
@@ -2455,13 +2470,13 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     v.miss = make("wavefrontMiss");
     v.shadowMotion = makeTraversal(entry("wavefrontShadow"), "Shadow", true, v.shadowTableMotion);
     v.shadowStatic = makeTraversal(entry("wavefrontShadowStatic"), "Shadow", false, v.shadowTableStatic);
-    const bool alphaIft = alpha && primitiveAlphaData && !curves && envFlag("STRELKA_ALPHA_IFT");
+    const bool alphaIft = alpha && primitiveAlphaData;
     if (alphaIft)
     {
         const char* alphaIntersectionName =
             envFlag("STRELKA_ALPHA_IFT_EMBEDDED_UV") ? "cutoutShadowIntersectionEmbedded" : "cutoutShadowIntersection";
-        v.shadowStaticIft =
-            makeTraversal("wavefrontShadowStaticIft", "Shadow", false, v.shadowTableStaticIft, alphaIntersectionName);
+        v.shadowStaticIft = makeTraversal(
+            entry("wavefrontShadowStaticIft"), "Shadow", false, v.shadowTableStaticIft, alphaIntersectionName);
     }
     v.shadowDirectStatic = make("wavefrontShadowDirectStatic", "Shadow direct static");
     v.guideMotion = makeTraversal(entry("wavefrontGuide"), "Guide", true, v.guideTableMotion);

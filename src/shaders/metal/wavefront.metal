@@ -914,6 +914,36 @@ struct CurveStaticTraversal
     }
 };
 
+// Static hair/curve scenes still benefit from hardware alpha on their triangle
+// geometry. Curves keep the ordinary analytic intersection functions in slots
+// 0/1; cutout triangles use slot 2.
+struct CurveStaticAlphaIftTraversal
+{
+    using structure = acceleration_structure<instancing>;
+    using volume_structure = structure;
+    using isect = intersector<triangle_data, curve_data, instancing>;
+    using volume_isect = intersector<triangle_data, instancing>;
+    using table = intersection_function_table<triangle_data, curve_data, instancing>;
+    enum
+    {
+        kInlineQuery = 0,
+        kHardwareAlpha = 1,
+        kDirect = 0
+    };
+    static geometry_type geometryTypes()
+    {
+        return geometry_type::triangle | geometry_type::curve | geometry_type::bounding_box;
+    }
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float, table t)
+    {
+        return i.intersect(r, as, mask, t);
+    }
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
+    {
+        return i.intersect(r, as, mask);
+    }
+};
+
 // The curve and triangle intersectors return different result types even though
 // extend consumes the same common fields. Copy those fields into one small
 // value so an SSS lane can use a genuinely triangle-only intersector while the
@@ -7361,7 +7391,7 @@ struct CutoutShadowWalk<T, false, true>
     {
         transmittance = 1.0f;
         typename T::isect isect;
-        isect.assume_geometry_type(geometry_type::triangle);
+        isect.assume_geometry_type(T::geometryTypes());
         isect.accept_any_intersection(true);
         return T::trace(isect, shadowRay, as, RAY_MASK_SHADOW, 0.0f, functionTable).type == intersection_type::none;
     }
@@ -7902,6 +7932,7 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStatic, StaticTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStaticIft, StaticAlphaIftTraversal)
+WF_SHADOW_ENTRY(wavefrontShadowStaticIftCurve, CurveStaticAlphaIftTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowCurve, CurveMotionTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStaticCurve, CurveStaticTraversal)
 
