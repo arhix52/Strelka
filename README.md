@@ -51,7 +51,10 @@ SPDLOG_LEVEL=debug ./StrelkaCLI ...
 ```
 
 `StrelkaCLI` accepts a TOML config (`-c` / `--config`); every flag overrides the
-matching key. See `RenderConfig` in `src/cli/HeadlessApp.h`.
+matching key. Long renders can publish an atomically replaced intermediate image
+with `--checkpoint-spp N` or `[render].checkpoint_spp = N`; the latest snapshot
+is written as `<stem>.checkpoint.<ext>` between render batches. See `RenderConfig`
+in `src/cli/HeadlessApp.h`.
 
 ## Package (macOS)
 

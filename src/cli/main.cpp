@@ -40,6 +40,8 @@ int main(int argc, const char* argv[])
         ("w,width",      "Render width",                    cxxopts::value<uint32_t>())
         ("height",       "Render height",                   cxxopts::value<uint32_t>())
         ("spp",          "Samples per pixel",               cxxopts::value<uint32_t>())
+        ("checkpoint-spp", "Publish <stem>.checkpoint.<ext> after crossing each N-SPP boundary (0 disables)",
+                                                            cxxopts::value<uint32_t>())
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
         ("sss-iterations", "Subsurface random-walk iteration limit (0..256)",
                                                             cxxopts::value<uint32_t>())
@@ -147,6 +149,10 @@ int main(int argc, const char* argv[])
     if (result.count("spp"))
     {
         cfg.spp = result["spp"].as<uint32_t>();
+    }
+    if (result.count("checkpoint-spp"))
+    {
+        cfg.checkpointSpp = result["checkpoint-spp"].as<uint32_t>();
     }
     if (result.count("depth"))
     {

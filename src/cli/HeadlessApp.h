@@ -36,6 +36,10 @@ struct RenderConfig
     // The progress bar and its ms/sample now step by this much at a time, which
     // is the only thing a reader sees change.
     uint32_t sppPerLaunch = 16;
+    // Periodically publish the accumulated image through an atomic replacement
+    // of <stem>.checkpoint.<ext>. Boundaries are observed between launches so
+    // checkpointing does not break the requested render batch size.
+    uint32_t checkpointSpp = 0;
     uint32_t maxDepth = 8;
     // Extra wavefront iterations reserved for subsurface random walks. The
     // conservative default preserves the reference image; performance runs can
@@ -82,7 +86,8 @@ struct RenderConfig
     // there is, since cost is per traced pixel.
     bool upscale = false;
     float upscaleFactor = 0.5f;
-    // Reorder each bounce's queue by ray origin before traversing it.
+    // Retained for config compatibility. No backend currently consumes it; the
+    // CLI warns instead of silently claiming that ray sorting is enabled.
     bool sortRays = false;
     // Ray-cone texture level of detail. Off by default -- not because it costs
     // anything, but because it changes the image and buys no time, so turning it
@@ -255,8 +260,9 @@ public:
 
 private:
     void populateSettings();
-    void saveOutput(Buffer* buf, const std::string& path = {});
-    void printProgress(uint32_t currentSpp, uint32_t totalSpp, double lastRenderMs);
+    bool saveOutput(Buffer* buf, const std::string& path = {});
+    bool saveCheckpoint(Buffer* buf, uint32_t accumulatedSpp);
+    void printProgress(uint32_t currentSpp, uint32_t totalSpp, double lastSampleMs);
 
     RenderConfig m_config;
     std::unique_ptr<SettingsManager> m_settings;

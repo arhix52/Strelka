@@ -32,9 +32,9 @@ namespace
 {
 constexpr int kSkipExitCode = 77;
 
-using oka::tonemap::ToneMapperType;
 using oka::tonemap::float3;
 using oka::tonemap::make_float3;
+using oka::tonemap::ToneMapperType;
 
 /// Records rather than aborts, so one run reports every property that broke
 /// instead of the first.
@@ -111,15 +111,17 @@ int main()
         return kSkipExitCode;
     }
 
-    const std::filesystem::path out =
-        std::filesystem::temp_directory_path() / "strelka_cornell_display_regression.exr";
+    const std::filesystem::path out = std::filesystem::temp_directory_path() / "strelka_cornell_display_regression.exr";
+    const std::filesystem::path checkpoint =
+        std::filesystem::temp_directory_path() / "strelka_cornell_display_regression.checkpoint.exr";
     std::filesystem::remove(out, ec);
+    std::filesystem::remove(checkpoint, ec);
 
     // Linear radiance, which is what the display transform takes as input. Small
     // and noisy on purpose: the assertions below are about the transform, and
     // noise only widens the distribution it has to hold for.
     const std::string command = "\"" + cli.string() + "\" \"" + scene.string() + "\" -o \"" + out.string() +
-                                "\" -w 256 --height 192 --spp 16 > /dev/null 2>&1";
+                                "\" -w 256 --height 192 --spp 32 --checkpoint-spp 16 > /dev/null 2>&1";
     // A fixed command line built from compile-time paths, run once from a
     // single-threaded test binary: neither the injection nor the reentrancy the
     // two checks exist to catch is reachable here, and rendering a frame is the
@@ -129,6 +131,11 @@ int main()
     {
         std::printf("SKIP: StrelkaCLI could not render the Cornell box (no device?)\n");
         return kSkipExitCode;
+    }
+    if (!std::filesystem::exists(checkpoint, ec) || std::filesystem::file_size(checkpoint, ec) == 0u)
+    {
+        std::printf("FAIL: StrelkaCLI did not atomically publish %s\n", checkpoint.string().c_str());
+        return 1;
     }
 
     float* pixels = nullptr;
@@ -252,6 +259,7 @@ int main()
     }
 
     std::filesystem::remove(out, ec);
+    std::filesystem::remove(checkpoint, ec);
     if (check.failed() != 0)
     {
         std::printf("%d check(s) failed\n", check.failed());

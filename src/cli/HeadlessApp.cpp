@@ -14,6 +14,7 @@
 #include <toml++/toml.hpp>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -21,6 +22,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -183,6 +185,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     if (auto v = tbl["render"]["spp_per_launch"].value<int64_t>())
     {
         cfg.sppPerLaunch = static_cast<uint32_t>(*v);
+    }
+    if (auto v = tbl["render"]["checkpoint_spp"].value<int64_t>())
+    {
+        cfg.checkpointSpp = static_cast<uint32_t>(std::max<int64_t>(*v, 0));
     }
     if (auto v = tbl["render"]["max_depth"].value<int64_t>())
     {
@@ -526,7 +532,10 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/restirFinalVisibilityMaxAge", m_config.restirFinalVisibilityMaxAge);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
-    m_settings->setAs<uint32_t>("render/pt/sortRays", m_config.sortRays ? 1u : 0u);
+    if (m_config.sortRays)
+    {
+        STRELKA_WARNING("render.sort_rays is not implemented and has no effect");
+    }
     m_settings->setAs<uint32_t>("render/pt/textureLod", m_config.textureLod ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/pt/guidePrimaryHit", m_config.guidePrimaryHit ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
@@ -613,7 +622,7 @@ void HeadlessApp::populateSettings()
     }
 }
 
-void HeadlessApp::saveOutput(Buffer* buf, const std::string& path)
+bool HeadlessApp::saveOutput(Buffer* buf, const std::string& path)
 {
     const uint32_t w = buf->width();
     const uint32_t h = buf->height();
@@ -632,12 +641,14 @@ void HeadlessApp::saveOutput(Buffer* buf, const std::string& path)
         const int ret = SaveEXR(data, static_cast<int>(w), static_cast<int>(h), 4, 0, outPath.string().c_str(), &err);
         if (ret != TINYEXR_SUCCESS)
         {
-            STRELKA_ERROR("Failed to save EXR: {}", err ? err : "unknown");
+            STRELKA_ERROR("Failed to save EXR '{}': {}", outPath.string(), err ? err : "unknown");
             if (err)
             {
                 FreeEXRErrorMessage(err);
             }
+            return false;
         }
+        return true;
     }
     else if (ext == ".png")
     {
@@ -716,15 +727,43 @@ void HeadlessApp::saveOutput(Buffer* buf, const std::string& path)
                             static_cast<int>(w * 4)))
         {
             STRELKA_ERROR("Failed to save PNG: {}", outPath.string());
+            return false;
         }
+        return true;
     }
-    else
-    {
-        STRELKA_ERROR("Unsupported output format '{}'. Use .exr or .png", ext);
-    }
+    STRELKA_ERROR("Unsupported output format '{}'. Use .exr or .png", ext);
+    return false;
 }
 
-void HeadlessApp::printProgress(uint32_t currentSpp, uint32_t totalSpp, double lastRenderMs)
+bool HeadlessApp::saveCheckpoint(Buffer* buf, uint32_t accumulatedSpp)
+{
+    const fs::path outputPath(m_config.outputPath);
+    const std::string extension = outputPath.extension().string();
+    const fs::path checkpointPath = outputPath.parent_path() / (outputPath.stem().string() + ".checkpoint" + extension);
+    const fs::path temporaryPath =
+        outputPath.parent_path() / (outputPath.stem().string() + ".checkpoint.tmp" + extension);
+    if (!saveOutput(buf, temporaryPath.string()))
+    {
+        return false;
+    }
+
+    // POSIX rename atomically replaces an existing file in the same directory:
+    // a killed render therefore leaves either the old complete checkpoint or
+    // the new one, never a half-written EXR/PNG under the public name.
+    if (std::rename(temporaryPath.string().c_str(), checkpointPath.string().c_str()) != 0)
+    {
+        const int error = errno;
+        const std::error_code publishError(error, std::generic_category());
+        STRELKA_ERROR("Failed to publish checkpoint '{}': {}", checkpointPath.string(), publishError.message());
+        std::error_code cleanupError;
+        fs::remove(temporaryPath, cleanupError);
+        return false;
+    }
+    STRELKA_INFO("Checkpoint: {} spp -> {}", accumulatedSpp, checkpointPath.string());
+    return true;
+}
+
+void HeadlessApp::printProgress(uint32_t currentSpp, uint32_t totalSpp, double lastSampleMs)
 {
     constexpr int barWidth = 30;
     const float fraction = static_cast<float>(currentSpp) / static_cast<float>(std::max(1u, totalSpp));
@@ -733,12 +772,12 @@ void HeadlessApp::printProgress(uint32_t currentSpp, uint32_t totalSpp, double l
     const std::string bar = std::string((size_t)std::max(0, filled), '=') +
                             std::string((size_t)(barWidth - std::clamp(filled, 0, barWidth)), ' ');
 
-    const double etaSec = (currentSpp > 0) ? lastRenderMs * (totalSpp - currentSpp) / 1000.0 : 0.0;
+    const double etaSec = (currentSpp > 0) ? lastSampleMs * (totalSpp - currentSpp) / 1000.0 : 0.0;
     // Written to the stream rather than logged: the bar redraws itself in place
     // with a carriage return, and every logger line carries a timestamp and a
     // newline that would turn it into one line of scrollback per sample.
     std::cout << fmt::format("\rRendering [{}] {}/{} spp | {:.1f} ms/sample | ETA: {:.1f}s   ", bar, currentSpp,
-                             totalSpp, lastRenderMs, etaSec)
+                             totalSpp, lastSampleMs, etaSec)
               << std::flush;
 }
 
@@ -992,8 +1031,10 @@ int HeadlessApp::run()
         // variant -- puts a scene load and a fresh clock ramp between the numbers
         // being compared. Measured sequentially, this probe reported that adding
         // dependent loads made the frame *faster*, which is drift and not headroom.
+        uint32_t nextCheckpoint = m_config.checkpointSpp;
         while (m_sharedCtx->mSubframeIndex < m_config.spp)
         {
+            const uint32_t samplesBeforeLaunch = static_cast<uint32_t>(m_sharedCtx->mSubframeIndex);
             m_render->renderSync(outputBuf.get());
 
             if (!announced && !m_config.capturePath.empty())
@@ -1035,8 +1076,19 @@ int HeadlessApp::run()
                 announced = true;
                 std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
             }
-            printProgress(
-                static_cast<uint32_t>(m_sharedCtx->mSubframeIndex), m_config.spp, m_render->getLastRenderTimeMs());
+            const uint32_t accumulatedSamples = static_cast<uint32_t>(m_sharedCtx->mSubframeIndex);
+            const uint32_t launchSamples = std::max(accumulatedSamples - samplesBeforeLaunch, 1u);
+            if (m_config.checkpointSpp != 0u && accumulatedSamples < m_config.spp && accumulatedSamples >= nextCheckpoint)
+            {
+                std::cout << '\n';
+                saveCheckpoint(outputBuf.get(), accumulatedSamples);
+                const uint64_t following =
+                    (static_cast<uint64_t>(accumulatedSamples) / m_config.checkpointSpp + 1u) * m_config.checkpointSpp;
+                nextCheckpoint = following <= std::numeric_limits<uint32_t>::max() ?
+                                     static_cast<uint32_t>(following) :
+                                     std::numeric_limits<uint32_t>::max();
+            }
+            printProgress(accumulatedSamples, m_config.spp, m_render->getLastRenderTimeMs() / launchSamples);
         }
     }
     const auto totalTime = duration_cast<milliseconds>(high_resolution_clock::now() - startTime);
@@ -1052,7 +1104,11 @@ int HeadlessApp::run()
         return 2;
     }
 
-    saveOutput(outputBuf.get());
+    if (!saveOutput(outputBuf.get()))
+    {
+        std::cout << '\n'; // close the progress line before the logger writes
+        return 3;
+    }
 
     std::cout << '\n'; // close the progress line before the logger writes
     if (m_config.auditRenderWork)
