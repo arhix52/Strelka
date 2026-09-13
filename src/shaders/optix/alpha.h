@@ -9,19 +9,17 @@
 //
 // The two ray types spend that coverage differently, again matching Metal:
 //
-//   * radiance rays test it stochastically at the closest hit and, when the
-//     test passes, continue in the same direction unshaded. One random draw
-//     covers MASK and BLEND alike.
+//   * radiance rays test it stochastically in any-hit for foliage-only scenes,
+//     or at closest hit in mixed curve scenes. One random draw covers MASK and
+//     BLEND alike.
 //   * shadow rays accumulate the product of (1 - opacity) in an any-hit
 //     program, so a light seen through two half-transparent leaves arrives at a
 //     quarter strength rather than being blocked outright by the first one.
 //
-// Doing the radiance test at the closest hit rather than in an any-hit program
-// is not a shortcut: an any-hit that accepts stochastically is called once per
-// candidate the traversal considers, so a path that slips through a canopy pays
-// for every leaf in it, and OptiX is free to invoke an any-hit more than once
-// for the same intersection -- which a random accept turns into a different
-// answer each time.
+// The any-hit GAS requires OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL: a
+// split BVH may otherwise report one primitive twice and make two random
+// decisions for one surface. Mixed curve scenes keep closest-hit fallback
+// because disabling primitive splitting regressed the measured kids scene.
 
 #include <strelka/material/material_params.h>
 #include <strelka/material/texture_sample.h>
