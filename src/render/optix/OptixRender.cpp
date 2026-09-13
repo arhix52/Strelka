@@ -97,6 +97,7 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <ranges>
 #include <chrono>
@@ -4676,7 +4677,7 @@ bool OptiXRender::memoryReport(MemoryReport& report) const
         add("Motion transforms", bytes);
     }
     add("Shader binding table", mSbtBytes);
-    add("Materials", bufBytes(mMaterialParamsBuffer));
+    add("Materials", bufBytes(mMaterialParamsBuffer) + bufBytes(mAlphaMaterialParamsBuffer));
     add("Lights", bufBytes(mLightBuffer));
     add("IES profiles", bufBytes(mIesBuffer));
     add("Skinning", bufBytes(mVertexSkinDataBuffer) + mSkinningPtrs.bytes);
@@ -5977,18 +5978,37 @@ void OptiXRender::publishMaterialParams()
     CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mTexturesDataBuffer->getPtr()), 0, totalTexSize));
 
     std::vector<MaterialParams> allParams(matDescs.size());
+    std::vector<OptixAlphaMaterialData> alphaParams(matDescs.size());
     for (uint32_t i = 0; i < matDescs.size(); ++i)
     {
         allParams[i] = mMaterials[i].params;
+        const MaterialParams& material = allParams[i];
+        const float sx = material.uv_scale_x != 0.0f ? material.uv_scale_x : 1.0f;
+        const float sy = material.uv_scale_y != 0.0f ? material.uv_scale_y : 1.0f;
+        const float c = std::cos(material.uv_rotation);
+        const float s = std::sin(material.uv_rotation);
+        alphaParams[i] = {material.base_color_alpha,
+                          material.alpha_cutoff,
+                          material.alpha_mode,
+                          0u,
+                          make_float2(material.uv_offset_x, material.uv_offset_y),
+                          make_float2(sx * c, sx * s),
+                          make_float2(-sy * s, sy * c)};
     }
     const size_t paramsSize = allParams.size() * sizeof(MaterialParams);
     mMaterialParamsBuffer = std::make_unique<OptixBuffer>(paramsSize);
     CUDA_CHECK(
         cudaMemcpy(optix::devicePtr<void>(mMaterialParamsBuffer->getPtr()), allParams.data(), paramsSize,
                    cudaMemcpyHostToDevice));
+    const size_t alphaParamsSize = alphaParams.size() * sizeof(OptixAlphaMaterialData);
+    mAlphaMaterialParamsBuffer = std::make_unique<OptixBuffer>(alphaParamsSize);
+    CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mAlphaMaterialParamsBuffer->getPtr()), alphaParams.data(),
+                          alphaParamsSize, cudaMemcpyHostToDevice));
     mMaterialCount = matDescs.size();
 
     mState.params.materials = optix::devicePtr<MaterialParams>(mMaterialParamsBuffer->getPtr());
+    mState.params.alphaMaterials =
+        optix::devicePtr<OptixAlphaMaterialData>(mAlphaMaterialParamsBuffer->getPtr());
     mState.params.materialTextures = optix::devicePtr<cudaTextureObject_t>(mTexturesDataBuffer->getPtr());
 
     publishOpenPBRParams();

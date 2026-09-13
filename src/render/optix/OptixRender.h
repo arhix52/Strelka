@@ -265,6 +265,7 @@ private:
 
     // Device buffers for per-material data (indexed by materialId)
     std::unique_ptr<OptixBuffer> mMaterialParamsBuffer; // MaterialParams[] on device
+    std::unique_ptr<OptixBuffer> mAlphaMaterialParamsBuffer; // traversal-only OptixAlphaMaterialData[]
     uint32_t mMaterialCount = 0;
 
     // OpenPBR, in two arrays parallel to the two above and indexed by the same

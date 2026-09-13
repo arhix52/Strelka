@@ -352,20 +352,22 @@ static __forceinline__ __device__ float3 mediumTransmittance(float3 origin,
 
 static __forceinline__ __device__ float hitOpacity(const HitGroupData* hit_data, int32_t matId)
 {
-    const MaterialParams& material = params.materials[matId];
+    const OptixAlphaMaterialData& material = params.alphaMaterials[matId];
     const unsigned int primitiveId = optixGetPrimitiveIndex();
     const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
     const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
     const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
     const uint32_t baseVbOffset = hit_data->vertexOffset;
-    const float2 uv = apply_texture_transform(
-        interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
-                          unpackUV(params.scene.vb[baseVbOffset + i1].uv),
-                          unpackUV(params.scene.vb[baseVbOffset + i2].uv), optixGetTriangleBarycentrics()),
-        material);
+    const float2 sourceUv = interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
+                                              unpackUV(params.scene.vb[baseVbOffset + i1].uv),
+                                              unpackUV(params.scene.vb[baseVbOffset + i2].uv),
+                                              optixGetTriangleBarycentrics());
+    const float2 uv = make_float2(sourceUv.x * material.uvTransformX.x +
+                                      sourceUv.y * material.uvTransformY.x + material.uvOffset.x,
+                                  sourceUv.x * material.uvTransformX.y +
+                                      sourceUv.y * material.uvTransformY.y + material.uvOffset.y);
 
-    const cudaTextureObject_t* textures = &params.materialTextures[matId * MAX_MATERIAL_TEXTURES];
-    return resolveOpacity(material, textures, uv);
+    return resolveOpacity(material, params.materialTextures[matId * MAX_MATERIAL_TEXTURES], uv);
 }
 
 /// Any-hit for shadow rays. Only bound on instances whose material is not
@@ -382,7 +384,7 @@ extern "C" __global__ void __anyhit__occlusion()
 
     const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const int32_t matId = hit_data->materialId;
-    if (params.materials[matId].alpha_mode == ALPHA_MODE_OPAQUE)
+    if (params.alphaMaterials[matId].alphaMode == ALPHA_MODE_OPAQUE)
     {
         return; // accepted; TERMINATE_ON_FIRST_HIT ends the ray here
     }
@@ -413,7 +415,7 @@ extern "C" __global__ void __anyhit__radiance()
 
     const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const int32_t matId = hit_data->materialId;
-    if (params.materials[matId].alpha_mode == ALPHA_MODE_OPAQUE)
+    if (params.alphaMaterials[matId].alphaMode == ALPHA_MODE_OPAQUE)
     {
         return;
     }

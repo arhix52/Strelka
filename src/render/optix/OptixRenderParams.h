@@ -102,6 +102,21 @@ struct SceneData
     uint32_t numProjectorTextures;
 };
 
+// Traversal only needs coverage and one UV transform. Keep it out of the
+// shading-oriented MaterialParams table so foliage candidates fetch 40 bytes
+// instead of several cache lines and do not evaluate sin/cos per intersection.
+struct OptixAlphaMaterialData
+{
+    float baseColorAlpha;
+    float alphaCutoff;
+    uint32_t alphaMode;
+    uint32_t reserved;
+    float2 uvOffset;
+    float2 uvTransformX;
+    float2 uvTransformY;
+};
+static_assert(sizeof(OptixAlphaMaterialData) == 40, "OptiX alpha material ABI changed");
+
 /// How `AovSample::depth` is encoded. Mirrors kDenoiseDepth* in the Metal
 /// ShaderTypes.h, value for value, so a guide dumped from either backend means
 /// the same thing.
@@ -321,6 +336,7 @@ struct Params
 
     // Material data (indexed by materialId)
     MaterialParams* materials;
+    OptixAlphaMaterialData* alphaMaterials;
     cudaTextureObject_t* materialTextures; // flat array: [materialId * MAX_MATERIAL_TEXTURES + slot]
 
     /// OpenPBR Surface 1.1.1, in a parallel array indexed by the same material

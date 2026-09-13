@@ -114,6 +114,15 @@ closest-hit restart path. NCU measured time down 5.3%, DRAM reads 5.3%, writes
 7.8%, `no_instruction` 5.8% and `long_scoreboard` 5.0%. The noise pattern
 changes, not the estimate: at 24 spp pine's mean moved 0.013%.
 
+The traversal alpha record is now compact too, matching the Metal layout's
+separation from its shading material. OptiX stores 40 bytes per material with
+the UV rotation already expanded to a 2x2 matrix instead of fetching the
+shading-oriented `MaterialParams` and evaluating sin/cos at every candidate.
+At the target configuration pine moved 17.127 -> 17.063 ms in Nsight Systems;
+NCU measured 17.684 -> 17.42 ms, 1.65% fewer instructions and 3.4% less
+`no_instruction`. DRAM barely moved because the forest's geometry still owns
+that traffic. Pine and kids outputs were bit-identical.
+
 ## The profile after the traffic work, 2026-09-11
 
 `--set full` on the render launch, kids_room, one launch of 16 samples at

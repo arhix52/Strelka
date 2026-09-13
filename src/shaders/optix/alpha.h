@@ -55,6 +55,22 @@ static __forceinline__ __device__ float resolveOpacity(const MaterialParams& mat
     return __saturatef(alpha);
 }
 
+static __forceinline__ __device__ float resolveOpacity(const OptixAlphaMaterialData& material,
+                                                       cudaTextureObject_t baseColorTexture,
+                                                       float2 uv)
+{
+    float alpha = material.baseColorAlpha;
+    if (baseColorTexture)
+    {
+        alpha *= tex2D<float4>(baseColorTexture, uv.x, uv.y).w;
+    }
+    if (material.alphaMode == ALPHA_MODE_MASK)
+    {
+        return alpha >= material.alphaCutoff ? 1.0f : 0.0f;
+    }
+    return __saturatef(alpha);
+}
+
 /// Use sampler eOpacity for joint stratification with pixel jitter, rotated per
 /// cutout layer.
 ///
