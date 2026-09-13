@@ -1113,6 +1113,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
         add(as);
     add(mAccel.instanceAccelerationStructure());
     add(mAccel.volumeAccelerationStructure());
+    add(mAccel.mediumAccelerationStructure());
     for (MTL::Buffer* buffer : mAccel.accelerationStructureAuxiliaryBuffers())
         add(buffer);
     // The renderer alternates between output buffers, so declaring only the one
@@ -1179,6 +1180,7 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.directStaticGeometryBase = mAccel.directStaticGeometryBase();
     b.directStaticInstanceIndex = mAccel.directStaticInstanceIndex();
     b.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
+    b.mediumAccelerationStructure = mAccel.mediumAccelerationStructure();
     b.primitiveAccelerationStructures = &mAccel.primitiveAccelerationStructures();
     b.materialBuffer = mMaterials.buffer() ? mMaterials.buffer() : mSceneTablePlaceholder;
     b.primitiveAlphaDataBuffer =
@@ -1999,6 +2001,7 @@ void MetalRender::render(Buffer* output)
             featureIn.splitBaseNee = splitBaseNee;
             featureIn.writeAov = pUniformData->writeAov != 0u;
             featureIn.samplerType = pUniformData->samplerType;
+            featureIn.genericShadeSplit = maxDepth == 1u && !featureIn.hasFog && !featureIn.hasOpenPBR;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
 
             if (featureIn.restirRayTracedDiagnostic && (featureIn.enableMotionBlur || featureIn.motionBlasBuilt))
@@ -2211,6 +2214,7 @@ void MetalRender::render(Buffer* output)
                     {
                         sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
                         sceneBind.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
+                        sceneBind.mediumAccelerationStructure = mAccel.mediumAccelerationStructure();
                     }
                     mMetal4.wait(mAccel.readyEvent(), mAccel.readyValue());
                     cmd4 = mMetal4.beginFrame((uint32_t)ctx.mFrameNumber);
@@ -2244,6 +2248,7 @@ void MetalRender::render(Buffer* output)
                     {
                         sceneBind.instanceAccelerationStructure = mAccel.instanceAccelerationStructure();
                         sceneBind.volumeAccelerationStructure = mAccel.volumeAccelerationStructure();
+                        sceneBind.mediumAccelerationStructure = mAccel.mediumAccelerationStructure();
                     }
                 }
                 std::vector<const MTL4::CommandBuffer*> integrateBuffers;

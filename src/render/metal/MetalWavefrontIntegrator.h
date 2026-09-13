@@ -64,6 +64,7 @@ struct IntegratorSceneBindings
     uint32_t directStaticGeometryBase = 0;
     uint32_t directStaticInstanceIndex = 0;
     MTL::AccelerationStructure* volumeAccelerationStructure = nullptr;
+    MTL::AccelerationStructure* mediumAccelerationStructure = nullptr;
     const std::vector<MTL::AccelerationStructure*>* primitiveAccelerationStructures = nullptr;
     MTL::Buffer* materialBuffer = nullptr;
     MTL::Buffer* primitiveAlphaDataBuffer = nullptr;

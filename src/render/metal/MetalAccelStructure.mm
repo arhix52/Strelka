@@ -667,8 +667,11 @@ void MetalAccelStructure::rebuild()
     safeRelease(mInstanceAccelerationStructure);
     mMetal4->removeResident(mVolumeInstanceAccelerationStructure);
     safeRelease(mVolumeInstanceAccelerationStructure);
+    mMetal4->removeResident(mMediumInstanceAccelerationStructure);
+    safeRelease(mMediumInstanceAccelerationStructure);
     safeRelease(mTlasDescriptor);
     safeRelease(mVolumeTlasDescriptor);
+    safeRelease(mMediumTlasDescriptor);
     mMetal4->removeResident(mInstanceBuffer);
     safeRelease(mInstanceBuffer);
     mMetal4->removeResident(mPreviousInstanceBuffer);
@@ -687,6 +690,8 @@ void MetalAccelStructure::rebuild()
     safeRelease(mTlasScratchBuffer);
     mMetal4->removeResident(mVolumeTlasScratchBuffer);
     safeRelease(mVolumeTlasScratchBuffer);
+    mMetal4->removeResident(mMediumTlasScratchBuffer);
+    safeRelease(mMediumTlasScratchBuffer);
     mMetal4->commitResidency();
 
     const auto rebuildStart = std::chrono::high_resolution_clock::now();
@@ -1324,6 +1329,24 @@ bool MetalAccelStructure::step(double budgetMs)
     const size_t idxBytes = mGeometry->hostGeometryBytes().second;
     const bool hostFreed = mScene->hostGeometryReleased();
 
+    // Keep bounded-medium descriptors as a prefix of the ordinary descriptor
+    // buffer. That gives their filtered TLAS native instance ids which still
+    // index the main descriptor table, avoiding a remap buffer in every volume
+    // hit. Curves and lights were appended after triangle groups, and the
+    // stable partition preserves that relative order for the triangle-only SSS
+    // TLAS below.
+    mMediumTlasInstanceCount = 0u;
+    if (!envFlag("STRELKA_NO_MEDIUM_ONLY_TLAS"))
+    {
+        mMediumTlasInstanceCount = static_cast<size_t>(std::ranges::count_if(
+            mEmittedInstances, [](const EmittedInstance& emitted) { return emitted.mask == GEOMETRY_MASK_MEDIUM; }));
+        if (mMediumTlasInstanceCount != 0u && mMediumTlasInstanceCount != mEmittedInstances.size())
+        {
+            std::ranges::stable_partition(
+                mEmittedInstances, [](const EmittedInstance& emitted) { return emitted.mask == GEOMETRY_MASK_MEDIUM; });
+        }
+    }
+
     // Where the memory goes. On a 50 M triangle scene the total runs past what a
     // 16 GB machine holds resident, and the first question is always which part
     // -- so state it rather than leave it to Activity Monitor.
@@ -1510,6 +1533,22 @@ bool MetalAccelStructure::step(double budgetMs)
             STRELKA_ERROR(
                 "Triangle-only volume TLAS could not be built; bounded-medium traversal "
                 "will fall back to the main top level");
+        }
+    }
+    if (mMediumTlasInstanceCount > 0)
+    {
+        mMediumTlasDescriptor = mPath->makeInstanceDescriptor(mInstanceBuffer, mMediumTlasInstanceCount, tlasUsage());
+        mMediumInstanceAccelerationStructure = createAccelerationStructure(mMediumTlasDescriptor);
+        ++mAuditCounts.tlasBuilds;
+        if (mMediumInstanceAccelerationStructure)
+        {
+            STRELKA_INFO("Medium TLAS: {} boundary instances ({:.3f} MB)", mMediumTlasInstanceCount,
+                         mMediumInstanceAccelerationStructure->size() / 1e6);
+        }
+        else
+        {
+            STRELKA_ERROR(
+                "Medium-only TLAS could not be built; bounded-medium shadow traversal will use the volume top level");
         }
     }
     {
@@ -1713,6 +1752,7 @@ void MetalAccelStructure::encodeTlasUpdates()
            mTlasInstanceCount == mEmittedInstances.size());
     mTlasInstanceCount = mEmittedInstances.size();
     update(mVolumeInstanceAccelerationStructure, mVolumeTlasDescriptor, mVolumeTlasScratchBuffer, true);
+    update(mMediumInstanceAccelerationStructure, mMediumTlasDescriptor, mMediumTlasScratchBuffer, true);
 
     mPath->barrierAfterTlasBeforeDispatch();
 }
@@ -1780,6 +1820,10 @@ void MetalAccelStructure::updateInstanceTransforms()
     if (mVolumeTlasDescriptor && mPath)
     {
         mPath->setInstanceDescriptorBuffer(mVolumeTlasDescriptor, mInstanceBuffer);
+    }
+    if (mMediumTlasDescriptor && mPath)
+    {
+        mPath->setInstanceDescriptorBuffer(mMediumTlasDescriptor, mInstanceBuffer);
     }
 }
 
@@ -2120,8 +2164,10 @@ void MetalAccelStructure::addDescriptorResidency()
     }
     mMetal4->addResident(mInstanceAccelerationStructure);
     mMetal4->addResident(mVolumeInstanceAccelerationStructure);
+    mMetal4->addResident(mMediumInstanceAccelerationStructure);
     mMetal4->addResident(mTlasScratchBuffer);
     mMetal4->addResident(mVolumeTlasScratchBuffer);
+    mMetal4->addResident(mMediumTlasScratchBuffer);
 }
 
 void MetalAccelStructure::releaseRetiredInstanceStructures(uint64_t age)
@@ -2154,6 +2200,10 @@ std::vector<MTL::Buffer*> MetalAccelStructure::accelerationStructureAuxiliaryBuf
     if (mVolumeTlasScratchBuffer)
     {
         buffers.push_back(mVolumeTlasScratchBuffer);
+    }
+    if (mMediumTlasScratchBuffer)
+    {
+        buffers.push_back(mMediumTlasScratchBuffer);
     }
     for (const Blas& blas : mBlasList)
     {
@@ -2215,8 +2265,11 @@ void MetalAccelStructure::release()
     safeRelease(mInstanceAccelerationStructure);
     removeResident(mVolumeInstanceAccelerationStructure);
     safeRelease(mVolumeInstanceAccelerationStructure);
+    removeResident(mMediumInstanceAccelerationStructure);
+    safeRelease(mMediumInstanceAccelerationStructure);
     safeRelease(mTlasDescriptor);
     safeRelease(mVolumeTlasDescriptor);
+    safeRelease(mMediumTlasDescriptor);
     removeResident(mInstanceBuffer);
     safeRelease(mInstanceBuffer);
     removeResident(mPreviousInstanceBuffer);
@@ -2237,6 +2290,8 @@ void MetalAccelStructure::release()
     safeRelease(mTlasScratchBuffer);
     removeResident(mVolumeTlasScratchBuffer);
     safeRelease(mVolumeTlasScratchBuffer);
+    removeResident(mMediumTlasScratchBuffer);
+    safeRelease(mMediumTlasScratchBuffer);
     if (mMetal4)
     {
         mMetal4->commitResidency();
@@ -2244,6 +2299,7 @@ void MetalAccelStructure::release()
     mEmittedInstances.clear();
     mTlasInstanceCount = 0;
     mVolumeTlasInstanceCount = 0;
+    mMediumTlasInstanceCount = 0;
     mOpaqueGeometryCount = 0;
     mCutoutGeometryCount = 0;
     mNextBlasRebuildIndex = 0;

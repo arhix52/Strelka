@@ -1231,8 +1231,14 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             if (variant->shadeBase)
             {
                 dispatchShadeStage(kStageShadeBase, variant->shadeBase, kShadeBaseArgsOffset);
-                dispatchShadeStage(kStageShadeLayer, variant->shadeLayer, kShadeLayerArgsOffset);
-                dispatchShadeStage(kStageShadeTranslucent, variant->shadeTranslucent, kShadeTranslucentArgsOffset);
+                if (variant->shadeLayer)
+                {
+                    dispatchShadeStage(kStageShadeLayer, variant->shadeLayer, kShadeLayerArgsOffset);
+                }
+                if (variant->shadeTranslucent)
+                {
+                    dispatchShadeStage(kStageShadeTranslucent, variant->shadeTranslucent, kShadeTranslucentArgsOffset);
+                }
                 dispatchShadeStage(kStageShadeTail, variant->shade, kShadeTailArgsOffset);
             }
             else
@@ -1322,7 +1328,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             }
             table->setAddress(bounceIdx, 16);
             table->setAddress(directGeometryBase, 17);
-            table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 18);
+            table->setResource(scene.mediumAccelerationStructure->gpuResourceID(), 18);
             bind(scene.primitiveAlphaDataBuffer, 0, 19);
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
@@ -1555,6 +1561,12 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         if (scene.volumeAccelerationStructure && scene.volumeAccelerationStructure != scene.instanceAccelerationStructure)
         {
             e->useResource(scene.volumeAccelerationStructure, MTL::ResourceUsageRead);
+        }
+        if (scene.mediumAccelerationStructure &&
+            scene.mediumAccelerationStructure != scene.instanceAccelerationStructure &&
+            scene.mediumAccelerationStructure != scene.volumeAccelerationStructure)
+        {
+            e->useResource(scene.mediumAccelerationStructure, MTL::ResourceUsageRead);
         }
         if (scene.environment && scene.environment->state().mapTexture)
         {
@@ -1914,10 +1926,16 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             {
                 enc->setComputePipelineState(variant->shadeBase);
                 enc->dispatchThreadgroups(mControlBuffer, kShadeBaseArgsOffset, tg);
-                enc->setComputePipelineState(variant->shadeLayer);
-                enc->dispatchThreadgroups(mControlBuffer, kShadeLayerArgsOffset, tg);
-                enc->setComputePipelineState(variant->shadeTranslucent);
-                enc->dispatchThreadgroups(mControlBuffer, kShadeTranslucentArgsOffset, tg);
+                if (variant->shadeLayer)
+                {
+                    enc->setComputePipelineState(variant->shadeLayer);
+                    enc->dispatchThreadgroups(mControlBuffer, kShadeLayerArgsOffset, tg);
+                }
+                if (variant->shadeTranslucent)
+                {
+                    enc->setComputePipelineState(variant->shadeTranslucent);
+                    enc->dispatchThreadgroups(mControlBuffer, kShadeTranslucentArgsOffset, tg);
+                }
                 enc->setComputePipelineState(variant->shade);
                 enc->dispatchThreadgroups(mControlBuffer, kShadeTailArgsOffset, tg);
             }
@@ -2005,7 +2023,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             }
             enc->setBytes(&bounce, sizeof(uint32_t), 16);
             enc->setBytes(&scene.directStaticGeometryBase, sizeof(uint32_t), 17);
-            enc->setAccelerationStructure(scene.volumeAccelerationStructure, 18);
+            enc->setAccelerationStructure(scene.mediumAccelerationStructure, 18);
             enc->setBuffer(scene.primitiveAlphaDataBuffer, 0, 19);
             if (shadowTable)
             {
@@ -2159,6 +2177,9 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     const bool primitiveAlphaData =
         (features & WavefrontFeatures::kPrimitiveAlphaData) != 0u && !envFlag("STRELKA_NO_PRIMITIVE_ALPHA_DATA");
     values->setConstantValue(&primitiveAlphaData, MTL::DataTypeBool, (NS::UInteger)31);
+    const bool fastRectLightData = !envFlag("STRELKA_NO_FAST_RECT_LIGHT_DATA");
+    values->setConstantValue(&fastRectLightData, MTL::DataTypeBool, (NS::UInteger)32);
+    const bool genericShadeSplit = (features & WavefrontFeatures::kGenericShadeSplit) != 0u;
     auto entry = [&](const char* base) -> std::string {
         return curves ? std::string(base) + "Curve" : std::string(base);
     };
@@ -2309,7 +2330,24 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     }
     else
     {
-        v.shade = make("wavefrontShade");
+        // Generic materials already use the same producer-side buckets as
+        // OpenPBR. Give their ordinary opaque surfaces a PSO that cannot see
+        // fog, volume exits, hair or transmission continuation. The rare Tail
+        // records keep the full path. An opt-out remains for paired profiling.
+        // A fog hit is deliberately routed to Tail. In atmospheric scenes that
+        // population can be comparable to the surface population (pine is the
+        // representative case), and sorting plus launching two equally hot
+        // kernels costs more than the smaller Base code saves. Keep those
+        // scenes monolithic; the split wins when Tail is genuinely sparse.
+        if (genericShadeSplit && !fog && !envFlag("STRELKA_NO_GENERIC_SHADE_SPLIT"))
+        {
+            v.shadeBase = make("wavefrontShadeBase", "wavefrontShadeBaseGeneric");
+            v.shade = make("wavefrontShadeTail", "wavefrontShadeTailGeneric");
+        }
+        else
+        {
+            v.shade = make("wavefrontShade");
+        }
     }
     v.restirSpatialFinal = restirRayTracedDiagnostic ?
                                makeTraversal("wavefrontRestirSpatialFinal", "RestirSpatialDiagnostic", false,
@@ -2331,9 +2369,10 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     }
     STRELKA_INFO(
         "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
-        "curves={} sharcUpdate={} openpbr={} allOpenpbr={} allNativeOpenpbr={} risOne={} aov={} sampler={} metal4={}",
+        "curves={} sharcUpdate={} openpbr={} allOpenpbr={} allNativeOpenpbr={} risOne={} aov={} genericSplit={} "
+        "sampler={} metal4={}",
         envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, allOpenPBR,
-        allNativeOpenPBR, risOne, aov, samplerType, useMetal4);
+        allNativeOpenPBR, risOne, aov, genericShadeSplit, samplerType, useMetal4);
     // maxTotalThreadsPerThreadgroup is Metal's available proxy for per-pipeline register pressure.
     auto tgLimit = [](MTL::ComputePipelineState* p) -> uint32_t {
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;

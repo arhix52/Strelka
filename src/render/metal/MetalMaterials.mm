@@ -541,6 +541,22 @@ void MetalMaterials::publishParameters(Scene* scene)
                 shadeBucket = 1u;
             }
         }
+        else
+        {
+            // The Base shade entry has an intentionally opaque continuation:
+            // it does not maintain the IOR stack, enter an SSS walk or offset a
+            // transmitted ray to the far side of the surface. OpenPBR's
+            // classifier above already guarantees that contract. Keep the
+            // generic materials honest as well so non-OpenPBR scenes can use
+            // the same small Base/Tail PSO split instead of one uber shader.
+            const Material& material = st.gpuMaterials.back();
+            const uint32_t transmissiveFeatures =
+                MATERIAL_FEATURE_TRANSMISSION | MATERIAL_FEATURE_DIFFUSE_TRANSMISSION | MATERIAL_FEATURE_SUBSURFACE;
+            if (material.material_type == MATERIAL_TYPE_DIELECTRIC || (material.features & transmissiveFeatures) != 0u)
+            {
+                shadeBucket = 3u;
+            }
+        }
         mMaterialShadeBucket.push_back(shadeBucket);
         bool needsAuthoredTangent =
             (st.gpuMaterials.back().features & (MATERIAL_TEX_NORMAL | MATERIAL_FEATURE_ANISOTROPY)) != 0u;

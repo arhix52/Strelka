@@ -14,6 +14,10 @@
 
 using namespace metal;
 
+constant bool kFcFastRectLightData [[function_constant(32)]];
+constant bool SPEC_FAST_RECT_LIGHT_DATA =
+    is_function_constant_defined(kFcFastRectLightData) ? kFcFastRectLightData : true;
+
 struct LightSampleData
 {
     float3 pointOnLight;
@@ -160,6 +164,38 @@ static void fillLightData(device const UniformLight& l,
     lightSampleData.normal = calcLightNormal(l, lightSampleData.pointOnLight);
 }
 
+// Rectangles are validated and packed on the host: pad0 is their reciprocal
+// area and normal.xyz is their unit emission normal. Do not route the
+// all-rectangle function-constant variant back through fillLightData(), whose
+// dynamic l.type switch keeps the sphere/ellipsoid solver and its robust
+// exponent-scaling machinery alive in the hottest NEE shader.
+static __inline__ void fillRectLightData(device const UniformLight& l,
+                                         thread const float3 hitPoint,
+                                         thread LightSampleData& lightSampleData)
+{
+    const float3 toLight = lightSampleData.pointOnLight - hitPoint;
+    const float distance2 = dot(toLight, toLight);
+    const float inverseDistance = rsqrt(max(distance2, 1e-20f));
+    lightSampleData.L = toLight * inverseDistance;
+    lightSampleData.distToLight = distance2 * inverseDistance;
+    lightSampleData.areaPdf = l.pad0;
+    lightSampleData.normal = float3(l.normal);
+}
+
+static __inline__ void fillSelectedRectLightData(device const UniformLight& l,
+                                                 thread const float3 hitPoint,
+                                                 thread LightSampleData& lightSampleData)
+{
+    if (SPEC_FAST_RECT_LIGHT_DATA)
+    {
+        fillRectLightData(l, hitPoint, lightSampleData);
+    }
+    else
+    {
+        fillLightData(l, hitPoint, lightSampleData);
+    }
+}
+
 // The spherical-rectangle frame, its sample and its solid angle all come from
 // common/rect_sampling.h, which the OptiX modules and the host tests compile as
 // well. These wrappers only unpack UniformLight's four corners.
@@ -198,13 +234,13 @@ static LightSampleData SampleRectLight(device const UniformLight& l, thread cons
         // Light too small / too grazing for float32 SphQuad — area sampling is
         // indistinguishable and numerically safe.
         lightSampleData.pointOnLight = float3(l.points[0]) + ex * u.x + ey * u.y;
-        fillLightData(l, hitPoint, lightSampleData);
+        fillSelectedRectLightData(l, hitPoint, lightSampleData);
         lightSampleData.solidAngle = 0.0f;
         return lightSampleData;
     }
 
     lightSampleData.pointOnLight = sampleSphQuad(quad, u);
-    fillLightData(l, hitPoint, lightSampleData);
+    fillSelectedRectLightData(l, hitPoint, lightSampleData);
     lightSampleData.solidAngle = quad.S;
     return lightSampleData;
 }
@@ -218,7 +254,7 @@ static __inline__ LightSampleData SampleRectLightUniform(device const UniformLig
     float3 e1 = float3(l.points[1]) - float3(l.points[0]);
     float3 e2 = float3(l.points[3]) - float3(l.points[0]);
     lightSampleData.pointOnLight = float3(l.points[0]) + e1 * u.x + e2 * u.y;
-    fillLightData(l, hitPoint, lightSampleData);
+    fillSelectedRectLightData(l, hitPoint, lightSampleData);
     lightSampleData.solidAngle = 0.0f;
     return lightSampleData;
 }

@@ -7047,7 +7047,7 @@ template <typename T>
 static void shadowImpl(uint gid,
                        constant Uniforms& uniforms,
                        typename T::structure accelerationStructure,
-                       typename T::volume_structure volumeAccelerationStructure,
+                       typename T::volume_structure mediumAccelerationStructure,
                        device const char* shadowRays,
                        device float4* radianceOut,
                        device const uint32_t* control,
@@ -7143,7 +7143,7 @@ static void shadowImpl(uint gid,
         {
             const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
             const float3 transmittance =
-                mediumTransmittance<T>(volumeAccelerationStructure, uniforms, materials, geometryEntries, instances,
+                mediumTransmittance<T>(mediumAccelerationStructure, uniforms, materials, geometryEntries, instances,
                                        float3(visibleRay.origin), float3(visibleRay.direction), visibleRay.maxDistance,
                                        loadShadowMedium(shadowRays, gid, capacity), motionTime);
             weight *= transmittance;
@@ -7239,7 +7239,7 @@ static void shadowImpl(uint gid,
     {
         const CompactShadowTraversal visibleRay = loadShadowTraversal(shadowRays, gid);
         const float3 mediumTr =
-            mediumTransmittance<T>(volumeAccelerationStructure, uniforms, materials, geometryEntries, instances,
+            mediumTransmittance<T>(mediumAccelerationStructure, uniforms, materials, geometryEntries, instances,
                                    float3(visibleRay.origin), float3(visibleRay.direction), visibleRay.maxDistance,
                                    loadShadowMedium(shadowRays, gid, capacity), motionTime);
         weight *= mediumTr;
@@ -7500,23 +7500,24 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
     resolvedEntries[tid] = previous;
 }
 
-#define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                  \
-    kernel void NAME(                                                                                                  \
-        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                               \
-        TRAITS::structure accelerationStructure [[buffer(1)]], device const char* shadowRays [[buffer(2)]],            \
-        device float4* radianceOut [[buffer(3)]], device const uint32_t* control [[buffer(4)]],                        \
-        constant uint32_t& sampleIdx [[buffer(5)]],                                                                    \
-        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],                          \
-        device const Material* materials [[buffer(7)]], device const GeometryEntry* geometryEntries [[buffer(8)]],     \
-        device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],              \
-        device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],               \
-        device SharcUpdateState* sharcUpdates [[buffer(13)]],                                                          \
-        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]], TRAITS::table functionTable [[buffer(15)]],   \
-        constant uint32_t& bounce [[buffer(16)]], device const PrimitiveAlphaData* primitiveAlphaData [[buffer(19)]])  \
-    {                                                                                                                  \
-        shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, accelerationStructure, shadowRays,      \
-                           radianceOut, control, sampleIdx, instances, materials, primitiveAlphaData, geometryEntries, \
-                           vertexBuffer, indexBuffer, functionTable, sharcUpdates, sharcAccumulation, 0u, bounce);     \
+#define WF_SHADOW_ENTRY(NAME, TRAITS)                                                                                   \
+    kernel void NAME(                                                                                                   \
+        uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                                \
+        TRAITS::structure accelerationStructure [[buffer(1)]], device const char* shadowRays [[buffer(2)]],             \
+        device float4* radianceOut [[buffer(3)]], device const uint32_t* control [[buffer(4)]],                         \
+        constant uint32_t& sampleIdx [[buffer(5)]],                                                                     \
+        constant MTLIndirectAccelerationStructureInstanceDescriptor* instances [[buffer(6)]],                           \
+        device const Material* materials [[buffer(7)]], device const GeometryEntry* geometryEntries [[buffer(8)]],      \
+        device const char* vertexBuffer [[buffer(9)]], device const uint32_t* indexBuffer [[buffer(10)]],               \
+        device const UniformLight* lights [[buffer(11)]], constant uint32_t& queueOffset [[buffer(12)]],                \
+        device SharcUpdateState* sharcUpdates [[buffer(13)]],                                                           \
+        device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]], TRAITS::table functionTable [[buffer(15)]],    \
+        constant uint32_t& bounce [[buffer(16)]], TRAITS::volume_structure mediumAccelerationStructure [[buffer(18)]],  \
+        device const PrimitiveAlphaData* primitiveAlphaData [[buffer(19)]])                                             \
+    {                                                                                                                   \
+        shadowImpl<TRAITS>(gid + queueOffset, uniforms, accelerationStructure, mediumAccelerationStructure, shadowRays, \
+                           radianceOut, control, sampleIdx, instances, materials, primitiveAlphaData, geometryEntries,  \
+                           vertexBuffer, indexBuffer, functionTable, sharcUpdates, sharcAccumulation, 0u, bounce);      \
     }
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
@@ -7546,11 +7547,11 @@ kernel void wavefrontShadowDirectStatic(uint gid [[thread_position_in_grid]],
                                         device SharcAccumulationEntry* sharcAccumulation [[buffer(14)]],
                                         constant uint32_t& bounce [[buffer(16)]],
                                         constant uint32_t& directGeometryBase [[buffer(17)]],
-                                        DirectStaticTraversal::volume_structure volumeAccelerationStructure
+                                        DirectStaticTraversal::volume_structure mediumAccelerationStructure
                                         [[buffer(18)]],
                                         device const PrimitiveAlphaData* primitiveAlphaData [[buffer(19)]])
 {
-    shadowImpl<DirectStaticTraversal>(gid + queueOffset, uniforms, accelerationStructure, volumeAccelerationStructure,
+    shadowImpl<DirectStaticTraversal>(gid + queueOffset, uniforms, accelerationStructure, mediumAccelerationStructure,
                                       shadowRays, radianceOut, control, sampleIdx, instances, materials,
                                       primitiveAlphaData, geometryEntries, vertexBuffer, indexBuffer, 0u, sharcUpdates,
                                       sharcAccumulation, directGeometryBase, bounce);

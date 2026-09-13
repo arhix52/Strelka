@@ -222,6 +222,18 @@ public:
         }
         return mInstanceAccelerationStructure;
     }
+    /// Top level containing only explicit bounded-medium boundaries. Shadow
+    /// transmittance uses this instead of walking the triangle TLAS a second
+    /// time. SSS keeps volumeAccelerationStructure(): it must see the ordinary
+    /// surface that a random walk exits through.
+    MTL::AccelerationStructure* mediumAccelerationStructure() const
+    {
+        if (mMediumInstanceAccelerationStructure)
+        {
+            return mMediumInstanceAccelerationStructure;
+        }
+        return volumeAccelerationStructure();
+    }
     const std::vector<MTL::AccelerationStructure*>& primitiveAccelerationStructures() const
     {
         return mPrimitiveAccelerationStructures;
@@ -344,9 +356,11 @@ private:
     uint32_t mDirectStaticInstanceIndex = 0;
     MTL::AccelerationStructure* mInstanceAccelerationStructure = nullptr;
     MTL::AccelerationStructure* mVolumeInstanceAccelerationStructure = nullptr;
+    MTL::AccelerationStructure* mMediumInstanceAccelerationStructure = nullptr;
     // Reused for every TLAS refit. Path-owned descriptor type (MTL3 or MTL4).
     MTL::AccelerationStructureDescriptor* mTlasDescriptor = nullptr;
     MTL::AccelerationStructureDescriptor* mVolumeTlasDescriptor = nullptr;
+    MTL::AccelerationStructureDescriptor* mMediumTlasDescriptor = nullptr;
     MTL::Buffer* mInstanceBuffer = nullptr;
     // Two are sufficient because MetalRender submits at most one frame at a
     // time: async rendering stays busy until commit feedback (or the Metal 3
@@ -356,8 +370,10 @@ private:
     bool mInstanceTransformsChanged = false;
     MTL::Buffer* mTlasScratchBuffer = nullptr;
     MTL::Buffer* mVolumeTlasScratchBuffer = nullptr;
+    MTL::Buffer* mMediumTlasScratchBuffer = nullptr;
     size_t mTlasInstanceCount = 0;
     size_t mVolumeTlasInstanceCount = 0;
+    size_t mMediumTlasInstanceCount = 0;
     // A top level that has to grow is replaced from inside the frame's encoder,
     // where the structure it replaces may still be read by the frames already in
     // flight. Freeing it there is a fault the frame after next; it waits here

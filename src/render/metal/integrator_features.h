@@ -65,6 +65,10 @@ public:
     // stage before OpenPBR prepare/eval, avoiding their combined register peak.
     static constexpr uint32_t kSplitBaseNee = 1u << 26;
     static constexpr uint32_t kPrimitiveAlphaData = 1u << 27;
+    // Host-only variant bit. At depth one, generic opaque hits profit from the
+    // Base/Tail split; on deeper paths Tail stops being sparse and the extra
+    // queue pass/dispatches outweigh the smaller Base kernel.
+    static constexpr uint32_t kGenericShadeSplit = 1u << 28;
 
     WavefrontFeatures() = default;
     explicit WavefrontFeatures(uint32_t bits) : mBits(bits)
@@ -127,6 +131,7 @@ struct IntegratorFeatureInputs
     bool uniformRectLightSampling = false;
     bool splitBaseNee = false;
     bool hasPrimitiveAlphaData = false;
+    bool genericShadeSplit = false;
     uint32_t samplerType = 0u;
 };
 
@@ -181,6 +186,8 @@ inline WavefrontFeatures packWavefrontFeatures(const IntegratorFeatureInputs& in
         features |= WavefrontFeatures::kSplitBaseNee;
     if (in.hasPrimitiveAlphaData)
         features |= WavefrontFeatures::kPrimitiveAlphaData;
+    if (in.genericShadeSplit)
+        features |= WavefrontFeatures::kGenericShadeSplit;
     features |= (in.samplerType & 7u) << WavefrontFeatures::kSamplerShift;
     return WavefrontFeatures(features);
 }
