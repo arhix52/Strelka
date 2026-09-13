@@ -36,6 +36,64 @@ static __device__ bool samplerBlueNoiseEnabled()
 #include <postprocessing/Guides.h>
 
 #include "optix_device_utils.h"
+
+static __forceinline__ __device__ unsigned int optixIorMaterial(const OptixIorStack& stack)
+{
+    return stack.top >= 0 ? stack.materials[stack.top] : 0xFFFFFFFFu;
+}
+
+static __forceinline__ __device__ float optixIorCurrent(const OptixIorStack& stack)
+{
+    const unsigned int material = optixIorMaterial(stack);
+    return material != 0xFFFFFFFFu ? params.materials[material].ior : 1.0f;
+}
+
+static __forceinline__ __device__ int optixIorFind(const OptixIorStack& stack,
+                                                    unsigned int priority,
+                                                    unsigned int material)
+{
+    for (int i = stack.top; i >= 0; --i)
+        if (stack.materials[i] == material)
+            return i;
+    for (int i = stack.top; i >= 0; --i)
+        if ((params.materials[stack.materials[i]].dielectric_priority & 0xFFu) == (priority & 0xFFu))
+            return i;
+    return -1;
+}
+
+static __forceinline__ __device__ void optixIorPush(OptixIorStack& stack, unsigned int material)
+{
+    if (stack.top < IOR_STACK_SIZE - 1)
+        stack.materials[++stack.top] = material & IOR_ENTRY_MATERIAL_MASK;
+}
+
+static __forceinline__ __device__ void optixIorPop(OptixIorStack& stack,
+                                                   unsigned int priority,
+                                                   unsigned int material)
+{
+    const int found = optixIorFind(stack, priority, material);
+    if (found >= 0)
+    {
+        for (int i = found; i < stack.top; ++i)
+            stack.materials[i] = stack.materials[i + 1];
+        --stack.top;
+    }
+}
+
+static __forceinline__ __device__ float optixIorAfterPop(const OptixIorStack& stack,
+                                                         unsigned int priority)
+{
+    int found = -1;
+    for (int i = stack.top; i >= 0; --i)
+        if ((params.materials[stack.materials[i]].dielectric_priority & 0xFFu) == (priority & 0xFFu))
+        {
+            found = i;
+            break;
+        }
+    if (found < 0 || found < stack.top)
+        return optixIorCurrent(stack);
+    return stack.top > 0 ? params.materials[stack.materials[stack.top - 1]].ior : 1.0f;
+}
 #include "shading/shading_common.h"
 #include "shading/medium.h"
 #include "alpha.h"
@@ -2158,20 +2216,20 @@ static __forceinline__ __device__ NextBounce sampleNextBounce(PerRayData* prd,
             if (entering)
             {
                 // Report nested-dielectric stack overflow here; the matching pop reports unmatched exits.
-                if (params.iorStats != nullptr && ior_stack_full(prd->iorStack))
+                if (params.iorStats != nullptr && prd->iorStack.top >= IOR_STACK_SIZE - 1)
                 {
                     atomicAdd(&params.iorStats[IOR_STAT_OVERFLOW], 1u);
                 }
-                ior_stack_push(prd->iorStack, si.dielectric_priority, si.ior, (unsigned int)matId);
+                optixIorPush(prd->iorStack, (unsigned int)matId);
             }
             else
             {
                 if (params.iorStats != nullptr &&
-                    !ior_stack_can_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId))
+                    optixIorFind(prd->iorStack, si.dielectric_priority, (unsigned int)matId) < 0)
                 {
                     atomicAdd(&params.iorStats[IOR_STAT_UNMATCHED], 1u);
                 }
-                ior_stack_pop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
+                optixIorPop(prd->iorStack, si.dielectric_priority, (unsigned int)matId);
             }
         }
         prd->origin = offset_ray(si.position, -faceNg);
@@ -2449,7 +2507,7 @@ extern "C" __global__ void __closesthit__radiance()
     // says nothing about whether the path is also inside glass.
     if (!insideMedium || mediumIsBounded)
     {
-        const unsigned int inside = ior_stack_current_material(prd->iorStack);
+        const unsigned int inside = optixIorMaterial(prd->iorStack);
         if (inside != 0xFFFFFFFFu)
         {
             const MaterialParams& im = params.materials[inside];
@@ -2738,11 +2796,11 @@ extern "C" __global__ void __closesthit__radiance()
     bool entering = si.front_face;
     if (entering)
     {
-        si.exterior_ior = ior_stack_current_ior(prd->iorStack);
+        si.exterior_ior = optixIorCurrent(prd->iorStack);
     }
     else
     {
-        si.exterior_ior = ior_stack_peek_after_pop(prd->iorStack, si.dielectric_priority);
+        si.exterior_ior = optixIorAfterPop(prd->iorStack, si.dielectric_priority);
     }
 
     // Built once, here, because openpbr_prepare() assembles the whole lobe stack

@@ -1247,13 +1247,12 @@ Two mechanisms behind that, both now measured rather than inferred:
 
 ---
 
-## 1. The last 36 bytes of PerRayData are the nested-dielectric stack
+## 1. The nested-dielectric stack is material indices on OptiX
 
-**Measured, and left alone because the return does not justify a tri-platform
-change.** PerRayData is 136 bytes. The largest single item left in it is
-`IorStack` at 36 -- four entries of `{float ior; uint32_t packed}` plus a top
-index -- carried by every path in every scene whether or not it ever enters a
-dielectric.
+**Implemented without changing the tri-platform stack.** OptiX PerRayData is
+108 bytes. Its stack is 20 bytes: four material indices plus a top index. IOR
+and priority are read from the existing material table only when a dielectric
+operation needs them. The shared Metal/CUDA `IorStack` remains 36 bytes.
 
 It can be 20 bytes. Both stored fields are pure functions of the material index:
 `si.ior` is `MaterialParams::ior` copied straight through (`bsdf.h`, three sites,
@@ -1261,12 +1260,12 @@ no texture) and the priority likewise. An entry could be the material index
 alone, with the accessors reading ior and priority back from the material table
 the shading path already has in hand.
 
-What stops it is the ratio. `ior_stack.h` is one of the genuinely tri-platform
-headers, so `ior_stack_current_ior`, `_pop` and `_peek_after_pop` would all take
-the material table, and every Metal call site would have to change -- on a
-machine that cannot build Metal. The failure mode is at least loud (CI builds
-macOS), but the payoff is small: 16 bytes, and the slope below puts that at
-0.3% / 0.9% / 1.5% on the three scenes.
+Keeping the compact representation OptiX-only removes that risk. At 1920x1080,
+depth 8, one Sobol sample per launch, NCU measured total DRAM traffic down 18.3%
+on iso, 14.1% on kids, 2.4% on chess and 3.4% on pine. Local traffic fell about
+3% except chess (0.5%). Nsight Systems' 24-launch totals moved -3.3%, +0.8%,
++1.1% and -1.3% respectively; the latter two are within their per-launch
+variance. ISO output was bit-identical and the full test suite passed.
 
 **The slope, measured at the target configuration** by adding 64 bytes of
 ballast the path never reads: +1.2% iso, +3.4% kids, +6.0% pine. The cost of a
@@ -1276,10 +1275,9 @@ by the instruction cache rather than by memory (`no_instruction` 13.6 and 12.6
 against `long_scoreboard` 5.3 and 6.2). Only pine still pays out, and pine's real
 problem is item 2.
 
-There is also one free-looking 4 bytes: `float2 pixelSample` wants eight-byte
-alignment, so the struct's 132 bytes of members round up to 136. Two floats
-instead would recover it, at 0.1--0.4%, which is not worth turning a natural
-float2 into a pair.
+Moving the complete stack to a per-pixel global buffer was also measured and
+rejected: it cost 71.2 MiB at 1080p and regressed chess by 4.2%, despite reducing
+local traffic by 3--12%.
 
 **Already ruled out:** payload registers (see "Payload registers" above -- they
 cost more stack, not less); the zero-initialisation; and a lower register

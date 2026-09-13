@@ -568,6 +568,13 @@ enum : uint32_t
 /// sample index, so nothing duplicates it; and which pixel the path belongs to
 /// is answered by launchPixelIndex(), because every program runs under the
 /// launch index of the ray that started it.
+struct OptixIorStack
+{
+    uint32_t materials[IOR_STACK_SIZE];
+    int top;
+};
+static_assert(sizeof(OptixIorStack) == 20, "OptiX stores IOR and priority in the material table");
+
 struct PerRayData
 {
     // --- Touched every bounce --------------------------------------------
@@ -637,7 +644,7 @@ struct PerRayData
     /// above: the closest hit overloads that one as the path's stop signal, and
     /// unifying them would move the sampler's dimension when a path terminates.
     SamplerState sampler;
-    IorStack iorStack;
+    OptixIorStack iorStack;
 
     // --- Participating media ---------------------------------------------
     /// Which medium the path is inside: 0 for none, otherwise the material index
@@ -662,9 +669,9 @@ struct PerRayData
     }
 };
 
-/// The 124-byte size is continuation-stack ABI; adding a field increases
+/// The 108-byte size is continuation-stack ABI; adding a field increases
 /// per-thread local state.
-static_assert(sizeof(PerRayData) == 124, "PerRayData sizes the continuation stack; see docs/open-perf.md");
+static_assert(sizeof(PerRayData) == 108, "PerRayData sizes the continuation stack; see docs/open-perf.md");
 
 /// All three are spelled out because the first two are SBT record offsets that
 /// the hit-group layout in OptixRender.cpp indexes by hand; a value here is not
