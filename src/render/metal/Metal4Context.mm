@@ -660,7 +660,8 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(MTL::Lib
                                                                         const char* functionName,
                                                                         const char* linkedFunctionName0,
                                                                         const char* linkedFunctionName1,
-                                                                        MTL::FunctionConstantValues* constants)
+                                                                        MTL::FunctionConstantValues* constants,
+                                                                        const char* linkedFunctionName2)
 {
     if (!mCompiler || !library)
         return nullptr;
@@ -684,23 +685,28 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(MTL::Lib
     // the pipeline with a duplicate-symbol error.
     MTL4::FunctionDescriptor* linked0 = describe(linkedFunctionName0, false);
     MTL4::FunctionDescriptor* linked1 = describe(linkedFunctionName1, false);
+    MTL4::FunctionDescriptor* linked2 = linkedFunctionName2 ? describe(linkedFunctionName2, false) : nullptr;
     auto* pipelineDescriptor = MTL4::ComputePipelineDescriptor::alloc()->init();
     pipelineDescriptor->setComputeFunctionDescriptor(compute);
-    const NS::Object* functions[] = { linked0, linked1 };
+    const NS::Object* functions[] = { linked0, linked1, linked2 };
     auto* linking = MTL4::StaticLinkingDescriptor::alloc()->init();
-    linking->setFunctionDescriptors(NS::Array::array(functions, 2));
+    linking->setFunctionDescriptors(NS::Array::array(functions, linked2 ? 3 : 2));
     pipelineDescriptor->setStaticLinkingDescriptor(linking);
     MTL::ComputePipelineState* pipeline = mCompiler->newComputePipelineState(pipelineDescriptor, nullptr, &error);
     if (!pipeline)
     {
-        STRELKA_ERROR("Metal 4 pipeline {} (linking {}, {}): {}", functionName, linkedFunctionName0,
-                      linkedFunctionName1, error ? error->localizedDescription()->utf8String() : "unknown error");
+        STRELKA_ERROR("Metal 4 pipeline {} (linking {}, {}{}{}): {}", functionName, linkedFunctionName0,
+                      linkedFunctionName1, linkedFunctionName2 ? ", " : "",
+                      linkedFunctionName2 ? linkedFunctionName2 : "",
+                      error ? error->localizedDescription()->utf8String() : "unknown error");
     }
     linking->release();
     pipelineDescriptor->release();
     compute->release();
     linked0->release();
     linked1->release();
+    if (linked2)
+        linked2->release();
     return pipeline;
 }
 

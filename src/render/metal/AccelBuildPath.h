@@ -61,7 +61,10 @@ public:
     virtual NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
                                              const oka::Mesh& mesh,
                                              uint32_t triangleCount,
+                                             MTL::Buffer* primitiveDataBuffer,
                                              size_t primitiveDataOffset,
+                                             size_t primitiveDataStride,
+                                             uint32_t intersectionFunctionOffset,
                                              MTL::Buffer* transformationMatrixBuffer = nullptr,
                                              size_t transformationMatrixOffset = 0) = 0;
 

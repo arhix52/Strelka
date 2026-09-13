@@ -387,21 +387,17 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         const MetalGeometry::Mesh* meshData = mGeometry->meshes()[meshId];
         const bool materialNeedsUv = inst.mMaterialId < mMaterials->needsSurfaceUv().size() &&
                                      mMaterials->needsSurfaceUv()[inst.mMaterialId] != 0u;
-        const size_t primitiveDataOffset =
-            primitiveSurfaceDataEligible(meshData, mMaterials, inst.mMaterialId, skeletal) ?
-                mGeometry->primitiveDataOffset(meshId, geometry.firstTriangle) :
-                MetalGeometry::kNoPrimitiveDataOffset;
-        const bool usePrimitiveSurfaceData = primitiveDataOffset != MetalGeometry::kNoPrimitiveDataOffset;
-        if (usePrimitiveSurfaceData)
-        {
-            ++mPrimitiveSurfaceGeometryCount;
-            mPrimitiveSurfaceTriangleCount += geometry.triangleCount;
-        }
-
         static const bool forceAllOpaque = envFlag("STRELKA_ALL_GEOM_OPAQUE");
+        static const bool alphaIntersectionFunctions = envFlag("STRELKA_ALPHA_IFT");
+        static const bool embedAlphaUv = envFlag("STRELKA_ALPHA_IFT_EMBEDDED_UV");
         const bool isLightProxy = inst.type == oka::Instance::Type::eLight;
         const bool isCutout = !isLightProxy && !forceAllOpaque && inst.mMaterialId < mMaterials->isCutout().size() &&
                               mMaterials->isCutout()[inst.mMaterialId] != 0;
+
+        const size_t primitiveSurfaceDataOffset =
+            primitiveSurfaceDataEligible(meshData, mMaterials, inst.mMaterialId, skeletal) ?
+                mGeometry->primitiveDataOffset(meshId, geometry.firstTriangle) :
+                MetalGeometry::kNoPrimitiveDataOffset;
         const size_t primitiveAlphaDataOffset = isCutout ?
                                                     mGeometry->primitiveAlphaDataOffset(meshId, geometry.firstTriangle) :
                                                     MetalGeometry::kNoPrimitiveAlphaDataOffset;
@@ -409,6 +405,24 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
                                                    MetalGeometry::kNoPrimitiveAlphaDataOffset :
                                                    primitiveAlphaDataOffset / sizeof(PrimitiveAlphaData);
         const bool usePrimitiveAlphaData = primitiveAlphaDataIndex <= GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK;
+        // First bring-up path for hardware any-hit alpha. The production
+        // experiment keeps UVs in their dense external buffer after the
+        // AS-resident form inflated pine's compacted BLAS by 34%. The embedded
+        // form remains available as a controlled Metal-version A/B.
+        const bool useHardwareAlpha =
+            alphaIntersectionFunctions && isCutout && usePrimitiveAlphaData && !(skeletal && mBuildMotionBlas);
+        if (useHardwareAlpha)
+        {
+            ++mHardwareAlphaGeometryCount;
+        }
+        const bool attachAlphaPrimitiveData = useHardwareAlpha && embedAlphaUv;
+        const bool usePrimitiveSurfaceData =
+            primitiveSurfaceDataOffset != MetalGeometry::kNoPrimitiveDataOffset && !attachAlphaPrimitiveData;
+        if (usePrimitiveSurfaceData)
+        {
+            ++mPrimitiveSurfaceGeometryCount;
+            mPrimitiveSurfaceTriangleCount += geometry.triangleCount;
+        }
 
         NS::Object* geom = nullptr;
         if (skeletal && mBuildMotionBlas)
@@ -418,9 +432,25 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         }
         else
         {
-            geom =
-                mPath->makeTriangleGeometry(mGeometry, mesh, geometry.triangleCount, primitiveDataOffset,
-                                            blas.mGeometryTransformBuffer, geometryIndex * sizeof(MTL::PackedFloat4x3));
+            MTL::Buffer* primitiveDataBuffer = nullptr;
+            size_t primitiveDataOffset = MetalGeometry::kNoPrimitiveDataOffset;
+            size_t primitiveDataStride = 0u;
+            const uint32_t intersectionFunctionOffset = useHardwareAlpha ? CUTOUT_INTERSECTION_SHADOW : 0u;
+            if (attachAlphaPrimitiveData)
+            {
+                primitiveDataBuffer = mGeometry->primitiveAlphaDataBuffer();
+                primitiveDataOffset = primitiveAlphaDataOffset;
+                primitiveDataStride = sizeof(PrimitiveAlphaData);
+            }
+            else if (usePrimitiveSurfaceData)
+            {
+                primitiveDataBuffer = mGeometry->primitiveDataBuffer();
+                primitiveDataOffset = primitiveSurfaceDataOffset;
+                primitiveDataStride = sizeof(PrimitiveSurfaceData);
+            }
+            geom = mPath->makeTriangleGeometry(
+                mGeometry, mesh, geometry.triangleCount, primitiveDataBuffer, primitiveDataOffset, primitiveDataStride,
+                intersectionFunctionOffset, blas.mGeometryTransformBuffer, geometryIndex * sizeof(MTL::PackedFloat4x3));
         }
         static const bool leaveDefault = envFlag("STRELKA_NO_SET_OPAQUE");
         if (!leaveDefault)
@@ -728,6 +758,7 @@ bool MetalAccelStructure::step(double budgetMs)
         mAsBuild = new AsBuildState();
         mOpaqueGeometryCount = 0;
         mCutoutGeometryCount = 0;
+        mHardwareAlphaGeometryCount = 0;
         mPrimitiveSurfaceGeometryCount = 0;
         mPrimitiveSurfaceTriangleCount = 0;
         mExtendedLimitBlasCount = 0;
@@ -1375,6 +1406,11 @@ bool MetalAccelStructure::step(double budgetMs)
     STRELKA_INFO("Geometry opacity: {} opaque, {} cutout ({:.1f}% of geometries need the alpha test)",
                  mOpaqueGeometryCount, mCutoutGeometryCount,
                  100.0 * mCutoutGeometryCount / std::max<uint32_t>(1u, mOpaqueGeometryCount + mCutoutGeometryCount));
+    if (envFlag("STRELKA_ALPHA_IFT"))
+    {
+        STRELKA_INFO("Hardware alpha IFT: {}/{} cutout geometries eligible{}", mHardwareAlphaGeometryCount,
+                     mCutoutGeometryCount, allCutoutGeometrySupportsHardwareAlpha() ? "" : "; using the inline fallback");
+    }
     STRELKA_INFO("Primitive surface data: {} geometries, {} triangles embedded in BLAS", mPrimitiveSurfaceGeometryCount,
                  mPrimitiveSurfaceTriangleCount);
 
@@ -2302,6 +2338,7 @@ void MetalAccelStructure::release()
     mMediumTlasInstanceCount = 0;
     mOpaqueGeometryCount = 0;
     mCutoutGeometryCount = 0;
+    mHardwareAlphaGeometryCount = 0;
     mNextBlasRebuildIndex = 0;
     mMotionBlasBuilt = false;
     mBuildMotionBlas = false;

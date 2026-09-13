@@ -44,6 +44,7 @@ struct WavefrontVariant
     MTL::ComputePipelineState* miss = nullptr;
     MTL::ComputePipelineState* shadowMotion = nullptr;
     MTL::ComputePipelineState* shadowStatic = nullptr;
+    MTL::ComputePipelineState* shadowStaticIft = nullptr;
     MTL::ComputePipelineState* shadowDirectStatic = nullptr;
     MTL::ComputePipelineState* guideMotion = nullptr;
     MTL::ComputePipelineState* guideStatic = nullptr;
@@ -52,6 +53,7 @@ struct WavefrontVariant
     MTL::IntersectionFunctionTable* extendPrimaryTableStatic = nullptr;
     MTL::IntersectionFunctionTable* shadowTableMotion = nullptr;
     MTL::IntersectionFunctionTable* shadowTableStatic = nullptr;
+    MTL::IntersectionFunctionTable* shadowTableStaticIft = nullptr;
     MTL::IntersectionFunctionTable* guideTableMotion = nullptr;
     MTL::IntersectionFunctionTable* guideTableStatic = nullptr;
     MTL::IntersectionFunctionTable* restirShadeDiagnosticTable = nullptr;

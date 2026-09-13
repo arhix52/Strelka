@@ -72,7 +72,10 @@ public:
     NS::Object* makeTriangleGeometry(MetalGeometry* geometry,
                                      const oka::Mesh& mesh,
                                      uint32_t triangleCount,
+                                     MTL::Buffer* primitiveDataBuffer,
                                      size_t primitiveDataOffset,
+                                     size_t primitiveDataStride,
+                                     uint32_t intersectionFunctionOffset,
                                      MTL::Buffer* transformationMatrixBuffer,
                                      size_t transformationMatrixOffset) override
     {
@@ -90,13 +93,14 @@ public:
             geom->setTransformationMatrixBufferOffset(transformationMatrixOffset);
             geom->setTransformationMatrixLayout(MTL::MatrixLayoutColumnMajor);
         }
-        if (primitiveDataOffset != MetalGeometry::kNoPrimitiveDataOffset)
+        if (primitiveDataBuffer && primitiveDataOffset != MetalGeometry::kNoPrimitiveDataOffset)
         {
-            geom->setPrimitiveDataBuffer(geometry->primitiveDataBuffer());
+            geom->setPrimitiveDataBuffer(primitiveDataBuffer);
             geom->setPrimitiveDataBufferOffset(primitiveDataOffset);
-            geom->setPrimitiveDataStride(sizeof(PrimitiveSurfaceData));
-            geom->setPrimitiveDataElementSize(sizeof(PrimitiveSurfaceData));
+            geom->setPrimitiveDataStride(primitiveDataStride);
+            geom->setPrimitiveDataElementSize(primitiveDataStride);
         }
+        geom->setIntersectionFunctionTableOffset(intersectionFunctionOffset);
         return geom;
     }
 

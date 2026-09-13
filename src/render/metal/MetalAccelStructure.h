@@ -272,6 +272,10 @@ public:
     {
         return mCutoutGeometryCount;
     }
+    bool allCutoutGeometrySupportsHardwareAlpha() const
+    {
+        return mCutoutGeometryCount != 0u && mHardwareAlphaGeometryCount == mCutoutGeometryCount;
+    }
     MTL::Buffer* emissiveMeshBuffer() const
     {
         return mEmissiveMeshBuffer;
@@ -387,6 +391,7 @@ private:
     bool mBuildMotionBlas = false;
     uint32_t mOpaqueGeometryCount = 0;
     uint32_t mCutoutGeometryCount = 0;
+    uint32_t mHardwareAlphaGeometryCount = 0;
     uint32_t mPrimitiveSurfaceGeometryCount = 0;
     uint64_t mPrimitiveSurfaceTriangleCount = 0;
     uint32_t mExtendedLimitBlasCount = 0;

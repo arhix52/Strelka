@@ -41,7 +41,9 @@
 
 #define ANALYTIC_INTERSECTION_SPHERE 0
 #define ANALYTIC_INTERSECTION_DISC 1
+#define CUTOUT_INTERSECTION_SHADOW 2
 #define ANALYTIC_INTERSECTION_FUNCTION_COUNT 2
+#define SHADOW_INTERSECTION_FUNCTION_COUNT 3
 
 #ifndef __METAL_VERSION__
 struct packed_float3
@@ -180,9 +182,10 @@ struct PrimitiveSurfaceData
 };
 static_assert(sizeof(PrimitiveSurfaceData) == 16, "Primitive surface data ABI changed");
 
-// UVs needed by an alpha candidate, stored outside the acceleration structure.
-// Each uint preserves the two packed 16-bit fields from Vertex::uv without any
-// additional quantisation.
+// UVs needed by an alpha candidate. The production path keeps them in a dense
+// buffer outside the acceleration structure; an opt-in diagnostic can attach
+// the same record as primitive data. Each uint preserves the two packed 16-bit
+// fields from Vertex::uv without additional quantisation.
 struct PrimitiveAlphaData
 {
     uint32_t uv[3];

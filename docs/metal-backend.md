@@ -53,3 +53,19 @@ on `skinEvent()`, and tracing waits on the build event. This must remain
 GPU-chained: replacing it with submit-and-wait added about 19 ms of CPU blocking
 per BrainStem frame and increased playback frames from roughly 100 ms to
 300–600 ms.
+
+## Experimental payload-free alpha IFT
+
+`STRELKA_ALPHA_IFT=1` enables a static-shadow experiment that resolves cutout
+triangles through a Metal intersection function table. It is deliberately
+limited to static triangle scenes without curves or motion BLASes; unsupported
+variants retain the existing inline/restart walk. Camera and continuation rays
+are unchanged.
+
+The intersection function has no ray payload. It reads compact alpha material,
+geometry, and 12-byte per-triangle UV records from the existing dense buffers.
+Those buffers, the table, and the texture pool must all remain in the Metal 4
+queue residency set. `STRELKA_ALPHA_IFT_EMBEDDED_UV=1` is a diagnostic A/B that
+attaches the same UV record to the BLAS through `primitiveDataBuffer`; it is not
+the preferred layout because it enlarged pine's compacted BLAS and slowed both
+shadow and continuation traversal.

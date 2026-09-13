@@ -392,7 +392,7 @@ static inline void queuePush(constant Uniforms& uniforms,
 // in any scene.
 constant float kShadowTransmittanceCutoff = 0.05f;
 
-// Coverage is callable from the restart walk because Metal 4 cannot run its intersection function.
+// Coverage helpers for the inline-query and restart fallbacks.
 static inline float cutoutOpacityAt(uint primitive_id,
                                     uint geometry_id,
                                     uint geometry_entry_base,
@@ -506,6 +506,100 @@ static inline float2 decodeInterpolatedCutoutUv(uint32_t uv0, uint32_t uv1, uint
     return encoded * 79.998779346f - 10.0f;
 }
 
+static inline uint32_t cutoutIftHash(uint32_t v)
+{
+    v ^= v >> 16u;
+    v *= 0x7feb352du;
+    v ^= v >> 15u;
+    v *= 0x846ca68bu;
+    return v ^ (v >> 16u);
+}
+
+// Payload-free stochastic alpha for static shadow rays. An independent
+// Bernoulli decision at each BLEND candidate has survival probability
+// product(1 - alpha), exactly like the kernel walk's accumulated threshold,
+// without retaining per-ray state in traversal. MASK remains deterministic.
+//
+// geometryEntryBase is the TLAS user ID, so no instance-descriptor load is
+// needed here. The production experiment reads UVs from the existing dense
+// 12-byte buffer: embedding those same bytes in pine's AS inflated its compacted
+// BLAS by 34%, enough to make both extend and shadow slower.
+static inline bool cutoutShadowAccept(float2 barycentricCoord,
+                                      uint32_t primitiveId,
+                                      uint32_t geometryId,
+                                      uint32_t geometryEntryBase,
+                                      float3 origin,
+                                      float3 direction,
+                                      GeometryEntry entry,
+                                      device const PrimitiveAlphaData& primitive,
+                                      device const AlphaMaterialData* alphaMaterials)
+{
+    device const AlphaMaterialData& material = alphaMaterials[entry.materialId];
+    float2 uv = decodeInterpolatedCutoutUv(primitive.uv[0], primitive.uv[1], primitive.uv[2], barycentricCoord);
+    if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
+    {
+        uv = float2(dot(uv, float2(material.uvTransformX)), dot(uv, float2(material.uvTransformY))) +
+             float2(material.uvOffset);
+    }
+    constexpr sampler alphaLinearSampler(mag_filter::linear, min_filter::linear, address::repeat);
+    constexpr sampler alphaNearestSampler(mag_filter::nearest, min_filter::nearest, address::repeat);
+    float opacity = material.baseColorAlpha;
+    if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
+    {
+        // Match the current fast foliage path for BLEND while retaining the
+        // linear lookup required by thresholded MASK materials.
+        opacity *= material.alphaMode == ALPHA_MODE_MASK ? material.baseColorTexture.sample(alphaLinearSampler, uv).a :
+                                                           material.baseColorTexture.sample(alphaNearestSampler, uv).a;
+    }
+    opacity = material.alphaMode == ALPHA_MODE_MASK ? (opacity >= material.alphaCutoff ? 1.0f : 0.0f) : saturate(opacity);
+    uint32_t randomBits = primitiveId * 0x9e3779b9u ^ geometryId * 0x85ebca6bu ^ geometryEntryBase * 0xc2b2ae35u;
+    randomBits ^= as_type<uint32_t>(origin.x) ^ as_type<uint32_t>(origin.y) ^ as_type<uint32_t>(origin.z);
+    randomBits ^= as_type<uint32_t>(direction.x) * 0x27d4eb2du ^ as_type<uint32_t>(direction.y) * 0x165667b1u ^
+                  as_type<uint32_t>(direction.z) * 0xd3a2646cu;
+    const float threshold = float(cutoutIftHash(randomBits) >> 8u) * (1.0f / 16777216.0f);
+    return threshold < opacity;
+}
+
+[[intersection(triangle, triangle_data, instancing)]]
+bool cutoutShadowIntersection(float2 barycentricCoord [[barycentric_coord]],
+                              uint32_t primitiveId [[primitive_id]],
+                              uint32_t geometryId [[geometry_id]],
+                              uint32_t geometryEntryBase [[user_instance_id]],
+                              float3 origin [[origin]],
+                              float3 direction [[direction]],
+                              device const AlphaMaterialData* alphaMaterials [[buffer(0)]],
+                              device const GeometryEntry* geometryEntries [[buffer(1)]],
+                              device const PrimitiveAlphaData* primitiveAlphaData [[buffer(2)]])
+{
+    const GeometryEntry entry = geometryEntries[geometryEntryBase + geometryId];
+    const uint32_t base = entry.flags & GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK;
+    return cutoutShadowAccept(barycentricCoord, primitiveId, geometryId, geometryEntryBase, origin, direction, entry,
+                              primitiveAlphaData[base + primitiveId], alphaMaterials);
+}
+
+// Retained as a controlled experiment. Enable STRELKA_ALPHA_IFT_EMBEDDED_UV=1
+// to reproduce the AS-resident 12-byte path and measure future Metal versions.
+[[intersection(triangle, triangle_data, instancing)]]
+bool cutoutShadowIntersectionEmbedded(float2 barycentricCoord [[barycentric_coord]],
+                                      uint32_t primitiveId [[primitive_id]],
+                                      uint32_t geometryId [[geometry_id]],
+                                      uint32_t geometryEntryBase [[user_instance_id]],
+                                      float3 origin [[origin]],
+                                      float3 direction [[direction]],
+                                      device const void* primitiveData [[primitive_data]],
+                                      device const AlphaMaterialData* alphaMaterials [[buffer(0)]],
+                                      device const GeometryEntry* geometryEntries [[buffer(1)]])
+{
+    if (primitiveData == nullptr)
+    {
+        return true;
+    }
+    const GeometryEntry entry = geometryEntries[geometryEntryBase + geometryId];
+    device const PrimitiveAlphaData& primitive = *(device const PrimitiveAlphaData*)primitiveData;
+    return cutoutShadowAccept(barycentricCoord, primitiveId, geometryId, geometryEntryBase, origin, direction, entry,
+                              primitive, alphaMaterials);
+}
+
 static inline float cutoutOpacityAtCompact(uint primitive_id,
                                            uint geometry_id,
                                            uint geometry_entry_base,
@@ -583,6 +677,7 @@ struct MotionTraversal
     enum
     {
         kInlineQuery = 0,
+        kHardwareAlpha = 0,
         kDirect = 0
     };
     using structure = acceleration_structure<instancing, primitive_motion>;
@@ -625,6 +720,7 @@ struct StaticTraversal
     enum
     {
         kInlineQuery = 1,
+        kHardwareAlpha = 0,
         kDirect = 0
     };
     using volume_isect = isect;
@@ -659,6 +755,36 @@ struct StaticTraversal
     }
 };
 
+// Same static TLAS as StaticTraversal, but non-opaque triangles are resolved
+// by cutoutShadowIntersection in the RT any-hit path rather than surfaced to an
+// inline query in this compute kernel.
+struct StaticAlphaIftTraversal
+{
+    using structure = acceleration_structure<instancing>;
+    using volume_structure = structure;
+    using isect = intersector<triangle_data, instancing>;
+    using volume_isect = isect;
+    using table = intersection_function_table<triangle_data, instancing>;
+    enum
+    {
+        kInlineQuery = 0,
+        kHardwareAlpha = 1,
+        kDirect = 0
+    };
+    static geometry_type geometryTypes()
+    {
+        return geometry_type::triangle;
+    }
+    static isect::result_type trace(thread isect& i, ray r, structure as, uint32_t mask, float, table t)
+    {
+        return i.intersect(r, as, mask, t);
+    }
+    static volume_isect::result_type traceVolume(thread volume_isect& i, ray r, structure as, uint32_t mask, float)
+    {
+        return i.intersect(r, as, mask);
+    }
+};
+
 // Fast path for a scene whose immutable geometry was baked into one world-space
 // primitive AS. Extend does not need a top-level traversal for that case. Area
 // lights are intersected analytically below; volume walks retain their separate
@@ -669,6 +795,7 @@ struct DirectStaticTraversal
     enum
     {
         kInlineQuery = 1,
+        kHardwareAlpha = 0,
         kDirect = 1
     };
     using structure = primitive_acceleration_structure;
@@ -721,6 +848,7 @@ struct CurveMotionTraversal
     enum
     {
         kInlineQuery = 0,
+        kHardwareAlpha = 0,
         kDirect = 0
     };
     using structure = acceleration_structure<instancing, primitive_motion>;
@@ -759,6 +887,7 @@ struct CurveStaticTraversal
     enum
     {
         kInlineQuery = 0,
+        kHardwareAlpha = 0,
         kDirect = 0
     };
     using volume_isect = intersector<triangle_data, instancing>;
@@ -4401,13 +4530,9 @@ static inline void wavefrontShadeImpl(uint gid,
     // high bits of depthAndFlags, which PATH_DEPTH_MASK (0xFF) and the flags at
     // bits 8..11 leave free.
     //
-    // Only when traversal did not already do it. With SPEC_ALPHA the
-    // intersection function tests every candidate and a hit that arrives here
-    // has already been accepted with probability `opacity` -- testing it a
-    // second time makes the effective coverage opacity squared. That reads as
-    // extra noise at low sample counts, which is what the harness first showed,
-    // and only at 8k samples does it resolve into what it is: a blended plane
-    // 27% too transparent.
+    // Extend deliberately forces triangle opacity during traversal, so surface
+    // coverage is resolved exactly once here. The payload-free IFT experiment
+    // applies only to deferred shadow visibility.
     if (si.opacity < 1.0f)
     {
         const uint32_t layer = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
@@ -7049,29 +7174,16 @@ static float3 mediumTransmittance(typename T::volume_structure accelerationStruc
     return exp(-optical);
 }
 
-// Cutout shadow occlusion, computed in the kernel.
+// Cutout shadow occlusion has three deliberately separate implementations:
 //
-// The alpha test used to live in an any-hit intersection function bound through
-// an MTLIntersectionFunctionTable. That is unusable on the Metal 4 queue: every
-// device read an intersection function makes faults, because neither the
-// residency set nor the argument table reaches the traversal's own execution
-// context, and Metal 4 has no useResource to fall back on. Carrying the pointers
-// in on the ray payload does not help either, so it is the execution context and
-// not the binding. It reproduces on a 288-byte buffer in the two-triangle
-// 07_alpha_clip scene, so it is not a matter of scale.
-//
-// What it looked like before it was understood: an in-range load of a page that
-// is not resident wedges the ray tracing unit, and the queue reports whichever
-// command buffer was current as kIOGPUCommandBufferCallbackErrorHang -- a hang
-// with no long dispatch anywhere near it, at six milliseconds of GPU time,
-// landing on a different bounce and a different stage each run.
-//
-// Two implementations, because the tags decide what is available:
-//
-//   * Static traversal uses Metal's inline intersection_query, which walks the
-//     same single traversal the any-hit did and hands each candidate back to the
-//     kernel -- where the tables are the kernel's own bindings. Same cost, same
-//     result, no intersection function.
+//   * The opt-in static IFT path leaves traversal in the RT unit. Its table owns
+//     the compact material/geometry/UV bindings and all reachable allocations
+//     are in the queue-wide Metal 4 residency set. A minimal reproducer proved
+//     both AS primitive_data and external table reads before this path was used
+//     on a production scene. No ray payload is involved.
+//   * The default static path uses Metal's inline intersection_query and hands
+//     each candidate back to this kernel. It remains the safe fallback and the
+//     reference for timing/image A/B.
 //   * Motion traversal cannot: intersection_query rejects the motion tags. It
 //     restarts past each cutout instead, which is what this renderer did before
 //     the any-hit existed. Bounded, because a canopy can stack more leaves than
@@ -7097,7 +7209,7 @@ static inline bool cutoutRouletteDone(thread float& transmittance, float opacity
 // bound, because it answers the whole ray in one traversal.
 constant uint32_t kMaxCutoutCrossings = 16u;
 
-template <typename T, bool Inline>
+template <typename T, bool Inline, bool HardwareAlpha>
 struct CutoutShadowWalk
 {
     static bool run(constant Uniforms& uniforms,
@@ -7168,7 +7280,7 @@ struct CutoutShadowWalk
 };
 
 template <typename T>
-struct CutoutShadowWalk<T, true>
+struct CutoutShadowWalk<T, true, false>
 {
     static bool run(constant Uniforms&,
                     typename T::structure as,
@@ -7227,6 +7339,34 @@ struct CutoutShadowWalk<T, true>
     }
 };
 
+template <typename T>
+struct CutoutShadowWalk<T, false, true>
+{
+    static bool run(constant Uniforms&,
+                    typename T::structure as,
+                    ray shadowRay,
+                    float,
+                    float,
+                    device const Material*,
+                    device const AlphaMaterialData*,
+                    device const PrimitiveAlphaData*,
+                    device const GeometryEntry*,
+                    device const char*,
+                    device const uint32_t*,
+                    typename T::table functionTable,
+                    uint32_t,
+                    bool,
+                    bool,
+                    thread float& transmittance)
+    {
+        transmittance = 1.0f;
+        typename T::isect isect;
+        isect.assume_geometry_type(geometry_type::triangle);
+        isect.accept_any_intersection(true);
+        return T::trace(isect, shadowRay, as, RAY_MASK_SHADOW, 0.0f, functionTable).type == intersection_type::none;
+    }
+};
+
 static bool restirDiagnosticVisible(constant Uniforms& uniforms,
                                     CurveStaticTraversal::structure accelerationStructure,
                                     CurveStaticTraversal::table functionTable,
@@ -7261,7 +7401,7 @@ static bool restirDiagnosticVisible(constant Uniforms& uniforms,
                    .type == intersection_type::none;
     }
     float alphaTransmittance;
-    const bool visible = CutoutShadowWalk<CurveStaticTraversal, false>::run(
+    const bool visible = CutoutShadowWalk<CurveStaticTraversal, false, false>::run(
         uniforms, accelerationStructure, shadowRay, 0.0f, 0.0f, materials, nullptr, nullptr, geometryEntries,
         vertexBuffer, indexBuffer, functionTable, 0u, false, false, alphaTransmittance);
     transmittance = alphaTransmittance;
@@ -7406,12 +7546,10 @@ static void shadowImpl(uint gid,
         return;
     }
 
-    // Cutouts make occlusion a product rather than a predicate, so a plain
-    // any-hit does not answer the question: the nearest hit may be a hole.
-    //
-    // The walk itself is in CutoutShadowWalk -- inline intersection_query where
-    // the tags allow it, a bounded restart otherwise. See the note there for why
-    // this cannot be an any-hit intersection function on Metal 4.
+    // Cutouts make occlusion a product rather than a nearest-hit predicate. The
+    // default paths accumulate against one threshold; the payload-free static
+    // IFT performs an independent Bernoulli decision per candidate, whose
+    // survival expectation is the same product.
     float transmittance;
     // Sample the binary visibility of the entire alpha stack with the random
     // number already carried by every shadow ray. For BLEND foliage this can
@@ -7420,7 +7558,7 @@ static void shadowImpl(uint gid,
     // their resolved opacity is either zero or one.
     const float alphaCutoff = SPEC_STOCHASTIC_ALPHA_VISIBILITY ? traversal.alphaThreshold :
                                                                  traversal.alphaThreshold * kShadowTransmittanceCutoff;
-    if (!CutoutShadowWalk<T, T::kInlineQuery != 0>::run(
+    if (!CutoutShadowWalk<T, T::kInlineQuery != 0, T::kHardwareAlpha != 0>::run(
             uniforms, accelerationStructure, shadowRay, motionTime, alphaCutoff, materials, alphaMaterials,
             primitiveAlphaData, geometryEntries, vertexBuffer, indexBuffer, functionTable, directGeometryBase,
             SPEC_PRIMITIVE_ALPHA_DATA, SPEC_COMPACT_ALPHA_MATERIALS, transmittance))
@@ -7763,6 +7901,7 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
 
 WF_SHADOW_ENTRY(wavefrontShadow, MotionTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStatic, StaticTraversal)
+WF_SHADOW_ENTRY(wavefrontShadowStaticIft, StaticAlphaIftTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowCurve, CurveMotionTraversal)
 WF_SHADOW_ENTRY(wavefrontShadowStaticCurve, CurveStaticTraversal)
 

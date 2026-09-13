@@ -1986,7 +1986,9 @@ void MetalRender::render(Buffer* output)
             featureIn.allAlphaBlend = mMaterials.allAlphaMaterialsBlend();
             featureIn.alphaUvIdentity = mMaterials.allAlphaUvTransformsIdentity();
             featureIn.alphaBaseColorOne = mMaterials.allAlphaBaseColorFactorsOne();
-            featureIn.hasPrimitiveAlphaData = mGeometry.primitiveAlphaDataBuffer() != nullptr;
+            featureIn.hasPrimitiveAlphaData =
+                mGeometry.primitiveAlphaDataBuffer() != nullptr &&
+                (!envFlag("STRELKA_ALPHA_IFT") || mAccel.allCutoutGeometrySupportsHardwareAlpha());
             featureIn.enableMotionBlur = pUniformData->enableMotionBlur;
             featureIn.motionBlasBuilt = mAccel.motionBlasBuilt();
             featureIn.enableCameraMotionBlur = pUniformData->enableCameraMotionBlur;

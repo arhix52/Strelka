@@ -210,7 +210,8 @@ public:
                                                              const char* functionName,
                                                              const char* linkedFunctionName0,
                                                              const char* linkedFunctionName1,
-                                                             MTL::FunctionConstantValues* constants);
+                                                             MTL::FunctionConstantValues* constants,
+                                                             const char* linkedFunctionName2 = nullptr);
 
 private:
     struct FrameContinuation
