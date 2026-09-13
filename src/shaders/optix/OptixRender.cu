@@ -329,9 +329,10 @@ extern "C" __global__ void __raygen__rg()
         }
 
         float3 ray_origin, ray_direction;
+        float2 pixelSample;
 
         const uint2 pixelCoord = make_uint2(launch_index.x, launch_index.y);
-        generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction, prd.pixelSample);
+        generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction, pixelSample);
 
         if (prd.writeAov && params.aov != nullptr)
         {
@@ -345,8 +346,10 @@ extern "C" __global__ void __raygen__rg()
             a.normal = -ray_direction;
             a.roughness = 1.0f;
             a.depth = oka::guides::backgroundDepth(params.denoiseDepthMode);
-            a.motionX = 0.0f;
-            a.motionY = 0.0f;
+            // Temporary home for the jittered camera sample. The first guide
+            // writer consumes it and replaces both fields with actual motion.
+            a.motionX = pixelSample.x;
+            a.motionY = pixelSample.y;
             a.specularHitDistance = 0.0f;
             a.reactive = 1.0f;
             a.pad2 = 0.0f;

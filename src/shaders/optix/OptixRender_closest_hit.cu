@@ -1349,7 +1349,8 @@ static __forceinline__ __device__ void writeSurfaceGuide(const HitGroupData* hit
         {
             previousTriangleWorldPosition(hit_data, prevPosition);
         }
-        const float2 motion = guideScreenMotion(params, make_float4(prevPosition, 1.0f), prd->pixelSample);
+        const float2 motion =
+            guideScreenMotion(params, make_float4(prevPosition, 1.0f), guideCurrentSample(params, pixelIndex));
         params.aov[pixelIndex].depth = guideViewDepth(params, worldPosition);
         params.aov[pixelIndex].motionX = motion.x;
         params.aov[pixelIndex].motionY = motion.y;
@@ -1764,7 +1765,9 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
         a.depth = prd->depth == 0 ? guideViewDepth(params, hitPoint) : params.aov[launchPixelIndex(params)].depth;
         if (prd->depth == 0)
         {
-            const float2 motion = guideScreenMotion(params, make_float4(hitPoint, 1.0f), prd->pixelSample);
+            const uint32_t pixelIndex = launchPixelIndex(params);
+            const float2 motion =
+                guideScreenMotion(params, make_float4(hitPoint, 1.0f), guideCurrentSample(params, pixelIndex));
             a.motionX = motion.x;
             a.motionY = motion.y;
         }
@@ -1908,7 +1911,8 @@ extern "C" __global__ void __miss__ms()
     // previous frame left there and smears the silhouette across the sky.
     if (prd->writeAov && !prd->aovDone && params.aov != nullptr)
     {
-        writeBackgroundGuide(params, launchPixelIndex(params), ray_dir, prd->depth, prd->pixelSample);
+        const uint32_t pixelIndex = launchPixelIndex(params);
+        writeBackgroundGuide(params, pixelIndex, ray_dir, prd->depth, guideCurrentSample(params, pixelIndex));
         prd->aovDone = true;
     }
 

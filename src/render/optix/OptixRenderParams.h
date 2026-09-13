@@ -637,13 +637,6 @@ struct PerRayData
     /// above: the closest hit overloads that one as the path's stop signal, and
     /// unifying them would move the sampler's dimension when a path terminates.
     SamplerState sampler;
-    /// Where in the image this path's camera ray actually went, y down and in
-    /// pixels, jitter included. A motion vector is the difference between this
-    /// and where the same surface point sat last frame; differencing against the
-    /// pixel centre instead leaves the jitter inside every vector, which is a
-    /// subpixel wobble on every pixel of a perfectly still image.
-    float2 pixelSample;
-
     IorStack iorStack;
 
     // --- Participating media ---------------------------------------------
@@ -669,9 +662,9 @@ struct PerRayData
     }
 };
 
-/// The 136-byte size is continuation-stack ABI; adding a field increases
+/// The 124-byte size is continuation-stack ABI; adding a field increases
 /// per-thread local state.
-static_assert(sizeof(PerRayData) == 136, "PerRayData sizes the continuation stack; see docs/open-perf.md");
+static_assert(sizeof(PerRayData) == 124, "PerRayData sizes the continuation stack; see docs/open-perf.md");
 
 /// All three are spelled out because the first two are SBT record offsets that
 /// the hit-group layout in OptixRender.cpp indexes by hand; a value here is not

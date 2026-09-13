@@ -59,6 +59,14 @@ static __forceinline__ __device__ float2 guideScreenMotion(const Params& params,
     return make_float2(m.x, m.y);
 }
 
+/// The raygen parks its jittered pixel position in the guide record until the
+/// primary hit replaces these fields with actual motion. Keeping it there
+/// avoids carrying eight AOV-only bytes in every path's continuation stack.
+static __forceinline__ __device__ float2 guideCurrentSample(const Params& params, const uint32_t pixelIndex)
+{
+    return make_float2(params.aov[pixelIndex].motionX, params.aov[pixelIndex].motionY);
+}
+
 /// The record a ray that reached the environment leaves behind.
 ///
 /// Not only at depth 0: a specular primary hit defers its guides, so if the
