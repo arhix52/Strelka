@@ -1945,7 +1945,7 @@ void MetalRender::render(Buffer* output)
             mIntegrator.ensureBuffers(width, height, pUniformData->sharcUpdateDownscale,
                                       pUniformData->restirDIEnabled != 0u,
                                       pUniformData->restirDIEnabled != 0u && pUniformData->restirBiasCorrection != 0u,
-                                      splitBaseNee, shadowBytesPerPixel);
+                                      splitBaseNee, shadowBytesPerPixel, pUniformData->writeAov != 0u);
             // Output resolution, not render resolution: this is what the display
             // shows and what MetalFX upscales into.
             mPost.ensureDisplayTextures(outWidth, outHeight);

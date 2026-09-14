@@ -154,7 +154,8 @@ public:
                        bool restirEnabled,
                        bool restirBasic,
                        bool splitBaseNee,
-                       size_t shadowBytesPerPixel);
+                       size_t shadowBytesPerPixel,
+                       bool aovEnabled);
     const WavefrontVariant* variantFor(uint32_t features);
 
     // Returns the encoder to keep using: in profiling mode each stage gets its
@@ -366,6 +367,7 @@ private:
     bool mRestirBasicAllocated = false;
     bool mSplitBaseNeeAllocated = false;
     size_t mShadowBytesPerPixel = 0;
+    bool mAovAllocated = false;
     bool mResidencyDirty = true;
 };
 

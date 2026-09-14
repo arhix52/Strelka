@@ -138,6 +138,7 @@ void MetalWavefrontIntegrator::release()
     mSharcUpdateDownscale = 0;
     mSplitBaseNeeAllocated = false;
     mShadowBytesPerPixel = 0;
+    mAovAllocated = false;
     mResidencyDirty = true;
     mReportedIorStats = false;
     mLastSharcActivity = 0;
@@ -2586,13 +2587,14 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
                                              bool restirEnabled,
                                              bool restirBasic,
                                              bool splitBaseNee,
-                                             size_t shadowBytesPerPixel)
+                                             size_t shadowBytesPerPixel,
+                                             bool aovEnabled)
 {
     const uint32_t pixels = width * height;
     sharcUpdateDownscale = std::max(sharcUpdateDownscale, 1u);
     if (pixels == mCapacity && sharcUpdateDownscale == mSharcUpdateDownscale && restirEnabled == mRestirAllocated &&
         restirBasic == mRestirBasicAllocated && splitBaseNee == mSplitBaseNeeAllocated &&
-        shadowBytesPerPixel == mShadowBytesPerPixel && mPathStateBuffer)
+        shadowBytesPerPixel == mShadowBytesPerPixel && aovEnabled == mAovAllocated && mPathStateBuffer)
     {
         return;
     }
@@ -2672,13 +2674,15 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
     mHitBuffer = mDevice->newBuffer(layout.hitBytes, MTL::ResourceStorageModePrivate);
     mIorStackBuffer = mDevice->newBuffer(layout.iorStackBytes, MTL::ResourceStorageModePrivate);
     mRadianceBuffer = mDevice->newBuffer(layout.radianceBytes, MTL::ResourceStorageModePrivate);
-    mGuideRayBuffer = mDevice->newBuffer(layout.guideRayBytes, MTL::ResourceStorageModePrivate);
+    mGuideRayBuffer =
+        mDevice->newBuffer(aovEnabled ? layout.guideRayBytes : sizeof(GuideRay), MTL::ResourceStorageModePrivate);
     mSurfaceGeometryBuffer = mDevice->newBuffer(layout.surfaceGeometryBytes, MTL::ResourceStorageModePrivate);
     if (splitBaseNee)
     {
         mBaseLightConnectionBuffer = mDevice->newBuffer(layout.baseLightConnectionBytes, MTL::ResourceStorageModePrivate);
     }
-    mGuideQueueBuffer = mDevice->newBuffer(layout.guideQueueBytes, MTL::ResourceStorageModePrivate);
+    mGuideQueueBuffer =
+        mDevice->newBuffer(aovEnabled ? layout.guideQueueBytes : sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[0] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
     mPathQueueBuffer[1] = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
     mSssQueueBuffer = mDevice->newBuffer(layout.pathQueueBytes, MTL::ResourceStorageModePrivate);
@@ -2699,7 +2703,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
             mDevice->newBuffer((IOR_STAT_COUNT + SHARC_STAT_COUNT) * sizeof(uint32_t), MTL::ResourceStorageModeShared);
         memset(mIorStatsBuffer->contents(), 0, mIorStatsBuffer->length());
     }
-    mAovBuffer = mDevice->newBuffer(layout.aovBytes, MTL::ResourceStorageModePrivate);
+    mAovBuffer = mDevice->newBuffer(aovEnabled ? layout.aovBytes : sizeof(AovSample), MTL::ResourceStorageModePrivate);
     mHitQueueBuffer =
         mDevice->newBuffer(4u * layout.hitQueueBytes + 4u * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
     mMissQueueBuffer = mDevice->newBuffer(layout.missQueueBytes, MTL::ResourceStorageModePrivate);
@@ -2725,6 +2729,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
     mRestirBasicAllocated = restirBasic;
     mSplitBaseNeeAllocated = splitBaseNee;
     mShadowBytesPerPixel = shadowBytesPerPixel;
+    mAovAllocated = aovEnabled;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height, queueBytes() / (1024.0 * 1024.0));
 }
