@@ -1555,6 +1555,16 @@ static inline device HitRecord* wavefrontHitRecord(device char* records, uint32_
     return (device HitRecord*)(records + size_t(index) * stride);
 }
 
+static inline uint32_t packHitBarycentrics(float2 barycentrics)
+{
+    return pack_float_to_unorm2x16(saturate(barycentrics));
+}
+
+static inline float2 unpackHitBarycentrics(uint32_t barycentrics)
+{
+    return unpack_unorm2x16_to_float(barycentrics);
+}
+
 static inline void bucketPush(constant Uniforms& uniforms,
                               device atomic_uint* counter,
                               device uint32_t* queueOut,
@@ -1668,8 +1678,8 @@ static void enqueueExtendSurfaceResult(constant Uniforms& uniforms,
     rec.geomEntryIndex = geometryEntryIndex;
     rec.instanceIndex = hit.instanceId;
     rec.primitiveId = hit.primitiveId;
-    rec.barycentrics =
-        (hit.type == intersection_type::curve) ? vector_float2(hit.curveParameter, 0.0f) : hit.barycentrics;
+    rec.barycentrics = packHitBarycentrics((hit.type == intersection_type::curve) ? float2(hit.curveParameter, 0.0f) :
+                                                                                    hit.barycentrics);
     rec.distance = hit.distance;
     *wavefrontHitRecord(hits, tid) = rec;
     const uint32_t bucket = forceTail ? WF_SHADE_TAIL : shadeBucket;
@@ -2298,7 +2308,7 @@ static void extendImpl(uint gid,
         mediumRec.geomEntryIndex = mediumHitBit;
         mediumRec.instanceIndex = 0u;
         mediumRec.primitiveId = 0u;
-        mediumRec.barycentrics = vector_float2(0.0f, 0.0f);
+        mediumRec.barycentrics = 0u;
         mediumRec.distance = mediumScatterT;
         *wavefrontHitRecord(hits, tid) = mediumRec;
         hitQueuePush(uniforms, hitQueue, tid, control[WF_CTRL_CAPACITY], 3u);
@@ -4312,7 +4322,7 @@ static inline void wavefrontShadeImpl(uint gid,
     const bool interpolateMotion =
         SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
 
-    const float2 bary = rec.barycentrics;
+    const float2 bary = unpackHitBarycentrics(rec.barycentrics);
     const bool isCurve = SPEC_CURVES && (entry.flags & GEOM_FLAG_CURVE) != 0u;
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
     float2 uv;

@@ -918,9 +918,7 @@ void MetalRender::init()
     static_assert(sizeof(CompactShadowContribution) == 16, "Compact shadow contribution host/Metal ABI changed");
     static_assert(sizeof(PrimitiveAlphaData) == 12, "Primitive alpha data host/Metal ABI changed");
     static_assert(sizeof(AlphaMaterialData) == 48, "Alpha material host/Metal ABI changed");
-    // The hot record stays at 24 bytes despite carrying the TLAS instance: its
-    // 8-byte-aligned barycentrics come first, leaving no internal/tail padding.
-    static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
+    static_assert(sizeof(HitRecord) == 20, "HitRecord size changed");
     static_assert(sizeof(SurfaceGeometryPayload) == 16, "Surface geometry payload size changed");
     static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection payload size changed");
     // 16 rather than 12: the fourth word says whether the geometry is a triangle

@@ -978,16 +978,17 @@ static_assert((PATH_FLAG_IOR_STACK_ACTIVE & (PATH_PASSTHROUGH_MASK | PATH_SHARC_
 // the geometry entry — the same lookup the motion-blur path already performs.
 struct HitRecord
 {
-    // Keep the 8-byte-aligned field first: placing it after the three indices
-    // inserts four bytes of padding and rounds the record from 24 to 32 bytes.
-    vector_float2 barycentrics; // not float2: this header is compiled by the host too
+    // Triangle barycentrics (or curve t in x) as unorm16x2. The 1/65535 step is
+    // below the source normal/UV quantisation and saves four streamed bytes per
+    // hit without reducing any scene index range.
+    uint32_t barycentrics;
     uint32_t geomEntryIndex; // instance userID + intersection.geometry_id
     // Carried because a BLAS may be shared by instances while only the intersection identifies the TLAS instance.
     uint32_t instanceIndex;
     uint32_t primitiveId;
     float distance; // < 0 means the ray escaped
 };
-static_assert(sizeof(HitRecord) == 24, "HitRecord must stay a compact wavefront record");
+static_assert(sizeof(HitRecord) == 20, "HitRecord must stay a compact wavefront record");
 
 #define RESTIR_SURFACE_VALID (1u << 31)
 #define RESTIR_SURFACE_MATERIAL_MASK 0x7fffffffu
