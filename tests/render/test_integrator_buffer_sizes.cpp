@@ -189,13 +189,17 @@ TEST_CASE("Metal 4 triangle traversal uses one full-frame batch")
     CHECK(wavefrontFullFrameTraversalBatchThreads(0u) == 1u);
 }
 
-TEST_CASE("small Metal 4 curve queues use one tested dispatch")
+TEST_CASE("Metal 4 curve extend uses one full-frame dispatch")
 {
     constexpr uint32_t smallPixels = 640u * 360u;
     CHECK(wavefrontCurveTraversalBatchThreads(smallPixels) == smallPixels);
     CHECK(wavefrontTraversalBatchCount(smallPixels, wavefrontCurveTraversalBatchThreads(smallPixels)) == 1u);
 
     constexpr uint32_t largePixels = 1280u * 720u;
-    CHECK(wavefrontCurveTraversalBatchThreads(largePixels) == kWavefrontCurveTraversalBatchThreads);
-    CHECK(wavefrontTraversalBatchCount(largePixels, wavefrontCurveTraversalBatchThreads(largePixels)) == 8u);
+    CHECK(wavefrontCurveTraversalBatchThreads(largePixels) == largePixels);
+    CHECK(wavefrontTraversalBatchCount(largePixels, wavefrontCurveTraversalBatchThreads(largePixels)) == 1u);
+
+    constexpr uint32_t fourKPixels = 3840u * 2160u;
+    CHECK(wavefrontCurveTraversalBatchThreads(fourKPixels) == fourKPixels);
+    CHECK(wavefrontTraversalBatchCount(fourKPixels, wavefrontCurveTraversalBatchThreads(fourKPixels)) == 1u);
 }

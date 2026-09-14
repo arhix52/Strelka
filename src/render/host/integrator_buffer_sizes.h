@@ -73,17 +73,10 @@ inline constexpr uint32_t kWavefrontTriangleTraversalBatchThreads = 512 * 1024;
 // the indirect-argument buffer large enough costs less than 7 KB at 1080p and
 // lets a reproducer narrow a hang without reallocating the wavefront queues.
 inline constexpr uint32_t kWavefrontMinDiagnosticTraversalBatchThreads = 4 * 1024;
-// Curve traversal needs a lower non-preemptible hardware-dispatch ceiling than
-// triangle traversal. 256K curve dispatches repeatedly hung on kids_room's
-// 7.5M-segment AS; 128K dispatches completed 280 consecutive full frames. Four
-// dispatches per scheduler group reduce command-buffer fragmentation without
-// changing that tested hardware-dispatch ceiling.
+// Curve shadow traversal retains the conservative batch size used while the
+// old watchdog failure was diagnosed. Closest-hit extend now uses a full-frame
+// dispatch; shadow is a distinct any-hit workload and keeps its own policy.
 inline constexpr uint32_t kWavefrontCurveTraversalBatchThreads = 128 * 1024;
-// A 640x360 queue (230,400 rays) is faster as one dispatch and completed more
-// than a thousand consecutive kids_room sample-frames after the curve watchdog
-// fixes. Stop short of the old failing 256K workload; larger images retain the
-// conservative 128K ceiling.
-inline constexpr uint32_t kWavefrontCurveSingleDispatchMaxThreads = 240 * 1024;
 inline constexpr uint32_t kWavefrontCurveTraversalBatchesPerGroup = 4;
 // A Metal 4 command buffer may contain this many traversal dispatches before it
 // is retired. Four batches cap one curve-extend scheduler workload at roughly a
@@ -104,8 +97,7 @@ inline constexpr uint32_t wavefrontFullFrameTraversalBatchThreads(uint32_t pixel
 
 inline constexpr uint32_t wavefrontCurveTraversalBatchThreads(uint32_t pixels)
 {
-    return pixels <= kWavefrontCurveSingleDispatchMaxThreads ? wavefrontFullFrameTraversalBatchThreads(pixels) :
-                                                               kWavefrontCurveTraversalBatchThreads;
+    return wavefrontFullFrameTraversalBatchThreads(pixels);
 }
 // Metal 4 fault diagnosis writes the stage it is about to enter here. Keep it
 // outside the Metal 3 control-buffer snapshot at the start of stageStats.

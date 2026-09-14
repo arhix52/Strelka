@@ -2133,8 +2133,10 @@ void MetalRender::render(Buffer* output)
                 static bool loggedCurveBatchPolicy = false;
                 if (!loggedCurveBatchPolicy)
                 {
-                    STRELKA_INFO("Curve traversal batches: {} threads/dispatch, {} dispatches/group",
-                                 traversalBatchThreads, traversalBatchesPerGroup);
+                    const uint32_t traversalBatchCount =
+                        metal::wavefrontTraversalBatchCount(frameReq.pathCount, traversalBatchThreads);
+                    STRELKA_INFO("Curve traversal: {} threads/dispatch, {} dispatch(es) total, up to {} per group",
+                                 traversalBatchThreads, traversalBatchCount, traversalBatchesPerGroup);
                     loggedCurveBatchPolicy = true;
                 }
             }
