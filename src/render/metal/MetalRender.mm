@@ -918,7 +918,7 @@ void MetalRender::init()
     // The hot record stays at 24 bytes despite carrying the TLAS instance: its
     // 8-byte-aligned barycentrics come first, leaving no internal/tail padding.
     static_assert(sizeof(HitRecord) == 24, "HitRecord size changed");
-    static_assert(sizeof(SurfaceGeometryPayload) == 24, "Surface geometry payload size changed");
+    static_assert(sizeof(SurfaceGeometryPayload) == 16, "Surface geometry payload size changed");
     static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection payload size changed");
     // 16 rather than 12: the fourth word says whether the geometry is a triangle
     // mesh or a curve set, and for a curve set how many segments a strand has.

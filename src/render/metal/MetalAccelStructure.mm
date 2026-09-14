@@ -474,6 +474,10 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
         {
             entry.flags |= GEOM_FLAG_SURFACE_UV;
         }
+        if (meshData && meshData->mHasVertexColor)
+        {
+            entry.flags |= GEOM_FLAG_VERTEX_COLOR;
+        }
         if (usePrimitiveAlphaData)
         {
             entry.flags |= static_cast<uint32_t>(primitiveAlphaDataIndex);

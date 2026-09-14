@@ -999,17 +999,48 @@ static inline uint32_t packSurfaceNormal(float3 normal)
     return pack_float_to_snorm2x16(oct);
 }
 
-static inline uint32_t packSurfaceUv(float2 uv)
+static inline uint32_t packSurfaceTangent(float3 tangent)
 {
-    return pack_float_to_unorm2x16(fract(uv));
+    const uint32_t packed16 = packSurfaceNormal(tangent);
+    constexpr uint32_t mask = 0x7fffu;
+    return ((packed16 >> 1u) & mask) | (((packed16 >> 17u) & mask) << 15u);
 }
 
-static inline uint32_t packSurfaceColor(float3 color, float tangentSign)
+static inline uint32_t packSurfaceUv(float2 uv, uint32_t lod)
 {
-    // The alpha byte is not shaded. 0x80 marks a valid compact record and
-    // 0x40 carries glTF TANGENT.w, leaving RGB exactly RGBA8-unorm encoded.
-    const uint32_t flags = 0x80u | (tangentSign < 0.0f ? 0x40u : 0u);
-    return pack_float_to_unorm4x8(float4(color, float(flags) * (1.0f / 255.0f)));
+    const uint32_t packed16 = pack_float_to_unorm2x16(fract(uv));
+    constexpr uint32_t mask = 0x1fffu;
+    const uint32_t packed13 = ((packed16 >> 3u) & mask) | (((packed16 >> 19u) & mask) << 13u);
+    return packed13 | (lod << 26u);
+}
+
+static inline uint32_t packSurfaceLod(float lodBase)
+{
+    // Code zero is the no-LOD sentinel. A non-negative base always reaches the
+    // texture's last mip after texLod adds log2(texture size), while -15.5 is
+    // already below the first mip for every Metal texture size we support.
+    if (!(lodBase > -1e29f))
+    {
+        return 0u;
+    }
+    const uint32_t quantized = uint32_t(round((clamp(lodBase, -15.5f, 0.0f) + 15.5f) * 4.0f));
+    return quantized + 1u;
+}
+
+static inline void packSurfaceGeometry(float3 shadingNormal,
+                                       float3 geometryNormal,
+                                       float3 tangent,
+                                       float2 uv,
+                                       float tangentSign,
+                                       float lodBase,
+                                       thread SurfaceGeometryPayload& payload)
+{
+    const uint32_t lod = packSurfaceLod(lodBase);
+    payload.shadingNormal = packSurfaceNormal(shadingNormal);
+    payload.geometryNormal = packSurfaceNormal(geometryNormal);
+    payload.tangentAndFlags = packSurfaceTangent(tangent) | SURFACE_GEOMETRY_VALID |
+                              (tangentSign < 0.0f ? SURFACE_GEOMETRY_TANGENT_NEGATIVE : 0u);
+    payload.uvAndLod = packSurfaceUv(uv, lod);
 }
 
 static inline float3 unpackSurfaceNormal(uint32_t packed)
@@ -1024,14 +1055,33 @@ static inline float3 unpackSurfaceNormal(uint32_t packed)
     return normalize(normal);
 }
 
-static inline float2 unpackSurfaceUv(uint32_t packed)
+static inline float3 unpackSurfaceTangent(uint32_t tangentAndFlags)
 {
-    return unpack_unorm2x16_to_float(packed);
+    const uint32_t packed = tangentAndFlags & 0x3fffffffu;
+    const uint32_t expanded = ((packed & 0x7fffu) << 1u) | (((packed >> 15u) & 0x7fffu) << 17u);
+    return unpackSurfaceNormal(expanded);
 }
 
-static inline float unpackSurfaceTangentSign(uint32_t packedColor)
+static inline float2 unpackSurfaceUv(uint32_t uvAndLod)
 {
-    return (packedColor & SURFACE_GEOMETRY_TANGENT_NEGATIVE) != 0u ? -1.0f : 1.0f;
+    const uint32_t packed = uvAndLod & 0x03ffffffu;
+    const uint32_t expanded = ((packed & 0x1fffu) << 3u) | (((packed >> 13u) & 0x1fffu) << 19u);
+    return unpack_unorm2x16_to_float(expanded);
+}
+
+static inline float unpackSurfaceTangentSign(uint32_t tangentAndFlags)
+{
+    return (tangentAndFlags & SURFACE_GEOMETRY_TANGENT_NEGATIVE) != 0u ? -1.0f : 1.0f;
+}
+
+static inline float unpackSurfaceLod(uint32_t uvAndLod)
+{
+    const uint32_t code = uvAndLod >> 26u;
+    if (code == 0u)
+    {
+        return -1e30f;
+    }
+    return float(code - 1u) * 0.25f - 15.5f;
 }
 
 template <typename R>
@@ -1783,7 +1833,7 @@ static void sssWalkImpl(uint gid,
             // This surface was produced by the fused SSS traversal, not by the
             // regular extend path that prepares compact geometry. Force shade
             // onto its exact vertex-buffer fallback for this uncommon exit.
-            uniforms.surfaceGeometry[tid].color = 0u;
+            uniforms.surfaceGeometry[tid].tangentAndFlags = 0u;
             uint32_t geometryEntryIndex = 0u;
             if (hit.type != intersection_type::none)
             {
@@ -1879,9 +1929,16 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
     {
         return false;
     }
+    if ((entry.flags & GEOM_FLAG_VERTEX_COLOR) != 0u)
+    {
+        // Preserve arbitrary COLOR_0 exactly on its rare path instead of
+        // charging every surface record another four bytes.
+        uniforms.surfaceGeometry[tid].tangentAndFlags = 0u;
+        return false;
+    }
 
     SurfaceGeometryPayload payload;
-    payload.lodBase = -1e30f;
+    float lodBase = -1e30f;
     const bool interpolateMotion =
         SPEC_MOTION_BLUR && uniforms.enableMotionBlur && motionTime < 1.0f && prevVertexBuffer && indexBuffer;
     float3 objectNormal, objectTangent, vertexColor, objectGeomNormal;
@@ -1957,7 +2014,7 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
         // Tail will reconstruct this uncommon hit from the vertex buffer. It
         // only needs the validity bit cleared; the remaining stale words are
         // never observed.
-        uniforms.surfaceGeometry[tid].color = 0u;
+        uniforms.surfaceGeometry[tid].tangentAndFlags = 0u;
         return false;
     }
     const float3 geometryNormal = normalTransform.orientation * (worldGeomNormal / worldArea2);
@@ -1979,14 +2036,10 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
     if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && coneWidthHere > 0.0f)
     {
         const float ndotd = max(abs(dot(geometryNormal, rayDirection)), 1e-4f);
-        payload.lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+        lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
     }
 
-    payload.shadingNormal = packSurfaceNormal(shadingNormal);
-    payload.geometryNormal = packSurfaceNormal(geometryNormal);
-    payload.tangent = packSurfaceNormal(tangent);
-    payload.uv = packSurfaceUv(uv);
-    payload.color = packSurfaceColor(vertexColor, tangentSign);
+    packSurfaceGeometry(shadingNormal, geometryNormal, tangent, uv, tangentSign, lodBase, payload);
     uniforms.surfaceGeometry[tid] = payload;
     return true;
 }
@@ -3678,7 +3731,7 @@ kernel void wavefrontConnectBase(uint gid [[thread_position_in_grid]],
     }
     const uint32_t tid = queue[bucketedHitIndex<WF_SHADE_BASE>(gid, queue, control)];
     const SurfaceGeometryPayload geometry = uniforms.surfaceGeometry[tid];
-    if ((geometry.color & SURFACE_GEOMETRY_VALID) == 0u)
+    if ((geometry.tangentAndFlags & SURFACE_GEOMETRY_VALID) == 0u)
     {
         const LightConnection empty = makeEmptyConnection();
         uniforms.baseLightConnections[tid] = packBaseLightConnection(empty);
@@ -4295,16 +4348,16 @@ static inline void wavefrontShadeImpl(uint gid,
         // to Tail. Consequently Base/Layer/Translucent can compile without the
         // vertex-fetch fallback and its peak live range; Tail retains the exact
         // path for fused SSS exits, curves and degenerate transforms.
-        if (!kHandlesSpecialHits || (preparedGeometry.color & SURFACE_GEOMETRY_VALID) != 0u)
+        if (!kHandlesSpecialHits || (preparedGeometry.tangentAndFlags & SURFACE_GEOMETRY_VALID) != 0u)
         {
             shadingNormal = unpackSurfaceNormal(preparedGeometry.shadingNormal);
             shadingGeomNormal = unpackSurfaceNormal(preparedGeometry.geometryNormal);
-            shadingTangent = orthonormalizeTangent(shadingNormal, unpackSurfaceNormal(preparedGeometry.tangent));
-            tangentSign = unpackSurfaceTangentSign(preparedGeometry.color);
-            uv = unpackSurfaceUv(preparedGeometry.uv);
+            shadingTangent = orthonormalizeTangent(shadingNormal, unpackSurfaceTangent(preparedGeometry.tangentAndFlags));
+            tangentSign = unpackSurfaceTangentSign(preparedGeometry.tangentAndFlags);
+            uv = unpackSurfaceUv(preparedGeometry.uvAndLod);
             uvPretransformed = (entry.flags & GEOM_FLAG_SURFACE_UV) != 0u;
-            vertexColor = unpackVertexColor(preparedGeometry.color);
-            lodBase = preparedGeometry.lodBase;
+            vertexColor = float3(1.0f);
+            lodBase = unpackSurfaceLod(preparedGeometry.uvAndLod);
         }
         else
         {
