@@ -52,11 +52,22 @@ struct Vertex
     float pad1;
 };
 
+// Exact packed UVs for one cutout triangle. Any-hit reads one contiguous record
+// instead of following the index buffer to three full vertex records.
+struct OptixPrimitiveAlphaData
+{
+    uint32_t uv0;
+    uint32_t uv1;
+    uint32_t uv2;
+};
+static_assert(sizeof(OptixPrimitiveAlphaData) == 12, "OptiX primitive alpha ABI changed");
+
 struct SceneData
 {
     Vertex* vb;
     Vertex* vb_prev;
     uint32_t* ib;
+    const OptixPrimitiveAlphaData* primitiveAlphaData;
     UniformLight* lights;
     uint32_t numLights;
     const EmissiveMeshLight* emissiveMeshes;
@@ -274,6 +285,13 @@ struct Params
     /// Whether any material is MASK or BLEND. Gates the stochastic coverage test
     /// -- and with it an opacity texture fetch -- on every shaded vertex.
     bool hasCutout;
+    /// Whether every triangle that can enter alpha any-hit has a compact UV
+    /// record. Bound so the fallback index/vertex fetches disappear entirely.
+    bool hasPrimitiveAlphaData;
+    /// Whether `openpbrParams` is non-null, as a bound value rather than a
+    /// pointer test: a runtime null check keeps the entire Adobe lobe stack, its
+    /// 272-byte parameter block and its 720-byte prepared BSDF live in a scene
+    /// that has no OpenPBR material.
     bool hasOpenPBR;
     bool openpbrSheenAndCoat;
     bool openpbrDispersion;
@@ -452,7 +470,7 @@ static constexpr int MAX_MATERIAL_TEXTURES = 6;
 struct HitGroupData
 {
     int32_t indexOffset;
-    int32_t indexCount;
+    uint32_t alphaPrimitiveOffset;
     int32_t vertexOffset;
     int32_t lightId;     // only for lights. -1 for others
     const uint32_t* lightIndices;
@@ -462,3 +480,4 @@ struct HitGroupData
     /// modulo this is where along the strand a hit landed, for no extra memory.
     uint32_t curveSegmentsPerStrand;
 };
+static_assert(sizeof(HitGroupData) == 32, "OptiX hit-group data must not grow the per-instance SBT");

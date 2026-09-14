@@ -279,14 +279,25 @@ static __forceinline__ __device__ float hitOpacity(const HitGroupData* hit_data,
 {
     const OptixAlphaMaterialData& material = params.alphaMaterials[matId];
     const unsigned int primitiveId = optixGetPrimitiveIndex();
-    const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
-    const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
-    const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
-    const uint32_t baseVbOffset = hit_data->vertexOffset;
-    const float2 sourceUv = interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
-                                              unpackUV(params.scene.vb[baseVbOffset + i1].uv),
-                                              unpackUV(params.scene.vb[baseVbOffset + i2].uv),
-                                              optixGetTriangleBarycentrics());
+    float2 sourceUv;
+    if (params.hasPrimitiveAlphaData)
+    {
+        const OptixPrimitiveAlphaData& primitive =
+            params.scene.primitiveAlphaData[hit_data->alphaPrimitiveOffset + primitiveId];
+        sourceUv = interpolateAttrib(unpackUV(primitive.uv0), unpackUV(primitive.uv1), unpackUV(primitive.uv2),
+                                     optixGetTriangleBarycentrics());
+    }
+    else
+    {
+        const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
+        const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
+        const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
+        const uint32_t baseVbOffset = hit_data->vertexOffset;
+        sourceUv = interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
+                                     unpackUV(params.scene.vb[baseVbOffset + i1].uv),
+                                     unpackUV(params.scene.vb[baseVbOffset + i2].uv),
+                                     optixGetTriangleBarycentrics());
+    }
     const float2 uv = make_float2(sourceUv.x * material.uvTransformX.x +
                                       sourceUv.y * material.uvTransformY.x + material.uvOffset.x,
                                   sourceUv.x * material.uvTransformX.y +

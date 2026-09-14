@@ -169,6 +169,7 @@ private:
         /// Scene contents, see Params for what each one gates.
         bool hasCurves = false;
         bool hasCutout = false;
+        bool hasPrimitiveAlphaData = false;
         bool hasOpenPBR = false;
         bool openpbrSheenAndCoat = false;
         bool openpbrDispersion = false;
@@ -282,6 +283,8 @@ private:
     const int NUM_MOTION_KEYS = 2;
     std::unique_ptr<OptixBuffer> mVertexSkinDataBuffer;
     std::unique_ptr<OptixBuffer> mIndexBuffer;
+    std::unique_ptr<OptixBuffer> mPrimitiveAlphaBuffer;
+    std::vector<uint32_t> mPrimitiveAlphaOffsets;
     std::unique_ptr<OptixBuffer> mLightBuffer;
     /// The analytic lights as custom primitives, so hardware traversal finds
     /// them instead of every ray walking the light table. One structure per
@@ -336,6 +339,7 @@ private:
     void createPrevBuffers();
     void createVertexSkinDataBuffer();
     void createIndexBuffer();
+    void createPrimitiveAlphaBuffer();
 
     // curve utils
     void createPointsBuffer();

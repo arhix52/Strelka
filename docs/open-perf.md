@@ -107,3 +107,43 @@ optimisation measured on one limiter transfers to the other.
 The iso_bathroom light sidecar names an unavailable absolute-path environment
 map. Existing iso_bathroom numbers therefore cover its analytic lights without
 the intended dome light.
+
+## 2026-09-14: compact OptiX alpha primitive inputs
+
+Target profile: RTX 4090, OptiX 9.1, CUDA 13.4, 1920x1080, depth 8, Sobol,
+one sample per `optixLaunch`. Nsight Systems medians are over 24 launches;
+Nsight Compute profiles launch 9 after eight warmups with line information.
+
+Pine's alpha any-hit used three index reads and three random 32-byte vertex
+records to recover 12 bytes of packed UV. A dense, exact 12-byte UV record for
+each cutout triangle removes both indirections. Only 1,229,459 of the scene's
+roughly 50 million triangles need it: 14.8 MB and 8 ms of scene-build time.
+
+| pine | disabled | compact | change |
+|---|---:|---:|---:|
+| Nsight Systems median | 16.503 ms | 16.267 ms | -1.43% |
+| NCU duration | 17.277 ms | 17.080 ms | -1.14% |
+| DRAM read | 8.295 GB | 8.170 GB | -1.50% |
+| DRAM write | 2.132 GB | 2.101 GB | -1.46% |
+| instructions | 1.813 G | 1.792 G | -1.18% |
+| long-scoreboard cycles / issue | 26.75 | 26.32 | -1.60% |
+| local load / store sectors | 129.1 M / 94.7 M | 129.3 M / 94.8 M | unchanged |
+
+The 24-spp output is bit-identical. In PC sampling, radiance any-hit falls from
+12.4% to 10.9% and occlusion any-hit from 3.6% to 3.0%; the old random vertex
+fetch leaves the top source lines. `STRELKA_NO_PRIMITIVE_ALPHA_DATA=1` is the
+same control switch on Metal and OptiX.
+
+The launch remains latency-bound: 61% DRAM versus 8% SM throughput, 91.6% of
+scheduler cycles with no eligible warp, 255 registers, and unchanged local
+traffic. The remaining alpha texture fetch is 4.1% of attributed source samples
+and 100% long-scoreboard. OMM removes 32--38% of the any-hit PC samples and
+about 3.4% of launch time, but its current 67-second preprocessing cost makes
+serialization/caching that build, rather than enabling it by default, the next
+OMM problem.
+
+A broad CUDA port of Metal's finite-input assumptions was rejected: it removed
+9.3% of instructions but increased DRAM writes 37.7%, local traffic about 32%,
+long-scoreboard 26.75 -> 39.14, and frame time 4.8%. Narrow bound-value probes
+for all-BLEND and unit base alpha were also neutral or slower; do not combine
+scene facts merely because they are true.

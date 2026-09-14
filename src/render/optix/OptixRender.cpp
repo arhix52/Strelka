@@ -1955,6 +1955,7 @@ void OptiXRender::createModule()
         STRELKA_BOUND_VALUE(hasSubsurface),
         STRELKA_BOUND_VALUE(hasCurves),
         STRELKA_BOUND_VALUE(hasCutout),
+        STRELKA_BOUND_VALUE(hasPrimitiveAlphaData),
         STRELKA_BOUND_VALUE(hasOpenPBR),
         STRELKA_BOUND_VALUE(openpbrSheenAndCoat),
         STRELKA_BOUND_VALUE(openpbrDispersion),
@@ -2245,6 +2246,7 @@ OptiXRender::PipelineSpec OptiXRender::specFor(const Params& params) const
     spec.hasSubsurface = params.hasSubsurface;
     spec.hasCurves = params.hasCurves;
     spec.hasCutout = params.hasCutout;
+    spec.hasPrimitiveAlphaData = params.hasPrimitiveAlphaData;
     spec.hasOpenPBR = params.hasOpenPBR;
     spec.openpbrSheenAndCoat = params.openpbrSheenAndCoat;
     spec.openpbrDispersion = params.openpbrDispersion;
@@ -2506,9 +2508,11 @@ void OptiXRender::createSbt()
             if (instance.type == oka::Instance::Type::eMesh)
             {
                 const oka::Mesh& mesh = meshes[instance.mMeshId];
-                radiance_hit.data.indexCount = static_cast<int32_t>(mesh.mCount);
                 radiance_hit.data.indexOffset = static_cast<int32_t>(mesh.mIndex);
                 radiance_hit.data.vertexOffset = static_cast<int32_t>(mesh.mVbOffset);
+                radiance_hit.data.alphaPrimitiveOffset =
+                    instance.mMeshId < mPrimitiveAlphaOffsets.size() ? mPrimitiveAlphaOffsets[instance.mMeshId] :
+                                                                      UINT32_MAX;
             }
             else if (instance.type == oka::Instance::Type::eCurve)
             {
@@ -3969,6 +3973,7 @@ bool OptiXRender::memoryReport(MemoryReport& report) const
     add("Vertices", bufBytes(mVertexBuffer));
     add("Vertices (previous)", bufBytes(mPrevVertexBuffer));
     add("Indices", bufBytes(mIndexBuffer));
+    add("Primitive alpha UVs", bufBytes(mPrimitiveAlphaBuffer));
     add("Curves", bufBytes(mPointsBuffer) + bufBytes(mWidthsBuffer) + bufBytes(mSegmentIndicesBuffer));
     add("Emissive mesh sampling", bufBytes(mEmissiveMeshBuffer) + bufBytes(mEmissiveTriangleBuffer) +
                                       bufBytes(mEmissiveInstanceTransformBuffer) +
@@ -4549,6 +4554,71 @@ void OptiXRender::createVertexSkinDataBuffer()
 void OptiXRender::createIndexBuffer()
 {
     createOrUpdateBuffer(mIndexBuffer, mScene->getIndices());
+    if (!mMaterials.empty())
+    {
+        createPrimitiveAlphaBuffer();
+    }
+}
+
+void OptiXRender::createPrimitiveAlphaBuffer()
+{
+    const auto& meshes = mScene->getMeshes();
+    const auto& instances = mScene->getInstances();
+    const auto& vertices = mScene->getVertices();
+    const auto& indices = mScene->getIndices();
+    std::vector<uint8_t> enabled(meshes.size(), 0u);
+    for (const oka::Instance& instance : instances)
+    {
+        const uint32_t materialId = instance.mMaterialId == kInvalidIndex ? 0u : instance.mMaterialId;
+        if (instance.type == oka::Instance::Type::eMesh && instance.mMeshId < meshes.size() &&
+            materialId < mMaterials.size() && mMaterials[materialId].params.alpha_mode != ALPHA_MODE_OPAQUE)
+        {
+            enabled[instance.mMeshId] = 1u;
+        }
+    }
+
+    size_t recordCount = 0;
+    for (size_t meshId = 0; meshId < meshes.size(); ++meshId)
+    {
+        recordCount += enabled[meshId] ? meshes[meshId].mCount / 3u : 0u;
+    }
+    if (envFlag("STRELKA_NO_PRIMITIVE_ALPHA_DATA"))
+    {
+        recordCount = 0u;
+    }
+    mPrimitiveAlphaOffsets.assign(meshes.size(), UINT32_MAX);
+    if (recordCount == 0u || recordCount > UINT32_MAX)
+    {
+        mPrimitiveAlphaBuffer.reset();
+        mState.params.scene.primitiveAlphaData = nullptr;
+        mState.params.hasPrimitiveAlphaData = false;
+        return;
+    }
+
+    std::vector<OptixPrimitiveAlphaData> records;
+    records.reserve(recordCount);
+    for (size_t meshId = 0; meshId < meshes.size(); ++meshId)
+    {
+        if (!enabled[meshId])
+        {
+            continue;
+        }
+        const oka::Mesh& mesh = meshes[meshId];
+        mPrimitiveAlphaOffsets[meshId] = static_cast<uint32_t>(records.size());
+        for (uint32_t i = 0; i < mesh.mCount; i += 3u)
+        {
+            const size_t index = static_cast<size_t>(mesh.mIndex) + i;
+            records.push_back({vertices[static_cast<size_t>(mesh.mVbOffset) + indices[index + 0u]].uv,
+                               vertices[static_cast<size_t>(mesh.mVbOffset) + indices[index + 1u]].uv,
+                               vertices[static_cast<size_t>(mesh.mVbOffset) + indices[index + 2u]].uv});
+        }
+    }
+    createOrUpdateBuffer(mPrimitiveAlphaBuffer, records);
+    mState.params.scene.primitiveAlphaData =
+        optix::devicePtr<const OptixPrimitiveAlphaData>(mPrimitiveAlphaBuffer->getPtr());
+    mState.params.hasPrimitiveAlphaData = true;
+    STRELKA_INFO("OptiX primitive alpha UVs: {} triangles ({:.1f} MB)", records.size(),
+                 records.size() * sizeof(OptixPrimitiveAlphaData) / 1e6);
 }
 
 void OptiXRender::createAnalyticLightAccel()
@@ -5234,6 +5304,8 @@ void OptiXRender::publishMaterialParams()
     mState.params.materials = optix::devicePtr<MaterialParams>(mMaterialParamsBuffer->getPtr());
     mState.params.alphaMaterials = optix::devicePtr<OptixAlphaMaterialData>(mAlphaMaterialParamsBuffer->getPtr());
     mState.params.materialTextures = optix::devicePtr<cudaTextureObject_t>(mTexturesDataBuffer->getPtr());
+
+    createPrimitiveAlphaBuffer();
 
     publishOpenPBRParams();
 
