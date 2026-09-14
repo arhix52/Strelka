@@ -22,6 +22,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -1903,6 +1904,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         return false;
     }
 
+    const auto loadStarted = std::chrono::steady_clock::now();
     scene.setSourcePath(modelPath);
 
     using namespace std;
@@ -1971,6 +1973,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         STRELKA_ERROR("Unable to load file: {}{}", modelPath, err.empty() ? "" : " — " + err);
         return res;
     }
+    const auto gltfDecoded = std::chrono::steady_clock::now();
 
     int sceneId = model.defaultScene < 0 ? 0 : model.defaultScene;
     if (model.scenes.size() > 1)
@@ -2133,6 +2136,11 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
                  scene.getVertices().size(), scene.getVertices().size() * sizeof(oka::Scene::Vertex) / 1e9,
                  scene.getIndices().size(), scene.getIndices().size() * sizeof(uint32_t) / 1e9, scene.mMeshes.size(),
                  scene.getInstances().size());
+    const auto loadFinished = std::chrono::steady_clock::now();
+    using Milliseconds = std::chrono::duration<double, std::milli>;
+    STRELKA_INFO("Scene host load: glTF decode {:.0f} ms, conversion/sidecars {:.0f} ms, total {:.0f} ms",
+                 Milliseconds(gltfDecoded - loadStarted).count(), Milliseconds(loadFinished - gltfDecoded).count(),
+                 Milliseconds(loadFinished - loadStarted).count());
 
     return res;
 }

@@ -1278,6 +1278,7 @@ void MetalRender::render(Buffer* output)
     NS::AutoreleasePool* pPool = NS::AutoreleasePool::alloc()->init();
 
     SharedContext& ctx = getSharedContext();
+    bool tracingBuildPreview = false;
 
     if (mScenePrep.isBuilding())
     {
@@ -1295,7 +1296,15 @@ void MetalRender::render(Buffer* output)
         const double nowMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const double intervalMs = getSettings()->getAs<float>("render/stream/publishIntervalMs");
-        if (!canTracePartial(readiness) || !mPublishClock.shouldPublish(nowMs, intervalMs, complete))
+        // One early preview is useful feedback; subsequent half-built snapshots
+        // are actively harmful on scenes with curves or cutouts. Each snapshot
+        // changes the function-constant key as materials, primitive alpha data
+        // and emissive geometry arrive, so tracing it can synchronously compile
+        // a linked traversal pipeline which is obsolete one build slice later.
+        // Keep advancing the build, then publish the completed scene directly.
+        const bool redundantIntermediateFrame = !complete && mReportedFirstPartialFrame;
+        if (redundantIntermediateFrame || !canTracePartial(readiness) ||
+            !mPublishClock.shouldPublish(nowMs, intervalMs, complete))
         {
             // Nothing to trace yet, or nothing new since the last frame. The busy
             // flag has to come off here: it is set by triggerRenderIfIdle before
@@ -1336,6 +1345,7 @@ void MetalRender::render(Buffer* output)
             STRELKA_INFO("First frame shown {:.0f} ms into the scene build (stage {})", nowMs - mBuildStartMs,
                          (uint32_t)mScenePrep.stage());
         }
+        tracingBuildPreview = !complete;
         // The scene under the accumulated image just changed, so what has been
         // accumulated is of a different scene.
         ctx.mSubframeIndex = 0;
@@ -1856,9 +1866,10 @@ void MetalRender::render(Buffer* output)
     // A screenshot is taken frames later, after the user has stopped moving
     // sliders; reading the settings at that point would describe a transform the
     // pixels never went through.
+    bool presentationUnchanged = false;
     if (filled.tonemap != nullptr)
     {
-        PresentationMetadata& presentation = mPresentation[mWriteIndex];
+        PresentationMetadata presentation;
         presentation.exposure[0] = filled.tonemap->exposureValue.x;
         presentation.exposure[1] = filled.tonemap->exposureValue.y;
         presentation.exposure[2] = filled.tonemap->exposureValue.z;
@@ -1873,6 +1884,19 @@ void MetalRender::render(Buffer* output)
         presentation.sourceWidth = spatialPresentation ? width : outWidth;
         presentation.sourceHeight = spatialPresentation ? height : outHeight;
         presentation.resampling = spatialPresentation ? PresentationResampling::Spatial : PresentationResampling::None;
+
+        const int readyIndex = mReadyIndex.load(std::memory_order_acquire);
+        if (readyIndex >= 0 && readyIndex <= 1)
+        {
+            const PresentationMetadata& ready = mPresentation[readyIndex];
+            presentationUnchanged =
+                ready.exposure[0] == presentation.exposure[0] && ready.exposure[1] == presentation.exposure[1] &&
+                ready.exposure[2] == presentation.exposure[2] && ready.maxOutput == presentation.maxOutput &&
+                ready.gamma == presentation.gamma && ready.tonemapper == presentation.tonemapper &&
+                ready.content == presentation.content && ready.sourceWidth == presentation.sourceWidth &&
+                ready.sourceHeight == presentation.sourceHeight && ready.resampling == presentation.resampling;
+        }
+        mPresentation[mWriteIndex] = presentation;
     }
 
     MTL::Buffer* pUniformBuffer = filled.uniformBuffer;
@@ -1908,6 +1932,20 @@ void MetalRender::render(Buffer* output)
     if (samplesThisLaunch == 0 && denoising && !denoisedFrameUsable)
     {
         samplesThisLaunch = std::max(spp, 1u);
+    }
+
+    // At the sample cap the display can keep sampling the last completed
+    // texture. Recreating a classic Metal command buffer every refresh merely
+    // copied the unchanged accumulation buffer and re-ran the same tonemapper;
+    // on the CPU profile this was the only recurring renderer work besides
+    // uniform preparation. A changed presentation falls through to the post-only
+    // path, and synchronous callers retain the old behaviour because they may
+    // need a freshly written output buffer for a checkpoint/readback.
+    if (!mSyncMode && samplesThisLaunch == 0 && presentationUnchanged)
+    {
+        mRenderBusy.store(false, std::memory_order_release);
+        pPool->release();
+        return;
     }
 
     // Verbatim copy of a display-resolution texture into the buffer headless
@@ -2026,7 +2064,41 @@ void MetalRender::render(Buffer* output)
             featureIn.splitBaseNee = splitBaseNee;
             featureIn.writeAov = pUniformData->writeAov != 0u;
             featureIn.samplerType = pUniformData->samplerType;
-            featureIn.genericShadeSplit = maxDepth == 1u && !featureIn.hasFog && !featureIn.hasOpenPBR;
+
+            // The one streaming preview traces an empty TLAS: geometry tables
+            // are deliberately not published until the build finishes. Do not
+            // specialise that sky-only frame for curve traversal, alpha, SSS,
+            // lights or OpenPBR merely because the host scene will contain them
+            // later. Curve-linked variants are especially expensive and the
+            // preview PSO would become dead as soon as the final TLAS arrives.
+            if (tracingBuildPreview)
+            {
+                featureIn.hasLights = false;
+                featureIn.hasEmissiveMeshLights = false;
+                featureIn.allAnalyticLightsRect = false;
+                featureIn.uniformRectLightSampling = false;
+                featureIn.hasAlphaMaterials = false;
+                featureIn.allAlphaBlend = false;
+                featureIn.alphaUvIdentity = false;
+                featureIn.alphaBaseColorOne = false;
+                featureIn.hasPrimitiveAlphaData = false;
+                featureIn.enableMotionBlur = false;
+                featureIn.motionBlasBuilt = false;
+                featureIn.enableCameraMotionBlur = false;
+                featureIn.hasFog = false;
+                featureIn.hasSharc = false;
+                featureIn.hasSubsurface = false;
+                featureIn.hasCurves = false;
+                featureIn.hasOpenPBR = false;
+                featureIn.allOpenPBR = false;
+                featureIn.allNativeOpenPBR = false;
+                featureIn.restirRayTracedDiagnostic = false;
+                featureIn.restir = false;
+                featureIn.splitBaseNee = false;
+                featureIn.writeAov = false;
+            }
+            featureIn.genericShadeSplit =
+                !tracingBuildPreview && maxDepth == 1u && !featureIn.hasFog && !featureIn.hasOpenPBR;
             const uint32_t features = metal::packWavefrontFeatures(featureIn).bits();
 
             if (featureIn.restirRayTracedDiagnostic && (featureIn.enableMotionBlur || featureIn.motionBlasBuilt))

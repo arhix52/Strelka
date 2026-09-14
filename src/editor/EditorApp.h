@@ -148,6 +148,14 @@ private:
     LoadProgress m_loadProgress;
     std::string m_pendingResourcePath;
     bool m_isLoading = false;
+#ifdef __APPLE__
+    // The startup renderer is initialised so the window can share its Metal
+    // device, but no frame is submitted while the initial file is parsing. It
+    // can therefore adopt that first scene without compiling Metal/MetalFX a
+    // second time. Later File -> Open operations have live scene resources and
+    // still take the full teardown path.
+    bool m_initialMetalRendererUnused = false;
+#endif
 
     std::string m_sceneFile;
     std::string m_resourceSearchPath;
@@ -204,7 +212,7 @@ private:
     void drawFrameBudgetModal();
     void ensureValidCameraSelection();
     void handleDeviceError();
-    void initializeRendererForCurrentScene();
+    void initializeRendererForCurrentScene(bool reuseExisting = false);
     void restartRendererAtSafeScale();
     void restoreDocumentAfterFailedLoad(const char* reason);
     void applyPreviewResolution(uint32_t width, uint32_t height);

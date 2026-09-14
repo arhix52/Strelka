@@ -51,7 +51,11 @@ std::optional<std::string> environmentValue(const char* name)
 } // namespace
 
 EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath)
-    : m_resourceSearchPath(resourceSearchPath)
+    :
+#ifdef __APPLE__
+      m_initialMetalRendererUnused(!sceneFile.empty()),
+#endif
+      m_resourceSearchPath(resourceSearchPath)
 {
     m_settingsManager = std::make_unique<SettingsManager>();
 
@@ -68,13 +72,14 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_render->setLoadProgress(&m_loadProgress);
     m_sceneLoader->setProgress(&m_loadProgress);
 
-    // Window first, scene second.
+    // Start parsing before device/window creation so independent CPU I/O overlaps
+    // their setup. The loaded Scene is private to the worker until the main loop
+    // consumes the future, so neither renderer nor display can observe it early.
     //
-    // The scene used to be parsed here, before the window existed, so the five
-    // seconds a large scene takes were five seconds of an application that had
-    // not drawn anything and could not be closed. Render::init() is only the
-    // device and the pipelines, so there is nothing stopping the window from
-    // coming up first and the scene arriving into it.
+    // The scene used to be parsed synchronously here, before the window existed,
+    // so the five seconds a large scene takes were five seconds of an application
+    // that had not drawn anything and could not be closed. It remains async: the
+    // window comes up while parsing is in flight and can cancel it normally.
     //
     // "Only" is relative: a perf profile of an empty start puts createContext()
     // at 36% of it, some 240 ms of cuInit and cuDevicePrimaryCtxRetain against
@@ -83,6 +88,10 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     // picks the physical device matching the renderer's CUDA device; overlapping
     // them means splitting GlfwDisplay::init() around that one dependency.
     loadSettings();
+    if (!sceneFile.empty())
+    {
+        beginSceneLoad(sceneFile, resourceSearchPath);
+    }
     m_render->init();
 #ifdef __APPLE__
     m_display->setNativeDevice(m_render->getNativeDevicePtr());
@@ -113,9 +122,10 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     // survives a rebuild and does not depend on which directory launched us.
     m_recentScenes = editor_document::loadRecentScenes(getExecutableDir() / "recent_scenes.txt");
 
-    // Keep m_sceneFile empty until a load succeeds, so a failed startup open
-    // restores to an empty document instead of pointing Save at a never-loaded path.
-    beginSceneLoad(sceneFile, resourceSearchPath);
+    if (sceneFile.empty())
+    {
+        beginSceneLoad(sceneFile, resourceSearchPath);
+    }
 }
 
 EditorApp::~EditorApp()
@@ -834,7 +844,7 @@ void EditorApp::loadAnimSettings()
     }
 }
 
-void EditorApp::initializeRendererForCurrentScene()
+void EditorApp::initializeRendererForCurrentScene(bool reuseExisting)
 {
     // Motion blur is a capability, not a per-frame switch: both backends read
     // this once in init() and it decides the shape of the pipeline and of the
@@ -854,6 +864,20 @@ void EditorApp::initializeRendererForCurrentScene()
         sceneHasMotion = sceneHasMotion || mesh.isSkeletal;
     }
     m_settingsManager->setAs<bool>("render/enableMotionBlur", sceneHasMotion);
+
+    if (reuseExisting && m_render)
+    {
+        // No render was submitted while the startup file was parsing, so the
+        // scene-preparation state is still at Buffers and owns no old-scene GPU
+        // resources. Metal reads the motion setting per frame as well; unlike
+        // OptiX it does not need a new context or pipeline for this switch.
+        m_render->setSettingsManager(m_settingsManager.get());
+        m_render->setSharedContext(m_sharedCtx.get());
+        m_render->setScene(m_scene.get());
+        m_render->setLoadProgress(&m_loadProgress);
+        m_display->setRender(m_render.get());
+        return;
+    }
 
     m_render = std::unique_ptr<Render>(RenderFactory::createRender());
     m_render->setSettingsManager(m_settingsManager.get());
@@ -913,20 +937,34 @@ void EditorApp::checkLoadingComplete()
 
     if (!new_scene)
     {
+#ifdef __APPLE__
+        // The main loop is now free to render the empty/previous document, so a
+        // later Open can no longer assume this renderer has never submitted.
+        m_initialMetalRendererUnused = false;
+#endif
         const char* reason = m_loadProgress.isCancelled() ? "cancel" : "loader";
         restoreDocumentAfterFailedLoad(reason);
         return;
     }
 
-    // Tear the old renderer down *before* the scene and shared context it points
-    // at are replaced. ~MetalRender drains the GPU and waits for in-flight
-    // completion handlers; running that after the Scene/SharedContext it holds
-    // raw pointers to have already been freed is a use-after-free waiting for
-    // the right timing.
+    bool reuseInitialRenderer = false;
+#ifdef __APPLE__
+    reuseInitialRenderer = m_initialMetalRendererUnused;
+    m_initialMetalRendererUnused = false;
+#endif
+
+    // A renderer that has submitted work must be torn down *before* replacing
+    // the scene and shared context it points at. ~MetalRender drains the GPU and
+    // waits for in-flight completion handlers, which may touch that state. The
+    // startup Metal renderer is the one exception: it has not submitted a frame
+    // and can safely adopt the first loaded scene.
     m_display->resetFrame();
     // Clear the display's raw Render* before destroying the object it points at.
-    m_display->setRender(nullptr);
-    m_render.reset();
+    if (!reuseInitialRenderer)
+    {
+        m_display->setRender(nullptr);
+        m_render.reset();
+    }
 
     m_scene = std::move(new_scene);
 
@@ -947,7 +985,7 @@ void EditorApp::checkLoadingComplete()
 
     m_sharedCtx = std::make_unique<SharedContext>();
 
-    initializeRendererForCurrentScene();
+    initializeRendererForCurrentScene(reuseInitialRenderer);
 
     m_resourceSearchPath = m_pendingResourcePath;
     m_documentDirty = false;

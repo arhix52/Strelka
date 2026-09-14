@@ -1,12 +1,10 @@
 #include <strelka/sceneloader/materialx_loader.h>
 
 #include <log.h>
-#include <paths.h>
 
 #include <MaterialXCore/Document.h>
 #include <MaterialXCore/Look.h>
 #include <MaterialXCore/Material.h>
-#include <MaterialXFormat/Util.h>
 #include <MaterialXFormat/XmlIo.h>
 
 #include <algorithm>
@@ -1094,28 +1092,11 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
 
     const mx::DocumentPtr doc = mx::createDocument();
 
-    // The data library first. Without it a document that says
-    // <standard_surface> refers to a nodedef that does not exist, and MaterialX
-    // will read the file without complaint and hand back a node with no type.
-    const std::string libRoot = oka::resolveResourcePath("materialx/libraries");
-    if (!libRoot.empty())
-    {
-        try
-        {
-            mx::FileSearchPath searchPath;
-            searchPath.append(mx::FilePath(libRoot).getParentPath());
-            mx::loadLibraries({ mx::FilePath(libRoot).getBaseName() }, searchPath, doc);
-        }
-        catch (const std::exception& e)
-        {
-            STRELKA_WARNING("MaterialX data library at {} did not load: {}", libRoot, e.what());
-        }
-    }
-    else
-    {
-        STRELKA_WARNING("MaterialX data library not found; nodedef defaults will be missing");
-    }
-
+    // This is a data extractor, not MaterialX shader generation: it folds the
+    // explicit graph itself and seeds omitted surface inputs from Strelka's
+    // OpenPBR/Standard Surface defaults. Importing the complete standard library
+    // here only attached nodedef metadata this code never queried and cost about
+    // 0.3 seconds for every sidecar, even from a warm filesystem cache.
     const mx::FilePath docPath(path);
     try
     {

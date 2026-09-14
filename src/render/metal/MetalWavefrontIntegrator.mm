@@ -786,8 +786,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const MTL::GPUAddress traversalBatchThreadsAddress = ring.push(traversalBatchThreads);
     const MTL::GPUAddress traversalBatchCountAddress = ring.push(traversalBatchCount);
 
-    const bool useMotion = frame.motionBlasBuilt || variant->extendStatic == nullptr ||
-                           frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
+    const bool useMotion = variant->extendMotion && (frame.motionBlasBuilt || variant->extendStatic == nullptr ||
+                                                     frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0);
     const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
     const bool useAlphaIftShadow =
         frame.enableAlphaIft && !useMotion && variant->shadowStaticIft && variant->shadowTableStaticIft;
@@ -801,9 +801,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     // A terminal camera hit never samples a BSDF and therefore cannot enter an
     // SSS medium. Keep the SSS-specialised shade variant, but do not scan the
     // full camera queue or encode the empty SSS walk for a depth-1 capture.
+    MTL::ComputePipelineState* const sssWalkPso = useMotion ? variant->sssWalkMotion : variant->sssWalkStatic;
     const bool fusedSss = uniforms && uniforms->maxDepth > 1u && (features & WavefrontFeatures::kSubsurface) != 0u &&
-                          (features & WavefrontFeatures::kSharcUpdate) == 0u && variant->sssWalkMotion &&
-                          variant->sssWalkStatic;
+                          (features & WavefrontFeatures::kSharcUpdate) == 0u && sssWalkPso;
     const MTL::ComputePipelineState* const primaryExtendPso =
         useDirectStatic ? variant->extendPrimaryDirectStatic : variant->extendPrimaryStatic;
     const bool fusePrimary = chunk.generate && chunk.bounceBegin == 0u && chunk.phase != WavefrontChunkPhase::Finish &&
@@ -1112,7 +1112,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             barrier();
 
             auditDispatch(useMotion ? "wavefrontSssWalk" : "wavefrontSssWalkStatic");
-            enc->setComputePipelineState(useMotion ? variant->sssWalkMotion : variant->sssWalkStatic);
+            enc->setComputePipelineState(sssWalkPso);
             bind(uniformBuffer, 0, 0);
             bind(scene.instanceBuffer, 0, 1);
             table->setResource(scene.volumeAccelerationStructure->gpuResourceID(), 2);
@@ -1414,10 +1414,12 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         return;
     }
 
-    if (uniforms->writeAov && variant->guideMotion && variant->guideStatic)
+    MTL::ComputePipelineState* const guidePso = useMotion ? variant->guideMotion : variant->guideStatic;
+    MTL::IntersectionFunctionTable* const guideTable = useMotion ? variant->guideTableMotion : variant->guideTableStatic;
+    if (uniforms->writeAov && guidePso && guideTable)
     {
         const uint32_t stage = beginStage(kStageGuide);
-        enc->setComputePipelineState(useMotion ? variant->guideMotion : variant->guideStatic);
+        enc->setComputePipelineState(guidePso);
         bind(uniformBuffer, 0, 0);
         bind(scene.instanceBuffer, 0, 1);
         table->setResource(scene.instanceAccelerationStructure->gpuResourceID(), 2);
@@ -1431,7 +1433,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         bind(scene.curveSegmentBuffer, 0, 11);
         bind(scene.lightBuffer, 0, 12);
         bind(mControlBuffer, 0, 14);
-        table->setResource((useMotion ? variant->guideTableMotion : variant->guideTableStatic)->gpuResourceID(), 13);
+        table->setResource(guideTable->gpuResourceID(), 13);
         enc->dispatchThreadgroups(control + kGuideArgsOffset, tg);
         barrier();
         endStage(stage);
@@ -1681,12 +1683,12 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     const uint32_t traversalQueueOffset = 0;
     // Nothing in the scene deforms -> traverse it as a static structure. Every ray
     // was otherwise paying for motion-BVH traversal it could not use.
-    const bool useMotion = frame.motionBlasBuilt || !variant || variant->extendStatic == nullptr ||
-                           frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0;
     if (!variant)
     {
         return enc;
     }
+    const bool useMotion = variant->extendMotion && (frame.motionBlasBuilt || variant->extendStatic == nullptr ||
+                                                     frame.settings->getAs<uint32_t>("render/pt/staticTraversal") == 0);
     const bool useDirectStatic = !useMotion && scene.directStaticAccelerationStructure && variant->extendDirectStatic;
     const bool useAlphaIftShadow =
         frame.enableAlphaIft && !useMotion && variant->shadowStaticIft && variant->shadowTableStaticIft;
@@ -1699,8 +1701,9 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         useDirectStatic ? scene.directStaticAccelerationStructure : scene.instanceAccelerationStructure;
     // See the Metal 4 path above: depth 1 cannot produce an SSS continuation,
     // even when alpha pass-through headroom keeps the host iteration loop alive.
+    MTL::ComputePipelineState* const sssWalkPso = useMotion ? variant->sssWalkMotion : variant->sssWalkStatic;
     const bool fusedSss = uniforms && uniforms->maxDepth > 1u && (features & WavefrontFeatures::kSubsurface) != 0u &&
-                          !sharcUpdatePass && variant->sssWalkMotion && variant->sssWalkStatic;
+                          !sharcUpdatePass && sssWalkPso;
 
     // Profiling gives each stage its own encoder, because this hardware samples
     // counters only at encoder boundaries. That costs encoder overhead, so it is
@@ -1846,7 +1849,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                 enc->dispatchThreads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
                 enc->memoryBarrier(MTL::BarrierScopeBuffers);
 
-                enc->setComputePipelineState(useMotion ? variant->sssWalkMotion : variant->sssWalkStatic);
+                enc->setComputePipelineState(sssWalkPso);
                 enc->setBuffer(uniformBuffer, 0, 0);
                 enc->setBuffer(scene.instanceBuffer, 0, 1);
                 enc->setAccelerationStructure(scene.volumeAccelerationStructure, 2);
@@ -2112,11 +2115,13 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         return enc;
     }
 
-    if (uniforms->writeAov && variant->guideMotion && variant->guideStatic)
+    MTL::ComputePipelineState* const guidePso = useMotion ? variant->guideMotion : variant->guideStatic;
+    MTL::IntersectionFunctionTable* const guideTable = useMotion ? variant->guideTableMotion : variant->guideTableStatic;
+    if (uniforms->writeAov && guidePso && guideTable)
     {
         enc->memoryBarrier(MTL::BarrierScopeBuffers);
         stamp(kStageGuide);
-        enc->setComputePipelineState(useMotion ? variant->guideMotion : variant->guideStatic);
+        enc->setComputePipelineState(guidePso);
         enc->setBuffer(uniformBuffer, 0, 0);
         enc->setBuffer(scene.instanceBuffer, 0, 1);
         enc->setAccelerationStructure(scene.instanceAccelerationStructure, 2);
@@ -2130,7 +2135,6 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
         enc->setBuffer(scene.curveSegmentBuffer ? scene.curveSegmentBuffer : scene.placeholderBuffer, 0, 11);
         enc->setBuffer(scene.lightBuffer, 0, 12);
         enc->setBuffer(mControlBuffer, 0, 14);
-        MTL::IntersectionFunctionTable* guideTable = useMotion ? variant->guideTableMotion : variant->guideTableStatic;
         enc->setIntersectionFunctionTable(guideTable, 13);
         enc->useResource(guideTable, MTL::ResourceUsageRead);
         enc->dispatchThreadgroups(mControlBuffer, kGuideArgsOffset, tg);
@@ -2412,7 +2416,17 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
 
     WavefrontVariant v;
     v.generate = make("wavefrontGenerate");
-    v.extendMotion = makeTraversal(entry("wavefrontExtend"), "Extend", true, v.extendTableMotion);
+    // Motion, denoiser guides and ReSTIR are independent optional paths. The
+    // linked curve traversal kernels take seconds to specialise, so compiling
+    // every alternative on first frame is visible startup work, not harmless
+    // prewarming. A variant key already records all three capabilities; create
+    // only the PSOs an encoder can select for this key.
+    const bool forceMotionTraversal = envUint("STRELKA_STATIC", 1u) == 0u;
+    const bool needsMotionTraversal = motionBlur || forceMotionTraversal;
+    if (needsMotionTraversal)
+    {
+        v.extendMotion = makeTraversal(entry("wavefrontExtend"), "Extend", true, v.extendTableMotion);
+    }
     v.extendStatic = makeTraversal(entry("wavefrontExtendStatic"), "Extend", false, v.extendTableStatic);
     v.extendDirectStatic = make("wavefrontExtendDirectStatic");
     // Curve traversal already carries enough live state that folding camera
@@ -2427,7 +2441,10 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
     }
     if (subsurface && !sharcUpdate)
     {
-        v.sssWalkMotion = make("wavefrontSssWalk");
+        if (needsMotionTraversal)
+        {
+            v.sssWalkMotion = make("wavefrontSssWalk");
+        }
         v.sssWalkStatic = make("wavefrontSssWalkStatic");
     }
     if (restirRayTracedDiagnostic)
@@ -2484,12 +2501,18 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
             v.shade = make("wavefrontShade");
         }
     }
-    v.restirSpatialFinal = restirRayTracedDiagnostic ?
-                               makeTraversal("wavefrontRestirSpatialFinal", "RestirSpatialDiagnostic", false,
-                                             v.restirSpatialDiagnosticTable) :
-                               make("wavefrontRestirSpatialFinal");
+    if (restir)
+    {
+        v.restirSpatialFinal = restirRayTracedDiagnostic ?
+                                   makeTraversal("wavefrontRestirSpatialFinal", "RestirSpatialDiagnostic", false,
+                                                 v.restirSpatialDiagnosticTable) :
+                                   make("wavefrontRestirSpatialFinal");
+    }
     v.miss = make("wavefrontMiss");
-    v.shadowMotion = makeTraversal(entry("wavefrontShadow"), "Shadow", true, v.shadowTableMotion);
+    if (needsMotionTraversal)
+    {
+        v.shadowMotion = makeTraversal(entry("wavefrontShadow"), "Shadow", true, v.shadowTableMotion);
+    }
     v.shadowStatic = makeTraversal(entry("wavefrontShadowStatic"), "Shadow", false, v.shadowTableStatic);
     const bool alphaIft = alpha && primitiveAlphaData;
     if (alphaIft)
@@ -2500,8 +2523,14 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
             entry("wavefrontShadowStaticIft"), "Shadow", false, v.shadowTableStaticIft, alphaIntersectionName);
     }
     v.shadowDirectStatic = make("wavefrontShadowDirectStatic", "Shadow direct static");
-    v.guideMotion = makeTraversal(entry("wavefrontGuide"), "Guide", true, v.guideTableMotion);
-    v.guideStatic = makeTraversal(entry("wavefrontGuideStatic"), "Guide", false, v.guideTableStatic);
+    if (aov)
+    {
+        if (needsMotionTraversal)
+        {
+            v.guideMotion = makeTraversal(entry("wavefrontGuide"), "Guide", true, v.guideTableMotion);
+        }
+        v.guideStatic = makeTraversal(entry("wavefrontGuideStatic"), "Guide", false, v.guideTableStatic);
+    }
 
     values->release();
     mResidencyDirty = true;
