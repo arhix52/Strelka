@@ -25,6 +25,22 @@ inline bool shouldBakeStaticMesh(uint32_t useCount, bool skeletal, bool potentia
     return useCount == 1u && !skeletal && !potentiallyAnimated;
 }
 
+inline bool hasUniformOrthogonalLinearPart(const glm::mat4& transform)
+{
+    const glm::vec3 axisX(transform[0]);
+    const glm::vec3 axisY(transform[1]);
+    const glm::vec3 axisZ(transform[2]);
+    const float lengthX2 = glm::dot(axisX, axisX);
+    const float lengthY2 = glm::dot(axisY, axisY);
+    const float lengthZ2 = glm::dot(axisZ, axisZ);
+    const float maxLength2 = std::max({ lengthX2, lengthY2, lengthZ2 });
+    const float tolerance = maxLength2 * 1e-4f;
+    const bool finite = std::isfinite(lengthX2) && std::isfinite(lengthY2) && std::isfinite(lengthZ2);
+    return finite && maxLength2 > 1e-20f && std::abs(lengthX2 - lengthY2) <= tolerance &&
+           std::abs(lengthX2 - lengthZ2) <= tolerance && std::abs(glm::dot(axisX, axisY)) <= tolerance &&
+           std::abs(glm::dot(axisX, axisZ)) <= tolerance && std::abs(glm::dot(axisY, axisZ)) <= tolerance;
+}
+
 /// Spatially order unique static geometry and pack it into bottom levels.
 /// Masks stay separate because the visibility mask belongs to the TLAS instance,
 /// while the triangle limit bounds one driver's temporary/build allocation.

@@ -2037,13 +2037,27 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
     const float3 axisX = objectToWorld[0].xyz;
     const float3 axisY = objectToWorld[1].xyz;
     const float3 axisZ = objectToWorld[2].xyz;
-    const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
-    const float3 shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
-                                                     normalTransform.cofactorZ, normalTransform.orientation);
-    const float3 worldGeomNormal = normalTransform.cofactorX * objectGeomNormal.x +
-                                   normalTransform.cofactorY * objectGeomNormal.y +
-                                   normalTransform.cofactorZ * objectGeomNormal.z;
-    const float worldArea2 = length(worldGeomNormal);
+    const uint32_t transformIndex = geometryTransformIndex(uniforms, hit.instanceId, geometryEntryIndex, entry);
+    const bool uniformOrthogonal = (instances[transformIndex].mask & GEOMETRY_MASK_UNIFORM_ORTHOGONAL_TRANSFORM) != 0u;
+    float3 shadingNormal;
+    float3 worldGeomNormal;
+    float normalOrientation = 1.0f;
+    if (uniformOrthogonal)
+    {
+        shadingNormal = normalize(transformDirection(objectNormal, axisX, axisY, axisZ));
+        worldGeomNormal = transformDirection(objectGeomNormal, axisX, axisY, axisZ);
+    }
+    else
+    {
+        const FastNormalTransform normalTransform = makeFastNormalTransform(axisX, axisY, axisZ);
+        shadingNormal = transformNormalFast(objectNormal, normalTransform.cofactorX, normalTransform.cofactorY,
+                                            normalTransform.cofactorZ, normalTransform.orientation);
+        worldGeomNormal = normalTransform.cofactorX * objectGeomNormal.x +
+                          normalTransform.cofactorY * objectGeomNormal.y + normalTransform.cofactorZ * objectGeomNormal.z;
+        normalOrientation = normalTransform.orientation;
+    }
+    const float worldGeomLength = length(worldGeomNormal);
+    const float worldArea2 = uniformOrthogonal ? worldGeomLength * sqrt(max(dot(axisX, axisX), 0.0f)) : worldGeomLength;
     if (!(worldArea2 > 1e-20f) || !all(isfinite(shadingNormal)))
     {
         // Tail will reconstruct this uncommon hit from the vertex buffer. It
@@ -2052,7 +2066,7 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
         uniforms.surfaceGeometry[tid].tangentAndFlags = 0u;
         return false;
     }
-    const float3 geometryNormal = normalTransform.orientation * (worldGeomNormal / worldArea2);
+    const float3 geometryNormal = normalOrientation * (worldGeomNormal / worldGeomLength);
     float3 tangent;
     if (hasPrimitiveSurfaceData)
     {
@@ -2354,7 +2368,8 @@ static void extendImpl(uint gid,
         else
         {
             const auto inst = instances[hit.instanceId];
-            isLight = inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN;
+            const uint32_t geometryMask = inst.mask & ~GEOMETRY_MASK_UNIFORM_ORTHOGONAL_TRANSFORM;
+            isLight = geometryMask == GEOMETRY_MASK_LIGHT || geometryMask == GEOMETRY_MASK_LIGHT_HIDDEN;
             geometryEntryIndex = isLight ? (HIT_LIGHT_BIT | inst.userID) : (inst.userID + hit.geometryId);
         }
         if (!isLight && hit.type == intersection_type::triangle)
@@ -6909,7 +6924,8 @@ static void guideImpl(uint gid,
 
         totalDistance += hit.distance;
         const auto inst = instances[hit.instanceId];
-        if (inst.mask == GEOMETRY_MASK_LIGHT || inst.mask == GEOMETRY_MASK_LIGHT_HIDDEN)
+        const uint32_t geometryMask = inst.mask & ~GEOMETRY_MASK_UNIFORM_ORTHOGONAL_TRANSFORM;
+        if (geometryMask == GEOMETRY_MASK_LIGHT || geometryMask == GEOMETRY_MASK_LIGHT_HIDDEN)
         {
             if (replaceMaterial)
             {

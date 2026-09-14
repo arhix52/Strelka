@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <functional>
@@ -1887,8 +1888,9 @@ void MetalAccelStructure::writeInstanceTransforms(MTL::Buffer* buffer)
     const std::vector<oka::Instance>& instances = mScene->getInstances();
     auto* instanceDescriptors = static_cast<MTL::IndirectAccelerationStructureInstanceDescriptor*>(buffer->contents());
 
-    auto writeTransform = [](MTL::IndirectAccelerationStructureInstanceDescriptor& descriptor,
-                             const glm::mat4& transform) {
+    const bool markUniformOrthogonal = !envFlag("STRELKA_NO_FAST_NORMAL_TRANSFORM");
+    auto writeTransform = [markUniformOrthogonal](MTL::IndirectAccelerationStructureInstanceDescriptor& descriptor,
+                                                  const glm::mat4& transform, uint32_t geometryMask) {
         for (int column = 0; column < 4; ++column)
         {
             for (int row = 0; row < 3; ++row)
@@ -1896,6 +1898,9 @@ void MetalAccelStructure::writeInstanceTransforms(MTL::Buffer* buffer)
                 descriptor.transformationMatrix.columns[column][row] = transform[column][row];
             }
         }
+
+        const bool uniformOrthogonal = markUniformOrthogonal && hasUniformOrthogonalLinearPart(transform);
+        descriptor.mask = geometryMask | (uniformOrthogonal ? GEOMETRY_MASK_UNIFORM_ORTHOGONAL_TRANSFORM : 0u);
     };
     const glm::mat4 identity(1.0f);
 
@@ -1904,11 +1909,11 @@ void MetalAccelStructure::writeInstanceTransforms(MTL::Buffer* buffer)
         const EmittedInstance& emitted = mEmittedInstances[d];
         if (emitted.identityTransform)
         {
-            writeTransform(instanceDescriptors[d], identity);
+            writeTransform(instanceDescriptors[d], identity, emitted.mask);
         }
         else
         {
-            writeTransform(instanceDescriptors[d], instances[emitted.sceneInstanceId].transform);
+            writeTransform(instanceDescriptors[d], instances[emitted.sceneInstanceId].transform, emitted.mask);
         }
     }
 
@@ -1918,11 +1923,11 @@ void MetalAccelStructure::writeInstanceTransforms(MTL::Buffer* buffer)
         const uint32_t sceneInstanceId = mGeometryTransformSceneInstances[geometry];
         if (sceneInstanceId < instances.size())
         {
-            writeTransform(instanceDescriptors[transformBase + geometry], instances[sceneInstanceId].transform);
+            writeTransform(instanceDescriptors[transformBase + geometry], instances[sceneInstanceId].transform, 0u);
         }
         else
         {
-            writeTransform(instanceDescriptors[transformBase + geometry], identity);
+            writeTransform(instanceDescriptors[transformBase + geometry], identity, 0u);
         }
     }
 }

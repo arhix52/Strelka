@@ -28,6 +28,11 @@
 // not be stopped by it -- RAY_MASK_SHADOW is the geometry bits alone, so a fog
 // gizmo left on the triangle mask would black out everything it encloses.
 #define GEOMETRY_MASK_MEDIUM 16
+// Metadata carried in the otherwise unused high mask bit. Ray masks never
+// include it; the low geometry bits still decide visibility. Shaders use it to
+// replace an inverse-transpose normal transform with the linear transform when
+// the host proved that its three axes are orthogonal and have one common scale.
+#define GEOMETRY_MASK_UNIFORM_ORTHOGONAL_TRANSFORM 128
 
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
 
