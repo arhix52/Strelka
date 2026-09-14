@@ -539,6 +539,10 @@ struct Uniforms
     uint64_t envRowCosBounds;
     uint64_t envPdfTable;
 #endif
+    // Exact invariant division by width. samplerFor uses this to recover pixel
+    // x/y without issuing two dynamic integer divides on every stage.
+    uint32_t widthDivMultiplier;
+    uint32_t widthDivShiftAdd;
 };
 static_assert(sizeof(Uniforms) == 1136, "Uniforms host/Metal ABI changed");
 

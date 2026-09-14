@@ -166,9 +166,31 @@ inline uint32_t encodeMorton2(uint32_t x, uint32_t y)
     return (part1By1(y) << 1u) + part1By1(x);
 }
 
+inline uint32_t divideByInvariant(uint32_t numerator, uint32_t multiplier, uint32_t shiftAdd)
+{
+    if (multiplier == 0u)
+    {
+        return numerator >> shiftAdd;
+    }
+    uint32_t quotient = mulhi(numerator, multiplier);
+    if ((shiftAdd & 0x40u) != 0u)
+    {
+        quotient = ((numerator - quotient) >> 1u) + quotient;
+    }
+    return quotient >> (shiftAdd & 31u);
+}
+
+inline uint2 pixelFromLinearIndex(uint32_t index, uint32_t width, uint32_t widthDivMultiplier, uint32_t widthDivShiftAdd)
+{
+    const uint32_t y = divideByInvariant(index, widthDivMultiplier, widthDivShiftAdd);
+    return uint2(index - y * width, y);
+}
+
 static SamplerState initSampler(uint32_t linearPixelIndex,
                                 uint32_t pixelSampleIndex,
                                 uint32_t width,
+                                uint32_t widthDivMultiplier,
+                                uint32_t widthDivShiftAdd,
                                 uint32_t bnSwitch,
                                 uint32_t sampleBlockBits,
                                 uint32_t samplerType)
@@ -182,14 +204,12 @@ static SamplerState initSampler(uint32_t linearPixelIndex,
         // complete block is stratified jointly with its neighbours; a per-pixel
         // seed loses that anti-correlation and measured much noisier on
         // kids_room after the sampler was padded to two dimensions.
-        const uint32_t safeWidth = max(width, 1u);
-        const uint32_t px = linearPixelIndex % safeWidth;
-        const uint32_t py = linearPixelIndex / safeWidth;
+        const uint2 pixel = pixelFromLinearIndex(linearPixelIndex, width, widthDivMultiplier, widthDivShiftAdd);
         const uint32_t tailIndex = samplerType == 4u ? pixelSampleIndex - bnSwitch : pixelSampleIndex;
         const uint32_t blockMask = (1u << sampleBlockBits) - 1u;
         const uint32_t epoch = tailIndex >> sampleBlockBits;
         sampler.seed = epoch == 0u ? 52u : 52u + hash(epoch);
-        sampler.sampleIdx = (encodeMorton2(px, py) << sampleBlockBits) | (tailIndex & blockMask);
+        sampler.sampleIdx = (encodeMorton2(pixel.x, pixel.y) << sampleBlockBits) | (tailIndex & blockMask);
     }
     else
     {
@@ -199,10 +219,8 @@ static SamplerState initSampler(uint32_t linearPixelIndex,
     sampler.depth = 0;
     if (blueNoisePrefix)
     {
-        const uint32_t safeWidth = max(width, 1u);
-        const uint32_t px = linearPixelIndex % safeWidth;
-        const uint32_t py = linearPixelIndex / safeWidth;
-        const uint32_t cell = (py % kBlueNoiseTile) * kBlueNoiseTile + (px % kBlueNoiseTile);
+        const uint2 pixel = pixelFromLinearIndex(linearPixelIndex, width, widthDivMultiplier, widthDivShiftAdd);
+        const uint32_t cell = (pixel.y % kBlueNoiseTile) * kBlueNoiseTile + (pixel.x % kBlueNoiseTile);
         sampler.bn = (float(kBlueNoiseRank[cell]) + 0.5f) / float(kBlueNoiseTile * kBlueNoiseTile);
     }
     // A tail index is already rebased and blocked above; prevent randomHybrid
@@ -229,11 +247,12 @@ static SamplerState initPrimaryBlueNoiseSampler(uint2 pixel, uint32_t pixelSampl
 static SamplerState initPrimaryBlueNoiseSampler(uint32_t linearPixelIndex,
                                                 uint32_t pixelSampleIndex,
                                                 uint32_t width,
+                                                uint32_t widthDivMultiplier,
+                                                uint32_t widthDivShiftAdd,
                                                 uint32_t bnSwitch)
 {
-    const uint32_t safeWidth = max(width, 1u);
     return initPrimaryBlueNoiseSampler(
-        uint2(linearPixelIndex % safeWidth, linearPixelIndex / safeWidth), pixelSampleIndex, bnSwitch);
+        pixelFromLinearIndex(linearPixelIndex, width, widthDivMultiplier, widthDivShiftAdd), pixelSampleIndex, bnSwitch);
 }
 
 template <SampleDimension Dim>

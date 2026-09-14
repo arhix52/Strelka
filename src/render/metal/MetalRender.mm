@@ -905,6 +905,8 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, envMapRotationSinCos) == 1104);
     static_assert(offsetof(Uniforms, envRowCosBounds) == 1112);
     static_assert(offsetof(Uniforms, envPdfTable) == 1120);
+    static_assert(offsetof(Uniforms, widthDivMultiplier) == 1128);
+    static_assert(offsetof(Uniforms, widthDivShiftAdd) == 1132);
     static_assert(sizeof(Uniforms) == 1136, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");

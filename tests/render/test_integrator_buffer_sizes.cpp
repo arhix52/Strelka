@@ -1,7 +1,9 @@
 #include <doctest/doctest.h>
 
 #include <host/integrator_buffer_sizes.h>
+#include <host/fast_unsigned_divisor.h>
 
+using oka::metal::fastUnsignedDivide;
 using oka::metal::kWavefrontControlUints;
 using oka::metal::kWavefrontCurveTraversalBatchesPerGroup;
 using oka::metal::kWavefrontCurveTraversalBatchThreads;
@@ -12,10 +14,26 @@ using oka::metal::kWavefrontStageDiagnosticStride;
 using oka::metal::kWavefrontStageStatsUints;
 using oka::metal::kWavefrontTraversalBatchThreads;
 using oka::metal::kWavefrontTriangleTraversalBatchThreads;
+using oka::metal::makeFastUnsignedDivisor;
 using oka::metal::wavefrontBufferLayout;
-using oka::metal::wavefrontFullFrameTraversalBatchThreads;
 using oka::metal::WavefrontElementSizes;
+using oka::metal::wavefrontFullFrameTraversalBatchThreads;
 using oka::metal::wavefrontTraversalBatchCount;
+
+TEST_CASE("fast unsigned divisor exactly recovers pixel rows")
+{
+    constexpr uint32_t widths[] = { 1u, 2u, 3u, 640u, 1280u, 1920u, 3840u, 7680u, 8192u, 16384u };
+    for (const uint32_t width : widths)
+    {
+        const auto divisor = makeFastUnsignedDivisor(width);
+        const uint32_t last = width * 16384u - 1u;
+        for (uint32_t index = 0u; index < std::min(last, 100000u); ++index)
+        {
+            CHECK(fastUnsignedDivide(index, divisor) == index / width);
+        }
+        CHECK(fastUnsignedDivide(last, divisor) == last / width);
+    }
+}
 
 TEST_CASE("wavefrontBufferLayout scales with pixel count")
 {

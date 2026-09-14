@@ -1158,8 +1158,9 @@ static inline uint32_t sampleSequenceIndex(constant Uniforms& uniforms, uint32_t
 static inline SamplerState samplerFor(constant Uniforms& uniforms, uint32_t pixelIndex, uint32_t sampleIdx, uint32_t depth)
 {
     const uint32_t sequenceIndex = sampleSequenceIndex(uniforms, sampleIdx);
-    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp,
-                                 uniforms.sobolSampleBlockBits, uniforms.samplerType);
+    SamplerState s =
+        initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.widthDivMultiplier, uniforms.widthDivShiftAdd,
+                    uniforms.blueNoiseSwitchSpp, uniforms.sobolSampleBlockBits, uniforms.samplerType);
     s.depth = depth;
     return s;
 }
@@ -1178,10 +1179,12 @@ static inline SamplerState samplerForFixedDepth(constant Uniforms& uniforms,
         depth == 0u && (samplerType == 3u || (samplerType == 4u && sequenceIndex < uniforms.blueNoiseSwitchSpp));
     if (blueNoisePrimary)
     {
-        return initPrimaryBlueNoiseSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp);
+        return initPrimaryBlueNoiseSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.widthDivMultiplier,
+                                           uniforms.widthDivShiftAdd, uniforms.blueNoiseSwitchSpp);
     }
-    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp,
-                                 uniforms.sobolSampleBlockBits, samplerType);
+    SamplerState s =
+        initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.widthDivMultiplier, uniforms.widthDivShiftAdd,
+                    uniforms.blueNoiseSwitchSpp, uniforms.sobolSampleBlockBits, samplerType);
     s.depth = depth;
     return s;
 }
@@ -1200,8 +1203,9 @@ static inline SamplerState samplerForFixedDepth(
     {
         return initPrimaryBlueNoiseSampler(pixel, sequenceIndex, uniforms.blueNoiseSwitchSpp);
     }
-    SamplerState s = initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.blueNoiseSwitchSpp,
-                                 uniforms.sobolSampleBlockBits, samplerType);
+    SamplerState s =
+        initSampler(pixelIndex, sequenceIndex, uniforms.width, uniforms.widthDivMultiplier, uniforms.widthDivShiftAdd,
+                    uniforms.blueNoiseSwitchSpp, uniforms.sobolSampleBlockBits, samplerType);
     s.depth = depth;
     return s;
 }

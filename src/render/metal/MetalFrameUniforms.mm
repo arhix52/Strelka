@@ -3,6 +3,7 @@
 #include "MetalAccelStructure.h"
 
 #include <host/camera_ray_basis.h>
+#include <host/fast_unsigned_divisor.h>
 #include "sharc_grid_size.h"
 
 #include <host/light_selection.h>
@@ -127,6 +128,9 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->subframeIndex = in.subframeIndex;
     pUniformData->height = height;
     pUniformData->width = width;
+    const FastUnsignedDivisor widthDivisor = makeFastUnsignedDivisor(std::max(width, 1u));
+    pUniformData->widthDivMultiplier = widthDivisor.multiplier;
+    pUniformData->widthDivShiftAdd = widthDivisor.shiftAdd;
     const bool analyticLightsEnabled = settings.getAs<bool>("render/validate/analyticLights");
     pUniformData->numLights = analyticLightsEnabled ? (uint32_t)in.scene->getLightsDesc().size() : 0u;
     pUniformData->numInfiniteLights = analyticLightsEnabled && in.lights ? in.lights->infiniteLightCount() : 0u;
