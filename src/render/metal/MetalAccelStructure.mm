@@ -865,6 +865,7 @@ bool MetalAccelStructure::step(double budgetMs)
         {
             mMetal4->removeResident(mGeometry->primitiveDataBuffer());
             mMetal4->removeResident(mGeometry->primitiveAlphaDataBuffer());
+            mMetal4->removeResident(mGeometry->primitiveAlphaDecodeBuffer());
         }
         mGeometry->buildPrimitiveData(mScene, primitiveSurfaceMeshes);
         mGeometry->buildPrimitiveAlphaData(mScene, primitiveAlphaMeshes);
@@ -872,6 +873,7 @@ bool MetalAccelStructure::step(double budgetMs)
         {
             mMetal4->addResident(mGeometry->primitiveDataBuffer());
             mMetal4->addResident(mGeometry->primitiveAlphaDataBuffer());
+            mMetal4->addResident(mGeometry->primitiveAlphaDecodeBuffer());
             mMetal4->commitResidency();
         }
         std::vector<uint8_t> potentiallyAnimatedNode(nodes.size(), 0u);

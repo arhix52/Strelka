@@ -1375,6 +1375,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                     shadowTable->setBuffer(scene.alphaMaterialBuffer, 0, 0);
                     shadowTable->setBuffer(scene.geometryEntryBuffer, 0, 1);
                     shadowTable->setBuffer(scene.primitiveAlphaDataBuffer, 0, 2);
+                    shadowTable->setBuffer(scene.primitiveAlphaDecodeBuffer, 0, 3);
                 }
                 table->setResource(shadowTable->gpuResourceID(), 15);
             }
@@ -1383,6 +1384,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             table->setResource(scene.mediumAccelerationStructure->gpuResourceID(), 18);
             bind(scene.primitiveAlphaDataBuffer, 0, 19);
             bind(scene.alphaMaterialBuffer, 0, 20);
+            bind(scene.primitiveAlphaDecodeBuffer, 0, 21);
             for (uint32_t batch = 0; batch < shadowBatchCount; ++batch)
             {
                 auditDispatch(useDirectStaticShadow ? "wavefrontShadowDirectStatic" :
@@ -2082,6 +2084,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
                     shadowTable->setBuffer(scene.alphaMaterialBuffer, 0, 0);
                     shadowTable->setBuffer(scene.geometryEntryBuffer, 0, 1);
                     shadowTable->setBuffer(scene.primitiveAlphaDataBuffer, 0, 2);
+                    shadowTable->setBuffer(scene.primitiveAlphaDecodeBuffer, 0, 3);
                 }
                 enc->setIntersectionFunctionTable(shadowTable, 15);
             }
@@ -2090,6 +2093,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->setAccelerationStructure(scene.mediumAccelerationStructure, 18);
             enc->setBuffer(scene.primitiveAlphaDataBuffer, 0, 19);
             enc->setBuffer(scene.alphaMaterialBuffer, 0, 20);
+            enc->setBuffer(scene.primitiveAlphaDecodeBuffer, 0, 21);
             if (shadowTable)
             {
                 enc->useResource(shadowTable, MTL::ResourceUsageRead);

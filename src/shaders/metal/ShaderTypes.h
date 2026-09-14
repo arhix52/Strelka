@@ -180,15 +180,27 @@ struct PrimitiveSurfaceData
 };
 static_assert(sizeof(PrimitiveSurfaceData) == 16, "Primitive surface data ABI changed");
 
-// UVs needed by an alpha candidate. The production path keeps them in a dense
-// buffer outside the acceleration structure; an opt-in diagnostic can attach
-// the same record as primitive data. Each uint preserves the two packed 16-bit
-// fields from Vertex::uv without additional quantisation.
+// UVs needed by an alpha candidate. Each word stores one component for all
+// three vertices as RGB10. A small decode record shared by a 256-triangle block
+// maps those integers back to Vertex::uv's 14-bit lattice. Most foliage blocks
+// fit without any additional quantisation; the block layout cuts the hot random
+// record from 12 to 8 bytes without assuming UVs stay in [0, 1].
+#define PRIMITIVE_ALPHA_BLOCK_SHIFT 8u
+#define PRIMITIVE_ALPHA_BLOCK_SIZE (1u << PRIMITIVE_ALPHA_BLOCK_SHIFT)
 struct PrimitiveAlphaData
 {
-    uint32_t uv[3];
+    uint32_t u;
+    uint32_t v;
 };
-static_assert(sizeof(PrimitiveAlphaData) == 12, "Primitive alpha data ABI changed");
+static_assert(sizeof(PrimitiveAlphaData) == 8, "Primitive alpha data ABI changed");
+
+struct PrimitiveAlphaDecode
+{
+    // (u offset, v offset, u span, v span). The span includes RGB10's
+    // normalisation, so shader reconstruction is two FMAs after interpolation.
+    vector_float4 offsetScale;
+};
+static_assert(sizeof(PrimitiveAlphaDecode) == 16, "Primitive alpha decode ABI changed");
 
 struct Uniforms
 {

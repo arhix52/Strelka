@@ -97,6 +97,10 @@ public:
     {
         return mPrimitiveAlphaDataBuffer;
     }
+    MTL::Buffer* primitiveAlphaDecodeBuffer() const
+    {
+        return mPrimitiveAlphaDecodeBuffer;
+    }
     bool ownsPrevVertexBuffer() const
     {
         return mOwnsPrevVertexBuffer;
@@ -176,6 +180,7 @@ private:
     // kNoPrimitiveDataOffset when that mesh uses the regular vertex path.
     std::vector<size_t> mPrimitiveDataOffsets;
     MTL::Buffer* mPrimitiveAlphaDataBuffer = nullptr;
+    MTL::Buffer* mPrimitiveAlphaDecodeBuffer = nullptr;
     // Byte offset of each cutout mesh's first PrimitiveAlphaData record.
     std::vector<size_t> mPrimitiveAlphaDataOffsets;
     bool mOwnsPrevVertexBuffer = false;

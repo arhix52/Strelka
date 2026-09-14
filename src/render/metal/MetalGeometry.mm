@@ -143,6 +143,7 @@ void MetalGeometry::release()
     safeRelease(mPrimitiveDataBuffer);
     mPrimitiveDataOffsets.clear();
     safeRelease(mPrimitiveAlphaDataBuffer);
+    safeRelease(mPrimitiveAlphaDecodeBuffer);
     mPrimitiveAlphaDataOffsets.clear();
     mOwnsPrevVertexBuffer = false;
     mVertexBufferAliased = false;
@@ -190,6 +191,7 @@ void MetalGeometry::buildBuffers(Scene* scene)
         safeRelease(mPrimitiveDataBuffer);
         mPrimitiveDataOffsets.clear();
         safeRelease(mPrimitiveAlphaDataBuffer);
+        safeRelease(mPrimitiveAlphaDecodeBuffer);
         mPrimitiveAlphaDataOffsets.clear();
         mOwnsPrevVertexBuffer = false;
         mPrevVertexBuffer = nullptr;
@@ -360,6 +362,11 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
         mPrimitiveAlphaDataBuffer->release();
         mPrimitiveAlphaDataBuffer = nullptr;
     }
+    if (mPrimitiveAlphaDecodeBuffer)
+    {
+        mPrimitiveAlphaDecodeBuffer->release();
+        mPrimitiveAlphaDecodeBuffer = nullptr;
+    }
     mPrimitiveAlphaDataOffsets.assign(scene ? scene->getMeshes().size() : 0u, kNoPrimitiveAlphaDataOffset);
     if (!scene || !mVertexBuffer || !mIndexBuffer || enabledMeshes.size() != scene->getMeshes().size())
     {
@@ -367,12 +374,16 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
     }
 
     size_t triangleCount = 0u;
+    size_t recordCount = 0u;
     size_t enabledMeshCount = 0u;
     for (size_t meshIndex = 0; meshIndex < enabledMeshes.size(); ++meshIndex)
     {
         if (enabledMeshes[meshIndex] != 0u)
         {
-            triangleCount += scene->getMeshes()[meshIndex].mCount / 3u;
+            const size_t meshTriangleCount = scene->getMeshes()[meshIndex].mCount / 3u;
+            triangleCount += meshTriangleCount;
+            recordCount = (recordCount + PRIMITIVE_ALPHA_BLOCK_SIZE - 1u) & ~(PRIMITIVE_ALPHA_BLOCK_SIZE - 1u);
+            recordCount += meshTriangleCount;
             ++enabledMeshCount;
         }
     }
@@ -380,10 +391,10 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
     {
         return;
     }
-    if (triangleCount > static_cast<size_t>(GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK) + 1u)
+    if (recordCount > static_cast<size_t>(GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK) + 1u)
     {
-        STRELKA_WARNING("Primitive alpha data disabled: {} cutout triangles exceed the {}-record geometry index",
-                        triangleCount, static_cast<size_t>(GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK) + 1u);
+        STRELKA_WARNING("Primitive alpha data disabled: {} aligned records exceed the {}-record geometry index",
+                        recordCount, static_cast<size_t>(GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK) + 1u);
         return;
     }
 
@@ -395,8 +406,11 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
         return;
     }
 
-    std::vector<PrimitiveAlphaData> alphaData(triangleCount);
+    std::vector<PrimitiveAlphaData> alphaData(recordCount);
+    std::vector<PrimitiveAlphaDecode> alphaDecode((recordCount + PRIMITIVE_ALPHA_BLOCK_SIZE - 1u) >>
+                                                  PRIMITIVE_ALPHA_BLOCK_SHIFT);
     size_t dstTriangle = 0u;
+    size_t exactTriangleCount = 0u;
     for (size_t meshIndex = 0; meshIndex < enabledMeshes.size(); ++meshIndex)
     {
         if (enabledMeshes[meshIndex] == 0u)
@@ -405,14 +419,68 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
         }
         const oka::Mesh& mesh = scene->getMeshes()[meshIndex];
         const uint32_t meshTriangleCount = mesh.mCount / 3u;
+        dstTriangle = (dstTriangle + PRIMITIVE_ALPHA_BLOCK_SIZE - 1u) & ~(PRIMITIVE_ALPHA_BLOCK_SIZE - 1u);
         mPrimitiveAlphaDataOffsets[meshIndex] = dstTriangle * sizeof(PrimitiveAlphaData);
-        for (uint32_t triangle = 0; triangle < meshTriangleCount; ++triangle)
+        for (uint32_t blockFirst = 0; blockFirst < meshTriangleCount; blockFirst += PRIMITIVE_ALPHA_BLOCK_SIZE)
         {
-            PrimitiveAlphaData& dst = alphaData[dstTriangle++];
-            const size_t firstIndex = static_cast<size_t>(mesh.mIndex) + static_cast<size_t>(triangle) * 3u;
-            for (uint32_t k = 0; k < 3u; ++k)
+            const uint32_t blockCount = std::min(PRIMITIVE_ALPHA_BLOCK_SIZE, meshTriangleCount - blockFirst);
+            uint32_t minU = 0xffffu;
+            uint32_t minV = 0xffffu;
+            uint32_t maxU = 0u;
+            uint32_t maxV = 0u;
+            for (uint32_t localTriangle = 0; localTriangle < blockCount; ++localTriangle)
             {
-                dst.uv[k] = vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]].uv;
+                const size_t firstIndex =
+                    static_cast<size_t>(mesh.mIndex) + static_cast<size_t>(blockFirst + localTriangle) * 3u;
+                for (uint32_t k = 0; k < 3u; ++k)
+                {
+                    const uint32_t packed = vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]].uv;
+                    const uint32_t u = packed & 0xffffu;
+                    const uint32_t v = packed >> 16u;
+                    minU = std::min(minU, u);
+                    minV = std::min(minV, v);
+                    maxU = std::max(maxU, u);
+                    maxV = std::max(maxV, v);
+                }
+            }
+            const auto quantizationShift = [](uint32_t range) {
+                uint32_t shift = 0u;
+                while (((range + (1u << shift) - 1u) >> shift) > 1023u)
+                {
+                    ++shift;
+                }
+                return shift;
+            };
+            const uint32_t shiftU = quantizationShift(maxU - minU);
+            const uint32_t shiftV = quantizationShift(maxV - minV);
+            const uint32_t stepU = 1u << shiftU;
+            const uint32_t stepV = 1u << shiftV;
+            exactTriangleCount += (shiftU == 0u && shiftV == 0u) ? blockCount : 0u;
+
+            constexpr float kUvScale = 20.0f / 16383.99999f;
+            PrimitiveAlphaDecode& decode = alphaDecode[dstTriangle >> PRIMITIVE_ALPHA_BLOCK_SHIFT];
+            decode.offsetScale = { static_cast<float>(minU) * kUvScale - 10.0f,
+                                   static_cast<float>(minV) * kUvScale - 10.0f,
+                                   static_cast<float>(1023u * stepU) * kUvScale,
+                                   static_cast<float>(1023u * stepV) * kUvScale };
+
+            for (uint32_t localTriangle = 0; localTriangle < blockCount; ++localTriangle)
+            {
+                PrimitiveAlphaData& dst = alphaData[dstTriangle++];
+                const size_t firstIndex =
+                    static_cast<size_t>(mesh.mIndex) + static_cast<size_t>(blockFirst + localTriangle) * 3u;
+                uint32_t packedU = 0u;
+                uint32_t packedV = 0u;
+                for (uint32_t k = 0; k < 3u; ++k)
+                {
+                    const uint32_t packed = vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]].uv;
+                    const uint32_t u = std::min(((packed & 0xffffu) - minU + stepU / 2u) / stepU, 1023u);
+                    const uint32_t v = std::min(((packed >> 16u) - minV + stepV / 2u) / stepV, 1023u);
+                    packedU |= u << (10u * k);
+                    packedV |= v << (10u * k);
+                }
+                dst.u = packedU;
+                dst.v = packedV;
             }
         }
     }
@@ -426,9 +494,24 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
         std::ranges::fill(mPrimitiveAlphaDataOffsets, kNoPrimitiveAlphaDataOffset);
         return;
     }
+    mPrimitiveAlphaDecodeBuffer = mDevice->newBuffer(
+        alphaDecode.data(), alphaDecode.size() * sizeof(PrimitiveAlphaDecode), MTL::ResourceStorageModeShared);
+    if (!mPrimitiveAlphaDecodeBuffer)
+    {
+        STRELKA_ERROR("Cannot allocate {:.1f} MB of primitive alpha decode data",
+                      alphaDecode.size() * sizeof(PrimitiveAlphaDecode) / (1024.0 * 1024.0));
+        mPrimitiveAlphaDataBuffer->release();
+        mPrimitiveAlphaDataBuffer = nullptr;
+        std::ranges::fill(mPrimitiveAlphaDataOffsets, kNoPrimitiveAlphaDataOffset);
+        return;
+    }
     mPrimitiveAlphaDataBuffer->setLabel(NS::String::string("primitive alpha data", NS::UTF8StringEncoding));
-    STRELKA_INFO("Metal primitive alpha data: {} meshes, {} triangles, {:.1f} MB", enabledMeshCount, alphaData.size(),
-                 alphaData.size() * sizeof(PrimitiveAlphaData) / (1024.0 * 1024.0));
+    mPrimitiveAlphaDecodeBuffer->setLabel(NS::String::string("primitive alpha decode", NS::UTF8StringEncoding));
+    STRELKA_INFO("Metal primitive alpha data: {} meshes, {} triangles, {:.1f} MB, {:.1f}% exact UV blocks",
+                 enabledMeshCount, triangleCount,
+                 (alphaData.size() * sizeof(PrimitiveAlphaData) + alphaDecode.size() * sizeof(PrimitiveAlphaDecode)) /
+                     (1024.0 * 1024.0),
+                 100.0 * static_cast<double>(exactTriangleCount) / static_cast<double>(triangleCount));
 }
 
 size_t MetalGeometry::primitiveAlphaDataOffset(size_t meshIndex, uint32_t firstTriangle) const

@@ -75,6 +75,7 @@ struct IntegratorSceneBindings
     MTL::Buffer* materialBuffer = nullptr;
     MTL::Buffer* alphaMaterialBuffer = nullptr;
     MTL::Buffer* primitiveAlphaDataBuffer = nullptr;
+    MTL::Buffer* primitiveAlphaDecodeBuffer = nullptr;
     MTL::Buffer* lightBuffer = nullptr;
     MTL::Buffer* previousLightBuffer = nullptr;
     MTL::Buffer* lightTemporalMappingBuffer = nullptr;

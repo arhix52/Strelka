@@ -750,6 +750,7 @@ bool MetalRender::memoryReport(MemoryReport& report) const
     add("Indices", bufBytes(mGeometry.indexBuffer()));
     add("Primitive surface data", bufBytes(mGeometry.primitiveDataBuffer()));
     add("Primitive alpha data", bufBytes(mGeometry.primitiveAlphaDataBuffer()));
+    add("Primitive alpha decode", bufBytes(mGeometry.primitiveAlphaDecodeBuffer()));
     // A second copy of every vertex, for motion blur and for the denoiser's
     // reprojection. Shared with the current one on a scene with nothing skinned,
     // in which case this reports zero rather than double-counting.
@@ -917,7 +918,8 @@ void MetalRender::init()
     static_assert(sizeof(ShadowRay) == 68, "ShadowRay host/Metal ABI changed");
     static_assert(sizeof(CompactShadowTraversal) == 32, "Compact shadow traversal host/Metal ABI changed");
     static_assert(sizeof(CompactShadowContribution) == 16, "Compact shadow contribution host/Metal ABI changed");
-    static_assert(sizeof(PrimitiveAlphaData) == 12, "Primitive alpha data host/Metal ABI changed");
+    static_assert(sizeof(PrimitiveAlphaData) == 8, "Primitive alpha data host/Metal ABI changed");
+    static_assert(sizeof(PrimitiveAlphaDecode) == 16, "Primitive alpha decode host/Metal ABI changed");
     static_assert(sizeof(AlphaMaterialData) == 48, "Alpha material host/Metal ABI changed");
     static_assert(sizeof(HitRecord) == 20, "HitRecord size changed");
     static_assert(sizeof(SurfaceGeometryPayload) == 16, "Surface geometry payload size changed");
@@ -1059,6 +1061,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mGeometry.indexBuffer());
     add(mGeometry.primitiveDataBuffer());
     add(mGeometry.primitiveAlphaDataBuffer());
+    add(mGeometry.primitiveAlphaDecodeBuffer());
     add(mAccel.instanceBuffer());
     add(mAccel.previousInstanceBuffer());
     add(mAccel.emissiveMeshBuffer());
@@ -1193,6 +1196,8 @@ metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
     b.alphaMaterialBuffer = mMaterials.alphaBuffer() ? mMaterials.alphaBuffer() : mSceneTablePlaceholder;
     b.primitiveAlphaDataBuffer =
         mGeometry.primitiveAlphaDataBuffer() ? mGeometry.primitiveAlphaDataBuffer() : mSceneTablePlaceholder;
+    b.primitiveAlphaDecodeBuffer =
+        mGeometry.primitiveAlphaDecodeBuffer() ? mGeometry.primitiveAlphaDecodeBuffer() : mSceneTablePlaceholder;
     b.lightBuffer = mLights.buffer();
     b.previousLightBuffer = mLights.previousBuffer();
     b.lightTemporalMappingBuffer = mLights.temporalMappingBuffer();
