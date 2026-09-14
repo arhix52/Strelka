@@ -1024,7 +1024,9 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
                                           std::min(chunk.traversalBatchEnd, traversalBatchCount);
             for (uint32_t batch = batchBegin; batch < batchEnd; ++batch)
             {
-                if (fusedSss && !fusedPrimaryBounce)
+                // generate just initialized every camera path outside a medium.
+                // There cannot be SSS work until shade has crossed a boundary.
+                if (fusedSss && bounce != 0u)
                 {
                     auditDispatch("wavefrontClassifySss");
                     enc->setComputePipelineState(mClassifySssPSO4);
@@ -1096,7 +1098,7 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
             endStage(extendStage);
         }
 
-        if (fusedSss && finishBounce)
+        if (fusedSss && finishBounce && bounce != 0u)
         {
             const uint32_t stage = beginStage(kStageSssWalk, bounce);
             auditDispatch("wavefrontPrepareSss");
@@ -1778,7 +1780,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             // it is pure cost.
 
             stamp(kStageExtend);
-            if (fusedSss)
+            if (fusedSss && bounce != 0u)
             {
                 enc->setComputePipelineState(mClassifySssPSO);
                 enc->setBuffer(uniformBuffer, 0, 0);
@@ -1832,7 +1834,7 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
             enc->dispatchThreadgroups(mControlBuffer, kDispatchArgsOffset, tg);
             enc->popDebugGroup();
 
-            if (fusedSss)
+            if (fusedSss && bounce != 0u)
             {
                 enc->memoryBarrier(MTL::BarrierScopeBuffers);
                 enc->setComputePipelineState(mPrepareSssPSO);
