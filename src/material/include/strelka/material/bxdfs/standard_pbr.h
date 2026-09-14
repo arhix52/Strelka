@@ -117,7 +117,7 @@ DEVICE_FUNC float diffuse_lobe_scale(const THREAD_REF SurfaceInteraction& si)
 // Returned as a colour with the scalar the coin flip uses left alone, so the
 // sampling is unchanged and the tint rides on the throughput. With no film the
 // colour is that same scalar and both correction factors are exactly one.
-DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, CompensatedFloat v_dot_h, float eta)
+DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, InterfaceCosine v_dot_h, float eta)
 {
     const float f = fresnel_dielectric(v_dot_h, eta);
     // A thin-film approximation must not reopen the physically forbidden
@@ -130,17 +130,19 @@ DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si,
     {
         return make_float3(f);
     }
-    const float cosine = compensatedValue(v_dot_h);
+    const float cosine = interfaceCosineValue(v_dot_h);
     const float3 film =
         iridescence_fresnel(1.0f, si.iridescence_ior, fabsf(cosine), si.iridescence_thickness, make_float3(f));
     const float3 result = mix(make_float3(f), film, saturate(si.iridescence));
     return make_float3(saturate(result.x), saturate(result.y), saturate(result.z));
 }
 
+#    if !defined(STRELKA_FAST_FINITE_GPU_MATH) || !STRELKA_FAST_FINITE_GPU_MATH
 DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, float v_dot_h, float eta)
 {
-    return transmission_fresnel(si, compensatedSum(v_dot_h, 0.0f), eta);
+    return transmission_fresnel(si, makeInterfaceCosine(v_dot_h), eta);
 }
+#    endif
 
 // A coloured Fresnel response needs a scalar branch probability, but that
 // probability is a proposal rather than the response itself. Luminance gives a
@@ -1385,11 +1387,11 @@ standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THRE
             return result;
 
         // eta_i * V + eta_t * wi, normalised -- see refraction_half_vector().
-        CompensatedFloat robustVdotH = compensatedSum(0.0f, 0.0f);
+        InterfaceCosine robustVdotH = makeInterfaceCosine(0.0f);
         const float3 H = refraction_half_vector(V, wi, eta, Nf, robustVdotH);
 
         const float NdotH = dot(Nf, H);
-        const float VdotH = saturate(compensatedValue(robustVdotH));
+        const float VdotH = saturate(interfaceCosineValue(robustVdotH));
         const float LdotH = dot(wi, H);
 
         if (!(NdotH >= 0.0f) || VdotH <= 0.0f)

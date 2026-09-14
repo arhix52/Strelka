@@ -444,6 +444,39 @@ DEVICE_FUNC float3 refraction_residual(float3 V, float3 wt, float eta)
     return make_float3(fmaf(etaSafe, V.x, wt.x), fmaf(etaSafe, V.y, wt.y), fmaf(etaSafe, V.z, wt.z));
 }
 
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+
+DEVICE_FUNC float refraction_residual_length(float3 V, float3 wt, float eta)
+{
+    return length(refraction_residual(V, wt, eta));
+}
+
+DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf, THREAD_REF InterfaceCosine& viewDotHalf)
+{
+    const float3 residual = refraction_residual(V, wt, eta);
+    const float lengthSquared = dot(residual, residual);
+    if (!(lengthSquared > 0.0f))
+    {
+        viewDotHalf = saturate(dot(V, Nf));
+        return Nf;
+    }
+    float3 H = residual / sqrtf(lengthSquared);
+    if (dot(V, H) < 0.0f)
+    {
+        H = -H;
+    }
+    viewDotHalf = saturate(dot(V, H));
+    return H;
+}
+
+DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf)
+{
+    InterfaceCosine viewDotHalf = 0.0f;
+    return refraction_half_vector(V, wt, eta, Nf, viewDotHalf);
+}
+
+#else
+
 struct RefractionResidualExpansion
 {
     CompensatedFloat x;
@@ -464,7 +497,7 @@ DEVICE_FUNC RefractionResidualExpansion refraction_residual_expansion(float3 V, 
 DEVICE_FUNC void refraction_residual_metrics(
     float3 V, float3 wt, float eta, THREAD_REF float& residualLength, THREAD_REF CompensatedFloat& signedVdotH)
 {
-#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+#    if defined(STRELKA_FAST_FINITE_GPU_MATH)
     if (STRELKA_FAST_FINITE_GPU_MATH)
     {
         const float3 residual = refraction_residual(V, wt, eta);
@@ -472,7 +505,7 @@ DEVICE_FUNC void refraction_residual_metrics(
         signedVdotH = compensatedSum(residualLength > 0.0f ? dot(V, residual) / residualLength : 0.0f, 0.0f);
         return;
     }
-#endif
+#    endif
     const RefractionResidualExpansion residual = refraction_residual_expansion(V, wt, eta);
     const float x = compensatedValue(residual.x);
     const float y = compensatedValue(residual.y);
@@ -523,7 +556,7 @@ DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3
     // non-equal indices close to one, where the residual is the half vector.
     const float etaSafe = fmaxf(eta, 1e-6f);
     float3 residual = refraction_residual(V, wt, etaSafe);
-#if defined(STRELKA_FAST_FINITE_GPU_MATH)
+#    if defined(STRELKA_FAST_FINITE_GPU_MATH)
     if (STRELKA_FAST_FINITE_GPU_MATH)
     {
         const float lengthSquared = dot(residual, residual);
@@ -540,7 +573,7 @@ DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3
         robustVdotH = compensatedSum(saturate(dot(V, H)), 0.0f);
         return H;
     }
-#endif
+#    endif
     float residualLength = 0.0f;
     CompensatedFloat signedVdotH = compensatedSum(0.0f, 0.0f);
     refraction_residual_metrics(V, wt, etaSafe, residualLength, signedVdotH);
@@ -622,6 +655,8 @@ DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3
     CompensatedFloat robustVdotH = compensatedSum(0.0f, 0.0f);
     return refraction_half_vector(V, wt, eta, Nf, robustVdotH);
 }
+
+#endif
 
 // Reflection has H parallel to V+L. Use a scale-safe normalization and orient
 // a genuinely collapsed tangent-limit sum to the active side rather than to a

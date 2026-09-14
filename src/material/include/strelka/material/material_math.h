@@ -439,6 +439,35 @@ DEVICE_FUNC float compensatedValue(CompensatedFloat value)
     return value.high + value.low;
 }
 
+// GPU material evaluation deliberately uses ordinary binary32. The CPU and
+// CUDA reference paths retain the two-float representation, but Metal's hot
+// Fresnel/refraction path must not keep a low part live across a lobe.
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+using InterfaceCosine = float;
+
+DEVICE_FUNC InterfaceCosine makeInterfaceCosine(float value)
+{
+    return value;
+}
+
+DEVICE_FUNC float interfaceCosineValue(InterfaceCosine value)
+{
+    return value;
+}
+#else
+using InterfaceCosine = CompensatedFloat;
+
+DEVICE_FUNC InterfaceCosine makeInterfaceCosine(float value)
+{
+    return compensatedSum(value, 0.0f);
+}
+
+DEVICE_FUNC float interfaceCosineValue(InterfaceCosine value)
+{
+    return compensatedValue(value);
+}
+#endif
+
 DEVICE_FUNC CompensatedFloat divideCompensated(CompensatedFloat numerator, CompensatedFloat denominator)
 {
     const float denominatorValue = compensatedValue(denominator);
@@ -564,6 +593,19 @@ DEVICE_FUNC bool refract_dir(float3 incident, float3 normal, float eta, float in
         return false;
 
     incidentCosineMagnitude = saturate(incidentCosineMagnitude);
+#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
+    const float transmittedCosineSquared =
+        fmaf(eta * eta, incidentCosineMagnitude * incidentCosineMagnitude - 1.0f, 1.0f);
+    if (!(transmittedCosineSquared > 0.0f))
+        return false;
+
+    const float transmittedCosine = sqrtf(transmittedCosineSquared);
+    const float signedIncidentCosine = dot(normal, incident) < 0.0f ? -incidentCosineMagnitude : incidentCosineMagnitude;
+    const float normalScale = fmaf(eta, signedIncidentCosine, transmittedCosine);
+    out = make_float3(fmaf(eta, incident.x, -normalScale * normal.x), fmaf(eta, incident.y, -normalScale * normal.y),
+                      fmaf(eta, incident.z, -normalScale * normal.z));
+    return true;
+#else
     const CompensatedFloat transmittedCosineSquared =
         dielectricTransmittedCosineSquared(compensatedSum(incidentCosineMagnitude, 0.0f), eta);
     if (!(compensatedValue(transmittedCosineSquared) > 0.0f))
@@ -580,6 +622,7 @@ DEVICE_FUNC bool refract_dir(float3 incident, float3 normal, float eta, float in
         addCompensated(compensatedProduct(eta, incident.z), negateCompensated(scaleCompensated(normalScale, normal.z)));
     out = make_float3(compensatedValue(x), compensatedValue(y), compensatedValue(z));
     return true;
+#endif
 }
 
 DEVICE_FUNC bool refract_dir(float3 incident, float3 normal, float eta, THREAD_REF float3& out)

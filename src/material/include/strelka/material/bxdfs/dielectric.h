@@ -298,11 +298,11 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
 
         // eta_i * V + eta_t * wi, normalised, oriented to Nf's side -- see
         // refraction_half_vector().
-        CompensatedFloat robustVdotH = compensatedSum(0.0f, 0.0f);
+        InterfaceCosine robustVdotH = makeInterfaceCosine(0.0f);
         const float3 H = refraction_half_vector(V, wi, eta, Nf, robustVdotH);
 
         const float NdotH = dot(Nf, H);
-        const float VdotH = saturate(compensatedValue(robustVdotH));
+        const float VdotH = saturate(interfaceCosineValue(robustVdotH));
         const float LdotH = dot(wi, H);
 
         if (!(NdotH >= 0.0f) || VdotH <= 0.0f)
