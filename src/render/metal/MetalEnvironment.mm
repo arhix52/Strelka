@@ -6,8 +6,10 @@
 #include <log.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <numbers>
 #include <vector>
 
 #define STB_IMAGE_STATIC
@@ -30,6 +32,13 @@ struct FloatImage
     int height = 0;
     bool isExr = false;
 };
+
+struct EnvRowCosBounds
+{
+    float north;
+    float south;
+};
+static_assert(sizeof(EnvRowCosBounds) == 8);
 
 bool loadFloatImage(const std::string& texturePath, const char* kind, FloatImage& image)
 {
@@ -146,6 +155,11 @@ void MetalEnvironment::clearMap()
         mState.aliasBuffer->release();
         mState.aliasBuffer = nullptr;
     }
+    if (mState.rowCosBoundsBuffer)
+    {
+        mState.rowCosBoundsBuffer->release();
+        mState.rowCosBoundsBuffer = nullptr;
+    }
     mState.totalPower = 0.0;
     mState.autoScale = 1.0f;
     mState.mapDecodeScale = 1.0f;
@@ -166,9 +180,17 @@ void MetalEnvironment::clearBackground()
 
 void MetalEnvironment::ensurePlaceholderAliasBuffer()
 {
-    if (mState.aliasBuffer || !mDevice)
+    if (!mDevice)
         return;
-    mState.aliasBuffer = mDevice->newBuffer(sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);
+    if (!mState.aliasBuffer)
+    {
+        mState.aliasBuffer = mDevice->newBuffer(sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);
+    }
+    if (!mState.rowCosBoundsBuffer)
+    {
+        const EnvRowCosBounds row{ 1.0f, -1.0f };
+        mState.rowCosBoundsBuffer = mDevice->newBuffer(&row, sizeof(row), MTL::ResourceStorageModeShared);
+    }
 }
 
 void MetalEnvironment::loadBackground(const std::string& texturePath)
@@ -215,6 +237,27 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
 
     mState.aliasBuffer = mDevice->newBuffer(
         aliasResult.alias.data(), aliasResult.alias.size() * sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);
+
+    std::vector<EnvRowCosBounds> rowCosBounds(static_cast<size_t>(aliasHeight));
+    for (int y = 0; y < aliasHeight; ++y)
+    {
+        const double theta0 = std::numbers::pi * static_cast<double>(y) / static_cast<double>(aliasHeight);
+        const double theta1 = std::numbers::pi * static_cast<double>(y + 1) / static_cast<double>(aliasHeight);
+        rowCosBounds[static_cast<size_t>(y)] = {
+            static_cast<float>(std::cos(theta0)),
+            static_cast<float>(std::cos(theta1)),
+        };
+    }
+    mState.rowCosBoundsBuffer = mDevice->newBuffer(
+        rowCosBounds.data(), rowCosBounds.size() * sizeof(EnvRowCosBounds), MTL::ResourceStorageModeShared);
+    if (!mState.mapTexture || !mState.aliasBuffer || !mState.rowCosBoundsBuffer)
+    {
+        releaseFloatImage(image);
+        STRELKA_ERROR("Failed to allocate Metal environment resources for {}", texturePath);
+        clearMap();
+        return;
+    }
+    mState.rowCosBoundsBuffer->setLabel(NS::String::string("environment row cosine bounds", NS::UTF8StringEncoding));
 
     releaseFloatImage(image);
 

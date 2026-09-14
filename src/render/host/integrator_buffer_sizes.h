@@ -75,11 +75,11 @@ inline constexpr uint32_t kWavefrontTriangleTraversalBatchThreads = 512 * 1024;
 inline constexpr uint32_t kWavefrontMinDiagnosticTraversalBatchThreads = 4 * 1024;
 // Curve traversal needs a lower non-preemptible hardware-dispatch ceiling than
 // triangle traversal. 256K curve dispatches repeatedly hung on kids_room's
-// 7.5M-segment AS; 128K dispatches completed 280 consecutive full frames. Two
-// dispatches per scheduler group retain launch efficiency while keeping a 2x
-// safety margin at the hardware boundary.
+// 7.5M-segment AS; 128K dispatches completed 280 consecutive full frames. Four
+// dispatches per scheduler group reduce command-buffer fragmentation without
+// changing that tested hardware-dispatch ceiling.
 inline constexpr uint32_t kWavefrontCurveTraversalBatchThreads = 128 * 1024;
-inline constexpr uint32_t kWavefrontCurveTraversalBatchesPerGroup = 2;
+inline constexpr uint32_t kWavefrontCurveTraversalBatchesPerGroup = 4;
 // A Metal 4 command buffer may contain this many traversal dispatches before it
 // is retired. Four batches cap one curve-extend scheduler workload at roughly a
 // megapath; the remaining batches append into the same hit/miss queues from the

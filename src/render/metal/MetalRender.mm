@@ -766,7 +766,8 @@ bool MetalRender::memoryReport(MemoryReport& report) const
         add("Textures", bytes);
     }
     add("Environment", texBytes(mEnvironment.state().mapTexture) + texBytes(mEnvironment.state().backgroundTexture) +
-                           bufBytes(mEnvironment.state().aliasBuffer));
+                           bufBytes(mEnvironment.state().aliasBuffer) +
+                           bufBytes(mEnvironment.state().rowCosBoundsBuffer));
 
     {
         size_t as = 0, scratch = 0;
@@ -900,7 +901,9 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, cameraRayRight) == 1056);
     static_assert(offsetof(Uniforms, cameraRayUp) == 1072);
     static_assert(offsetof(Uniforms, cameraRayForward) == 1088);
-    static_assert(sizeof(Uniforms) == 1104, "Uniforms host/Metal ABI changed");
+    static_assert(offsetof(Uniforms, envMapRotationSinCos) == 1104);
+    static_assert(offsetof(Uniforms, envRowCosBounds) == 1112);
+    static_assert(sizeof(Uniforms) == 1120, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -1078,6 +1081,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mGeometry.curveRadiusBuffer());
     add(mGeometry.curveSegmentBuffer());
     add(mEnvironment.state().aliasBuffer);
+    add(mEnvironment.state().rowCosBoundsBuffer);
     add(mAccumulationBuffer);
     mIntegrator.addResidentAllocations(add);
     add(mSkinning.skinDataBuffer());
@@ -2104,11 +2108,11 @@ void MetalRender::render(Buffer* output)
                 // Keep extend independent of the shadow batches: curve closest-
                 // hit traversal needs the lower tested hardware-dispatch ceiling,
                 // while shadow any-hit remained stable at the throughput size.
+                const uint32_t fullFrameThreads = metal::wavefrontFullFrameTraversalBatchThreads(width * height);
                 traversalBatchThreads =
                     envUint("STRELKA_CURVE_BATCH_THREADS", metal::kWavefrontCurveTraversalBatchThreads);
-                traversalBatchThreads =
-                    std::clamp(traversalBatchThreads, metal::kWavefrontMinDiagnosticTraversalBatchThreads,
-                               metal::kWavefrontTraversalBatchThreads);
+                traversalBatchThreads = std::clamp(
+                    traversalBatchThreads, metal::kWavefrontMinDiagnosticTraversalBatchThreads, fullFrameThreads);
                 traversalBatchThreads -= traversalBatchThreads % 64u;
                 traversalBatchesPerGroup = std::max(
                     1u, envUint("STRELKA_CURVE_BATCHES_PER_GROUP", metal::kWavefrontCurveTraversalBatchesPerGroup));

@@ -158,7 +158,7 @@ TEST_CASE("wavefront traversal batches cap one hardware dispatch")
     CHECK(wavefrontTraversalBatchCount(1440 * 810) == 5);
     CHECK(wavefrontTraversalBatchCount(1920 * 1080) == 8);
     CHECK(wavefrontTraversalBatchCount(1920 * 1080, kWavefrontCurveTraversalBatchThreads) == 16);
-    CHECK(kWavefrontCurveTraversalBatchThreads * kWavefrontCurveTraversalBatchesPerGroup == 256u * 1024u);
+    CHECK(kWavefrontCurveTraversalBatchThreads * kWavefrontCurveTraversalBatchesPerGroup == 512u * 1024u);
 }
 
 TEST_CASE("Metal 4 triangle traversal uses one full-frame batch")

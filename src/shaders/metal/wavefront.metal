@@ -3146,7 +3146,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         // is not a seam.
         constexpr sampler envSampler(
             mag_filter::linear, min_filter::linear, s_address::repeat, t_address::clamp_to_edge, coord::normalized);
-        const float2 envUV = dirToEnvUV(rayDir, uniforms.envMapRotation);
+        const float2 envUV = metalDirToEnvUv(rayDir, uniforms.envMapRotationSinCos);
         float3 envColor = envMapTexture.sample(envSampler, envUV).xyz;
         envColor *= uniforms.envMapIntensity * uniforms.envMapColorTint.xyz;
 
@@ -3167,8 +3167,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         }
         else
         {
-            const float envPdf =
-                envMapPdf(rayDir, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation);
+            const float envPdf = envMapPdf(
+                rayDir, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotationSinCos);
             const float envSelectionPdf =
                 (uniforms.numLights > 0 || (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0)) ?
                     uniforms.envMapColorTint.w :

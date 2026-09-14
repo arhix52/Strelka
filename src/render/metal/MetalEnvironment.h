@@ -14,6 +14,8 @@ struct EnvMapState
     MTL::Texture* mapTexture = nullptr;
     MTL::Texture* backgroundTexture = nullptr;
     MTL::Buffer* aliasBuffer = nullptr;
+    // cos(theta) at the north/south edge of each alias-table row.
+    MTL::Buffer* rowCosBoundsBuffer = nullptr;
     double totalPower = 0.0;
     float autoScale = 1.0f;
     float mapDecodeScale = 1.0f;

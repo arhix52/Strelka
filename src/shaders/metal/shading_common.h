@@ -1222,7 +1222,7 @@ LightConnection connectEnvDirection(constant Uniforms& uniforms,
                                     bool volumeEvent)
 {
     return connectEnvDirectionAtUv(
-        uniforms, dir, dirToEnvUV(dir, uniforms.envMapRotation), envPdf, si, envMapTexture, volumeEvent);
+        uniforms, dir, metalDirToEnvUv(dir, uniforms.envMapRotationSinCos), envPdf, si, envMapTexture, volumeEvent);
 }
 
 LightConnection connectEnvLight(constant Uniforms& uniforms,
@@ -1240,8 +1240,8 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
 
     float envPdf = 0.0f;
     float2 envUv;
-    float3 dir = sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
-                              uniforms.envMapRotation, envUv, envPdf);
+    float3 dir = sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envRowCosBounds, uniforms.envMapWidth,
+                              uniforms.envMapHeight, uniforms.envMapRotationSinCos, envUv, envPdf);
 
     // The alias sample already owns the exact texture coordinate. Reversing
     // its direction through atan2/asin only to recover that coordinate adds
@@ -1639,9 +1639,9 @@ LightConnection reconnectRestirSampleContext(constant Uniforms& uniforms,
     if (sampleType == RESTIR_SAMPLE_ENVIRONMENT && SPEC_ENV_MAP && hasEnvMap)
     {
         const float3 direction = restirSampleData3(sample);
-        const float envPdf =
-            envMapPdf(direction, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotation) *
-            (hasLocal ? envSelectionPdf : 1.0f);
+        const float envPdf = envMapPdf(direction, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
+                                       uniforms.envMapRotationSinCos) *
+                             (hasLocal ? envSelectionPdf : 1.0f);
         return connectEnvDirection(uniforms, direction, envPdf, si, envMapTexture, false);
     }
     if (sampleType == RESTIR_SAMPLE_ANALYTIC && hasAnalytic && lightId < numLights)

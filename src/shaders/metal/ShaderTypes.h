@@ -517,8 +517,16 @@ struct Uniforms
     vector_float3 cameraRayRight;
     vector_float3 cameraRayUp;
     vector_float3 cameraRayForward;
+    // Append-only fields keep every existing resource pointer at its stable
+    // host/Metal ABI offset.
+    vector_float2 envMapRotationSinCos;
+#ifdef __METAL_VERSION__
+    device const packed_float2* envRowCosBounds;
+#else
+    uint64_t envRowCosBounds;
+#endif
 };
-static_assert(sizeof(Uniforms) == 1104, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1120, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
