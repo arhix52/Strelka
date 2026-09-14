@@ -2123,8 +2123,8 @@ void MetalRender::render(Buffer* output)
                 // hit traversal needs the lower tested hardware-dispatch ceiling,
                 // while shadow any-hit remained stable at the throughput size.
                 const uint32_t fullFrameThreads = metal::wavefrontFullFrameTraversalBatchThreads(width * height);
-                traversalBatchThreads =
-                    envUint("STRELKA_CURVE_BATCH_THREADS", metal::kWavefrontCurveTraversalBatchThreads);
+                const uint32_t defaultCurveBatchThreads = metal::wavefrontCurveTraversalBatchThreads(width * height);
+                traversalBatchThreads = envUint("STRELKA_CURVE_BATCH_THREADS", defaultCurveBatchThreads);
                 traversalBatchThreads = std::clamp(
                     traversalBatchThreads, metal::kWavefrontMinDiagnosticTraversalBatchThreads, fullFrameThreads);
                 traversalBatchThreads -= traversalBatchThreads % 64u;

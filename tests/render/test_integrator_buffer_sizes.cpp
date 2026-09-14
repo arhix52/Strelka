@@ -16,6 +16,7 @@ using oka::metal::kWavefrontTraversalBatchThreads;
 using oka::metal::kWavefrontTriangleTraversalBatchThreads;
 using oka::metal::makeFastUnsignedDivisor;
 using oka::metal::wavefrontBufferLayout;
+using oka::metal::wavefrontCurveTraversalBatchThreads;
 using oka::metal::WavefrontElementSizes;
 using oka::metal::wavefrontFullFrameTraversalBatchThreads;
 using oka::metal::wavefrontTraversalBatchCount;
@@ -186,4 +187,15 @@ TEST_CASE("Metal 4 triangle traversal uses one full-frame batch")
     CHECK(batchThreads == pixels);
     CHECK(wavefrontTraversalBatchCount(pixels, batchThreads) == 1u);
     CHECK(wavefrontFullFrameTraversalBatchThreads(0u) == 1u);
+}
+
+TEST_CASE("small Metal 4 curve queues use one tested dispatch")
+{
+    constexpr uint32_t smallPixels = 640u * 360u;
+    CHECK(wavefrontCurveTraversalBatchThreads(smallPixels) == smallPixels);
+    CHECK(wavefrontTraversalBatchCount(smallPixels, wavefrontCurveTraversalBatchThreads(smallPixels)) == 1u);
+
+    constexpr uint32_t largePixels = 1280u * 720u;
+    CHECK(wavefrontCurveTraversalBatchThreads(largePixels) == kWavefrontCurveTraversalBatchThreads);
+    CHECK(wavefrontTraversalBatchCount(largePixels, wavefrontCurveTraversalBatchThreads(largePixels)) == 8u);
 }

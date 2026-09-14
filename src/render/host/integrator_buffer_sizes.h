@@ -79,6 +79,11 @@ inline constexpr uint32_t kWavefrontMinDiagnosticTraversalBatchThreads = 4 * 102
 // dispatches per scheduler group reduce command-buffer fragmentation without
 // changing that tested hardware-dispatch ceiling.
 inline constexpr uint32_t kWavefrontCurveTraversalBatchThreads = 128 * 1024;
+// A 640x360 queue (230,400 rays) is faster as one dispatch and completed more
+// than a thousand consecutive kids_room sample-frames after the curve watchdog
+// fixes. Stop short of the old failing 256K workload; larger images retain the
+// conservative 128K ceiling.
+inline constexpr uint32_t kWavefrontCurveSingleDispatchMaxThreads = 240 * 1024;
 inline constexpr uint32_t kWavefrontCurveTraversalBatchesPerGroup = 4;
 // A Metal 4 command buffer may contain this many traversal dispatches before it
 // is retired. Four batches cap one curve-extend scheduler workload at roughly a
@@ -95,6 +100,12 @@ inline constexpr uint32_t wavefrontTraversalBatchCount(uint32_t pixels,
 inline constexpr uint32_t wavefrontFullFrameTraversalBatchThreads(uint32_t pixels)
 {
     return std::max(pixels, 1u);
+}
+
+inline constexpr uint32_t wavefrontCurveTraversalBatchThreads(uint32_t pixels)
+{
+    return pixels <= kWavefrontCurveSingleDispatchMaxThreads ? wavefrontFullFrameTraversalBatchThreads(pixels) :
+                                                               kWavefrontCurveTraversalBatchThreads;
 }
 // Metal 4 fault diagnosis writes the stage it is about to enter here. Keep it
 // outside the Metal 3 control-buffer snapshot at the start of stageStats.
