@@ -137,6 +137,7 @@ void MetalWavefrontIntegrator::release()
     mCapacity = 0;
     mSharcUpdateDownscale = 0;
     mSplitBaseNeeAllocated = false;
+    mShadowBytesPerPixel = 0;
     mResidencyDirty = true;
     mReportedIorStats = false;
     mLastSharcActivity = 0;
@@ -2584,12 +2585,14 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
                                              uint32_t sharcUpdateDownscale,
                                              bool restirEnabled,
                                              bool restirBasic,
-                                             bool splitBaseNee)
+                                             bool splitBaseNee,
+                                             size_t shadowBytesPerPixel)
 {
     const uint32_t pixels = width * height;
     sharcUpdateDownscale = std::max(sharcUpdateDownscale, 1u);
     if (pixels == mCapacity && sharcUpdateDownscale == mSharcUpdateDownscale && restirEnabled == mRestirAllocated &&
-        restirBasic == mRestirBasicAllocated && splitBaseNee == mSplitBaseNeeAllocated && mPathStateBuffer)
+        restirBasic == mRestirBasicAllocated && splitBaseNee == mSplitBaseNeeAllocated &&
+        shadowBytesPerPixel == mShadowBytesPerPixel && mPathStateBuffer)
     {
         return;
     }
@@ -2652,7 +2655,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
     sz.guideRay = sizeof(GuideRay);
     sz.surfaceGeometry = sizeof(SurfaceGeometryPayload);
     sz.baseLightConnection = sizeof(BaseLightConnectionPayload);
-    sz.shadowRay = sizeof(ShadowRay);
+    sz.shadowRay = shadowBytesPerPixel;
     sz.aovSample = sizeof(AovSample);
     sz.restirReservoir = sizeof(RestirReservoir);
     sz.restirSurfaceHistory = sizeof(RestirSurfaceHistory);
@@ -2721,6 +2724,7 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
     mRestirAllocated = restirEnabled;
     mRestirBasicAllocated = restirBasic;
     mSplitBaseNeeAllocated = splitBaseNee;
+    mShadowBytesPerPixel = shadowBytesPerPixel;
 
     STRELKA_INFO("wavefront buffers for {}x{}: {:.1f} MB total", width, height, queueBytes() / (1024.0 * 1024.0));
 }

@@ -1936,9 +1936,16 @@ void MetalRender::render(Buffer* output)
             const bool splitBaseNee = envUint("STRELKA_SPLIT_BASE_NEE", 0u) != 0u &&
                                       pUniformData->restirDIEnabled == 0u && pUniformData->risCandidates == 1u &&
                                       mMaterials.hasOpenPBRMaterials();
-            mIntegrator.ensureBuffers(
-                width, height, pUniformData->sharcUpdateDownscale, pUniformData->restirDIEnabled != 0u,
-                pUniformData->restirDIEnabled != 0u && pUniformData->restirBiasCorrection != 0u, splitBaseNee);
+            const bool fullShadowState =
+                pUniformData->restirDIEnabled != 0u || pUniformData->sharcCapacity != 0u || auditRenderWork;
+            const size_t shadowBytesPerPixel = fullShadowState ?
+                                                   sizeof(ShadowRay) :
+                                                   sizeof(CompactShadowTraversal) + sizeof(CompactShadowContribution) +
+                                                       (mMaterials.hasSubsurfaceMaterials() ? sizeof(uint32_t) : 0u);
+            mIntegrator.ensureBuffers(width, height, pUniformData->sharcUpdateDownscale,
+                                      pUniformData->restirDIEnabled != 0u,
+                                      pUniformData->restirDIEnabled != 0u && pUniformData->restirBiasCorrection != 0u,
+                                      splitBaseNee, shadowBytesPerPixel);
             // Output resolution, not render resolution: this is what the display
             // shows and what MetalFX upscales into.
             mPost.ensureDisplayTextures(outWidth, outHeight);
