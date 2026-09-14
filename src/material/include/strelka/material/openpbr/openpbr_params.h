@@ -236,9 +236,7 @@ inline unsigned int openpbr_features(const OpenPBRParams& p)
                                        (1u << OPENPBR_TEX_COAT_COLOR) | (1u << OPENPBR_TEX_FUZZ_WEIGHT) |
                                        (1u << OPENPBR_TEX_FUZZ_ROUGHNESS) | (1u << OPENPBR_TEX_FUZZ_COLOR) |
                                        (1u << OPENPBR_TEX_GEOMETRY_COAT_NORMAL);
-    constexpr unsigned int volumeMaps = (1u << OPENPBR_TEX_SUBSURFACE_WEIGHT) |
-                                        (1u << OPENPBR_TEX_SUBSURFACE_COLOR) |
-                                        (1u << OPENPBR_TEX_SUBSURFACE_RADIUS);
+    constexpr unsigned int subsurfaceWeightMap = 1u << OPENPBR_TEX_SUBSURFACE_WEIGHT;
 
     return ((p.coat_weight > 0.0f || p.fuzz_weight > 0.0f || p.thin_film_weight > 0.0f ||
              (p.texture_mask & layerMaps) != 0u)
@@ -246,12 +244,18 @@ inline unsigned int openpbr_features(const OpenPBRParams& p)
                 : 0u) |
            (p.transmission_dispersion_scale > 0.0f ? OPENPBR_FEATURE_DISPERSION : 0u) |
            ((p.transmission_weight > 0.0f || p.subsurface_weight > 0.0f ||
-             (p.texture_mask & volumeMaps) != 0u)
+             (p.texture_mask & subsurfaceWeightMap) != 0u)
                 ? OPENPBR_FEATURE_TRANSLUCENCY
                 : 0u) |
            ((p.base_metalness > 0.0f || (p.texture_mask & (1u << OPENPBR_TEX_BASE_METALNESS)) != 0u)
                 ? OPENPBR_FEATURE_METALLIC
                 : 0u);
+}
+
+inline bool openpbr_base_only(unsigned int features)
+{
+    return (features &
+            (OPENPBR_FEATURE_SHEEN_AND_COAT | OPENPBR_FEATURE_DISPERSION | OPENPBR_FEATURE_TRANSLUCENCY)) == 0u;
 }
 
 inline OpenPBRParams openpbr_make_default_params()

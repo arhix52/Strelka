@@ -103,10 +103,15 @@ TEST_CASE("OpenPBR specialization keeps only scene features")
     p.transmission_dispersion_scale = 1.0f;
     CHECK(openpbr_features(p) == OPENPBR_FEATURE_DISPERSION);
     p.transmission_dispersion_scale = 0.0f;
-    p.texture_mask = 1u << OPENPBR_TEX_SUBSURFACE_RADIUS;
+    p.texture_mask = 1u << OPENPBR_TEX_SUBSURFACE_WEIGHT;
     CHECK(openpbr_features(p) == OPENPBR_FEATURE_TRANSLUCENCY);
+    p.texture_mask = 1u << OPENPBR_TEX_SUBSURFACE_RADIUS;
+    CHECK(openpbr_features(p) == 0u);
     p.texture_mask = 1u << OPENPBR_TEX_BASE_METALNESS;
     CHECK(openpbr_features(p) == OPENPBR_FEATURE_METALLIC);
+    CHECK(openpbr_base_only(openpbr_features(p)));
+    p.transmission_weight = 1.0f;
+    CHECK_FALSE(openpbr_base_only(openpbr_features(p)));
 }
 
 TEST_CASE("openpbr_make_default_params matches the vendored spec defaults")

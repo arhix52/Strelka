@@ -574,6 +574,8 @@ OptiXRender::~OptiXRender()
         optixProgramGroupDestroy(mState.radiance_default_hit_group);
     if (mState.radiance_openpbr_hit_group)
         optixProgramGroupDestroy(mState.radiance_openpbr_hit_group);
+    if (mState.radiance_openpbr_base_hit_group)
+        optixProgramGroupDestroy(mState.radiance_openpbr_base_hit_group);
     if (mState.radiance_curve_hit_group)
         optixProgramGroupDestroy(mState.radiance_curve_hit_group);
     if (mState.radiance_linear_curve_hit_group)
@@ -2342,6 +2344,11 @@ void OptiXRender::createProgramGroups()
         sizeof_log = sizeof(log);
         OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc, 1, &program_group_options, log,
                                                 &sizeof_log, &mState.radiance_openpbr_hit_group));
+
+        hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__radiance_openpbr_base";
+        sizeof_log = sizeof(log);
+        OPTIX_CHECK_LOG(optixProgramGroupCreate(mState.context, &hit_prog_group_desc, 1, &program_group_options, log,
+                                                &sizeof_log, &mState.radiance_openpbr_base_hit_group));
     }
 
     // Curves retain the dynamic material test: hair normally uses its own glTF
@@ -2429,6 +2436,8 @@ void OptiXRender::createPipeline()
     program_groups.push_back(mState.radiance_default_hit_group);
     if (mState.radiance_openpbr_hit_group)
         program_groups.push_back(mState.radiance_openpbr_hit_group);
+    if (mState.radiance_openpbr_base_hit_group)
+        program_groups.push_back(mState.radiance_openpbr_base_hit_group);
     program_groups.push_back(mState.radiance_curve_hit_group);
     program_groups.push_back(mState.radiance_linear_curve_hit_group);
     program_groups.push_back(mState.occlusion_miss_group);
@@ -2516,6 +2525,7 @@ void OptiXRender::destroyPipeline()
     }
     for (OptixProgramGroup* group : { &mState.raygen_prog_group, &mState.radiance_miss_group,
                                       &mState.radiance_default_hit_group, &mState.radiance_openpbr_hit_group,
+                                      &mState.radiance_openpbr_base_hit_group,
                                       &mState.radiance_curve_hit_group, &mState.radiance_linear_curve_hit_group,
                                       &mState.occlusion_miss_group, &mState.occlusion_hit_group,
                                       &mState.occlusion_linear_curve_hit_group, &mState.light_hit_group,
@@ -2764,7 +2774,9 @@ void OptiXRender::createSbt()
                 else if (material_idx < mMaterials.size() &&
                          mMaterials[material_idx].params.material_type == MATERIAL_TYPE_OPENPBR)
                 {
-                    group = mState.radiance_openpbr_hit_group;
+                    group = material_idx < mOpenPBRBaseMaterials.size() && mOpenPBRBaseMaterials[material_idx]
+                                ? mState.radiance_openpbr_base_hit_group
+                                : mState.radiance_openpbr_hit_group;
                 }
                 OPTIX_CHECK(optixSbtRecordPackHeader(group, &radiance_hit));
                 radiance_hit.data.lightId = -1;
@@ -6037,6 +6049,7 @@ void OptiXRender::publishOpenPBRParams()
 {
     const auto& matDescs = mScene->getMaterials();
 
+    mOpenPBRBaseMaterials.assign(matDescs.size(), 0u);
     mHostOpenPBRTextures.clear();
     mOpenPBRParamsBuffer.reset();
     mOpenPBRTexturesBuffer.reset();
@@ -6119,6 +6132,8 @@ void OptiXRender::publishOpenPBRParams()
         openpbrParams.back().texture_mask = mask;
 
         const unsigned int features = openpbr_features(openpbrParams.back());
+        mOpenPBRBaseMaterials[i] = mMaterials[i].params.material_type == MATERIAL_TYPE_OPENPBR &&
+                                   openpbr_base_only(features);
         mState.params.openpbrSheenAndCoat |= (features & OPENPBR_FEATURE_SHEEN_AND_COAT) != 0u;
         mState.params.openpbrDispersion |= (features & OPENPBR_FEATURE_DISPERSION) != 0u;
         mState.params.openpbrTranslucency |= (features & OPENPBR_FEATURE_TRANSLUCENCY) != 0u;
@@ -6186,7 +6201,8 @@ void OptiXRender::publishOpenPBRParams()
     mState.params.openpbrParams = optix::devicePtr<OpenPBRParams>(mOpenPBRParamsBuffer->getPtr());
     mState.params.openpbrTextures = optix::devicePtr<cudaTextureObject_t>(mOpenPBRTexturesBuffer->getPtr());
 
-    STRELKA_INFO("OpenPBR enabled on OptiX: {} material(s), model={}, authored={}", openpbrParams.size(),
+    STRELKA_INFO("OpenPBR enabled on OptiX: {} material(s), {} base-only, model={}, authored={}",
+                 openpbrParams.size(), std::count(mOpenPBRBaseMaterials.begin(), mOpenPBRBaseMaterials.end(), 1u),
                  openpbrModel ? "openpbr" : "gltf", anyAuthored);
 }
 

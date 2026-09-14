@@ -62,6 +62,7 @@ struct PathTracerState
     OptixProgramGroup occlusion_miss_group = nullptr;
     OptixProgramGroup radiance_default_hit_group = nullptr;
     OptixProgramGroup radiance_openpbr_hit_group = nullptr;
+    OptixProgramGroup radiance_openpbr_base_hit_group = nullptr;
     OptixProgramGroup radiance_curve_hit_group = nullptr;
     OptixProgramGroup radiance_linear_curve_hit_group = nullptr;
     OptixProgramGroup occlusion_hit_group = nullptr;
@@ -279,6 +280,7 @@ private:
     std::unique_ptr<OptixBuffer> mOpenPBRParamsBuffer; // OpenPBRParams[] on device
     std::unique_ptr<OptixBuffer> mOpenPBRTexturesBuffer; // cudaTextureObject_t[n * MAX_OPENPBR_TEXTURES]
     std::vector<cudaTextureObject_t> mHostOpenPBRTextures;
+    std::vector<uint8_t> mOpenPBRBaseMaterials;
 
     void allocJointMatrices();
     std::unique_ptr<Mesh> createMesh(const oka::Mesh& mesh, size_t meshIndex);

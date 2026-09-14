@@ -1156,6 +1156,22 @@ DRAM read 1.666 -> 0.955 GB, write 3.292 -> 2.148 GB, and executed instructions
 have means within 0.0011%; sparse firefly paths diverge from changed floating-
 point topology, but there is no measured bias. The scan policy has a unit test.
 
+OptiX now also routes reflection-only OpenPBR materials to the compact base
+state already used by Metal. On CUDA it is 136 bytes instead of the 720-byte
+full prepared tree. Nine of chess_set's 18 material slots qualify; weight-zero
+subsurface colour/radius maps no longer falsely classify a material as
+translucent. In a paired run with the same module and pipeline, changing only
+the SBT route gave **5.835 -> 3.704 ms/sample (-36.5%)**. One steady-state NCU
+launch gave 5.922 -> 3.651 ms, DRAM read 0.923 -> 0.569 GB, write 2.123 ->
+0.656 GB, and local load/store sectors 81.7/89.1 -> 44.5/46.2 M.
+`long_scoreboard` fell 17.65 -> 8.30 cycles, executed instructions 665.8 ->
+547.8 M, and issue-active rose 11.17 -> 16.17%. The global pipeline stack stays
+1728 bytes because layered/translucent materials still need the full hit group;
+the win is the state actually materialised by base hits. Image means are equal
+to six decimals and normalized MAE is 1.49e-6; rare paths diverge only when the
+changed FP order selects a different Monte Carlo branch. pine_scene is
+bit-identical and unchanged because it contains no OpenPBR material.
+
 ## The measurement everything below is read against
 
 RTX 4090, OptiX 9.1, Release, sobol, one sample per launch. Scenes are the three
@@ -1328,13 +1344,12 @@ built with the right flags -- `accel_build_policy.h` gives static geometry
 `PREFER_FAST_TRACE | ALLOW_COMPACTION`, and `PREFER_FAST_BUILD` is confined to
 skinned meshes, which this scene has none of.
 
-**What to do.** Deduplicate identical trees and ferns into instances; that cuts
-the vertex and BLAS footprint and is the only change that moves the L2 hit rate.
-Quantising vertex attributes (oct32 normal, half2 uv) would take `Scene::Vertex`
-from 32 B to 20 B, but that struct is pinned at 32 B by the Metal kernels, which
-read attributes at hardcoded byte offsets -- `tests/scene/test_vertex_packing.cpp`
-guards it -- so it is a both-backends change, not a pine fix. LOD for distant
-trees is the third lever.
+**Engine-side scope.** `Scene::Vertex` already packs tangent, normal and both UV
+sets into four-byte words. Removing the remaining vertex-colour fetch as a
+one-variable probe produced a bit-identical frame and moved the 1080p median
+only 19.234 -> 19.221 ms, i.e. noise; an optional 24-byte vertex ABI is rejected.
+Content LOD is outside this optimisation track. Geometry/BLAS compaction and
+OMM remain valid engine-side experiments.
 
 ## 3. Next-event estimation is 38 % of the frame, everywhere
 

@@ -1023,10 +1023,11 @@ static __device__ LightConnection connectToLight(SamplerState& sampler,
 /// from PerRayData for one reason: the caller commits the bounce before calling
 /// this, so that nothing the bounce decided is alive across the shadow ray. Both
 /// are states this vertex arrived with, and the bounce has already replaced them.
+template <typename OpenPBRPrepared>
 static __device__ float3 estimateDirectLighting(PerRayData* prd,
                                                 const SurfaceInteraction& si,
                                                 float curveRadius,
-                                                const OpenPBR_PreparedBsdf* openpbrPrepared,
+                                                const OpenPBRPrepared* openpbrPrepared,
                                                 const PbrPrepared& pbrPrepared,
                                                 float3 throughputAtVertex,
                                                 uint32_t mediumAtVertex,
@@ -2153,11 +2154,12 @@ struct NextBounce
 /// estimate is still decided by the material rather than by the event that came
 /// back -- `didNee` is computed by the caller before either half runs, which is
 /// the property neeRunsAtVertex() exists to keep.
+template <typename OpenPBRPrepared>
 static __forceinline__ __device__ NextBounce sampleNextBounce(PerRayData* prd,
                                                               SurfaceInteraction& si,
                                                               const MaterialParams& matParams,
                                                               const OpenPBRParams& openpbrMat,
-                                                              const OpenPBR_PreparedBsdf& openpbrPrepared,
+                                                              const OpenPBRPrepared& openpbrPrepared,
                                                               const PbrPrepared& pbrPrepared,
                                                               bool isOpenPBR,
                                                               bool isFibre,
@@ -2183,7 +2185,7 @@ static __forceinline__ __device__ NextBounce sampleNextBounce(PerRayData* prd,
     const uint32_t fresnelWord = randomBits<SampleDimension::eBSDF3>(prd->sampler) >> 9u;
     // openpbr_sample takes three uniforms; xi.w is the one standard_pbr spends
     // choosing a lobe and OpenPBR does not need.
-    BsdfSampleResult sample_data = isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, xi) :
+    BsdfSampleResult sample_data = isOpenPBR ? openpbr_bsdf_sample(openpbrPrepared, si.wo, xi) :
                                                 bsdf_sample(si, xi, lobeWord, fresnelWord, pbrPrepared);
 
     if (sample_data.event_type == BSDF_EVENT_ABSORB)
@@ -2423,10 +2425,12 @@ enum class RadianceMaterialMode
 {
     Dynamic,
     Gltf,
-    OpenPBR
+    OpenPBR,
+    OpenPBRBase
 };
 
-template <RadianceMaterialMode Mode>
+template <RadianceMaterialMode Mode,
+          typename OpenPBRPrepared = OpenPBR_PreparedBsdf>
 static __forceinline__ __device__ void closestHitRadiance()
 {
     OptixPrimitiveType primType = optixGetPrimitiveType();
@@ -2726,7 +2730,7 @@ static __forceinline__ __device__ void closestHitRadiance()
     // material still carries a MaterialParams for emission, coverage, the
     // dielectric priority and the medium flags, and every one of those is read
     // below. Only the BSDF is replaced.
-    const bool isOpenPBR = Mode == RadianceMaterialMode::OpenPBR ? true :
+    const bool isOpenPBR = Mode == RadianceMaterialMode::OpenPBR || Mode == RadianceMaterialMode::OpenPBRBase ? true :
                            Mode == RadianceMaterialMode::Gltf ? false :
                                                                isOpenPBRMaterial(matParams);
     // Zero-initialised, and read only under `isOpenPBR`. It is not a valid
@@ -2869,10 +2873,17 @@ static __forceinline__ __device__ void closestHitRadiance()
     //
     // Declared unconditionally rather than inside the branch because the eval
     // below is reached from a helper that takes a pointer to it.
-    OpenPBR_PreparedBsdf openpbrPrepared;
+    OpenPBRPrepared openpbrPrepared;
     if (isOpenPBR)
     {
-        openpbrPrepared = openpbr_prepare_at(openpbrMat, si, prd->throughput);
+        if constexpr (Mode == RadianceMaterialMode::OpenPBRBase)
+        {
+            openpbrPrepared = openpbr_prepare_base_at(openpbr_base_params(openpbrMat), si, prd->throughput);
+        }
+        else
+        {
+            openpbrPrepared = openpbr_prepare_at(openpbrMat, si, prd->throughput);
+        }
     }
 
     // The glTF model's equivalent, and it exists for the same reason: the lobe
@@ -3094,4 +3105,9 @@ extern "C" __global__ void __closesthit__radiance_gltf()
 extern "C" __global__ void __closesthit__radiance_openpbr()
 {
     closestHitRadiance<RadianceMaterialMode::OpenPBR>();
+}
+
+extern "C" __global__ void __closesthit__radiance_openpbr_base()
+{
+    closestHitRadiance<RadianceMaterialMode::OpenPBRBase, OpenPBR_BasePreparedBsdf>();
 }
