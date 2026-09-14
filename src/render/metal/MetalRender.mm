@@ -2154,11 +2154,14 @@ void MetalRender::render(Buffer* output)
                 {
                     mIntegrator.resetStageProfilingMetal4();
                 }
-                mIntegrator.variantFor(features | metal::WavefrontFeatures::kMetal4);
+                const bool textureLodCode =
+                    pUniformData->textureLodMode != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
+                mIntegrator.variantFor(features | metal::WavefrontFeatures::kMetal4, textureLodCode);
                 if (featureIn.hasSharc)
                 {
-                    mIntegrator.variantFor(features | metal::WavefrontFeatures::kSharcUpdate |
-                                           metal::WavefrontFeatures::kMetal4);
+                    mIntegrator.variantFor(
+                        features | metal::WavefrontFeatures::kSharcUpdate | metal::WavefrontFeatures::kMetal4,
+                        textureLodCode);
                 }
                 if (mMetal4ResidencyGeneration != mIntegrator.capacity() ||
                     mMetal4SharcResidencyGeneration != mFrameUniforms.sharcResourceGeneration() ||

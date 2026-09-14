@@ -2068,7 +2068,7 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
     const uint32_t depth = pathDepth(pathFlags);
     const float coneSpread = (depth == 0u || (pathFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
     const float coneWidthHere = coneSpread * hit.distance;
-    if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && coneWidthHere > 0.0f)
+    if (SPEC_TEXTURE_LOD_CODE && uniforms.textureLodMode != 0u && uvArea2 > 0.0f && coneWidthHere > 0.0f)
     {
         const float ndotd = max(abs(dot(geometryNormal, rayDirection)), 1e-4f);
         lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
@@ -4422,7 +4422,8 @@ static inline void wavefrontShadeImpl(uint gid,
             const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
             const float coneSpread = (depth == 0u || (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
             const float coneWidthHere = coneSpread * rec.distance;
-            if (uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f && coneWidthHere > 0.0f)
+            if (SPEC_TEXTURE_LOD_CODE && uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f &&
+                coneWidthHere > 0.0f)
             {
                 const float ndotd = max(abs(dot(shadingGeomNormal, rayDir)), 1e-4f);
                 lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);

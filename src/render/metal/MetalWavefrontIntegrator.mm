@@ -735,14 +735,15 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     MTL::Buffer* uniformBuffer = frame.uniformBuffer;
     Buffer* output = frame.output;
 
-    const WavefrontVariant* variant = variantFor(features | WavefrontFeatures::kMetal4);
+    const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
+    const bool textureLodCode = uniforms->textureLodMode != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
+    const WavefrontVariant* variant = variantFor(features | WavefrontFeatures::kMetal4, textureLodCode);
     if (!variant)
     {
         return;
     }
     const uint32_t pixels = frame.pathCount != 0u ? frame.pathCount : width * height;
     MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
-    const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
     const bool restirDiagnostic = (features & WavefrontFeatures::kRestirRayTracedDiagnostic) != 0u;
 
     MTL4::ArgumentTable* table = mMetal4->argumentTable();
@@ -1585,10 +1586,11 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     Buffer* output = frame.output;
 
     const uint32_t pixels = frame.pathCount != 0u ? frame.pathCount : width * height;
-    const WavefrontVariant* variant = variantFor(features);
+    const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
+    const bool textureLodCode = uniforms->textureLodMode != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
+    const WavefrontVariant* variant = variantFor(features, textureLodCode);
     const uint32_t bounceIterations = frame.bounceIterations;
     const MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();
-    const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
     const bool sharcUpdatePass = (features & WavefrontFeatures::kSharcUpdate) != 0u;
     const bool restirDiagnostic = (features & WavefrontFeatures::kRestirRayTracedDiagnostic) != 0u;
     // Textures are reached through resource IDs inside the Material struct, so
@@ -2163,9 +2165,10 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
 // features. Compiling seven kernels takes a few milliseconds, which is fine
 // because the key only changes when a setting or the scene does — never per
 // frame.
-const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
+const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, bool textureLodCode)
 {
-    const auto it = mVariants.find(features);
+    const uint64_t variantKey = uint64_t{ features } | (uint64_t{ textureLodCode } << 32u);
+    const auto it = mVariants.find(variantKey);
     if (it != mVariants.end())
     {
         return &it->second;
@@ -2266,6 +2269,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     const bool nearestAlphaTexture =
         stochasticAlphaVisibility && allAlphaBlend && !envFlag("STRELKA_LINEAR_ALPHA_TEXTURE");
     values->setConstantValue(&nearestAlphaTexture, MTL::DataTypeBool, (NS::UInteger)37);
+    values->setConstantValue(&textureLodCode, MTL::DataTypeBool, (NS::UInteger)38);
     constexpr bool fastFiniteMath = true;
     const bool genericShadeSplit = (features & WavefrontFeatures::kGenericShadeSplit) != 0u;
     auto entry = [&](const char* base) -> std::string {
@@ -2507,9 +2511,10 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
     STRELKA_INFO(
         "wavefront variant env={} lights={} motion={} dof={} debug={} alpha={} fog={} sss={} sharc={} "
         "curves={} sharcUpdate={} openpbr={} allOpenpbr={} allNativeOpenpbr={} risOne={} aov={} genericSplit={} "
-        "sampler={} metal4={} alphaIft={} fastFiniteMath={}",
+        "sampler={} metal4={} alphaIft={} fastFiniteMath={} textureLodCode={}",
         envMap, lights, motionBlur, dof, debug, alpha, fog, subsurface, sharc, curves, sharcUpdate, openpbr, allOpenPBR,
-        allNativeOpenPBR, risOne, aov, genericShadeSplit, samplerType, useMetal4, alphaIft, fastFiniteMath);
+        allNativeOpenPBR, risOne, aov, genericShadeSplit, samplerType, useMetal4, alphaIft, fastFiniteMath,
+        textureLodCode);
     // maxTotalThreadsPerThreadgroup is Metal's available proxy for per-pipeline register pressure.
     auto tgLimit = [](MTL::ComputePipelineState* p) -> uint32_t {
         return p ? (uint32_t)p->maxTotalThreadsPerThreadgroup() : 0u;
@@ -2522,7 +2527,7 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features)
         tgLimit(v.shadeTranslucent), tgLimit(v.shade), tgLimit(v.shadowStatic), tgLimit(v.shadowStaticIft),
         tgLimit(v.shadowDirectStatic), tgLimit(v.shadowMotion), tgLimit(v.guideStatic), tgLimit(v.guideMotion),
         tgLimit(v.miss));
-    return &mVariants.emplace(features, v).first->second;
+    return &mVariants.emplace(variantKey, v).first->second;
 }
 
 void MetalWavefrontIntegrator::buildPipelines()

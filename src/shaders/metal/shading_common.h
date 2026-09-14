@@ -77,6 +77,7 @@ constant bool kFcAlphaUvIdentity [[function_constant(34)]];
 constant bool kFcAlphaBaseColorOne [[function_constant(35)]];
 constant bool kFcCompactAlphaMaterials [[function_constant(36)]];
 constant bool kFcNearestAlphaTexture [[function_constant(37)]];
+constant bool kFcTextureLodCode [[function_constant(38)]];
 
 constant bool SPEC_FOG = is_function_constant_defined(kFcFog) ? kFcFog : false;
 constant bool SPEC_STOCHASTIC_ALPHA_VISIBILITY =
@@ -89,6 +90,7 @@ constant bool SPEC_COMPACT_ALPHA_MATERIALS =
     is_function_constant_defined(kFcCompactAlphaMaterials) ? kFcCompactAlphaMaterials : true;
 constant bool SPEC_NEAREST_ALPHA_TEXTURE =
     is_function_constant_defined(kFcNearestAlphaTexture) ? kFcNearestAlphaTexture : false;
+constant bool SPEC_TEXTURE_LOD_CODE = is_function_constant_defined(kFcTextureLodCode) ? kFcTextureLodCode : true;
 constant bool SPEC_SHARC = is_function_constant_defined(kFcSharc) ? kFcSharc : false;
 constant bool SPEC_SSS = is_function_constant_defined(kFcSubsurface) ? kFcSubsurface : false;
 constant bool SPEC_ENV_MAP = is_function_constant_defined(kFcEnvMap) ? kFcEnvMap : true;

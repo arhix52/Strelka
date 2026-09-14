@@ -157,7 +157,7 @@ public:
                        bool splitBaseNee,
                        size_t shadowBytesPerPixel,
                        bool aovEnabled);
-    const WavefrontVariant* variantFor(uint32_t features);
+    const WavefrontVariant* variantFor(uint32_t features, bool textureLodCode);
 
     // Returns the encoder to keep using: in profiling mode each stage gets its
     // own, because this hardware can only sample counters at encoder boundaries.
@@ -302,7 +302,7 @@ private:
     MTL::Device* mDevice = nullptr;
     Metal4Context* mMetal4 = nullptr;
 
-    std::map<uint32_t, WavefrontVariant> mVariants;
+    std::map<uint64_t, WavefrontVariant> mVariants;
     MTL::Library* mLibrary = nullptr;
 
     MTL::ComputePipelineState* mResolvePSO = nullptr;
