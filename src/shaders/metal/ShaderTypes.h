@@ -522,11 +522,13 @@ struct Uniforms
     vector_float2 envMapRotationSinCos;
 #ifdef __METAL_VERSION__
     device const packed_float2* envRowCosBounds;
+    device const float* envPdfTable;
 #else
     uint64_t envRowCosBounds;
+    uint64_t envPdfTable;
 #endif
 };
-static_assert(sizeof(Uniforms) == 1120, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1136, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {

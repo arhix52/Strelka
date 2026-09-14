@@ -3044,7 +3044,7 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                           device SharcUpdateState* sharcUpdates [[buffer(10)]],
                           device SharcAccumulationEntry* sharcAccumulation [[buffer(11)]],
                           device const UniformLight* lights [[buffer(12)]],
-                          device const EnvAliasEntry* envAliasTable [[buffer(13)]],
+                          device const uint2* envAliasTable [[buffer(13)]],
                           texture2d<float> envMapTexture [[texture(0)]],
                           texture2d<float> envBackgroundTexture [[texture(1)]])
 {
@@ -3177,8 +3177,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         }
         else
         {
-            const float envPdf = envMapPdf(
-                rayDir, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotationSinCos);
+            const float envPdf = envMapPdf(rayDir, uniforms.envPdfTable, uniforms.envMapWidth, uniforms.envMapHeight,
+                                           uniforms.envMapRotationSinCos);
             const float envSelectionPdf =
                 (uniforms.numLights > 0 || (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0)) ?
                     uniforms.envMapColorTint.w :
@@ -3729,7 +3729,7 @@ kernel void wavefrontConnectBase(uint gid [[thread_position_in_grid]],
                                  constant uint32_t& sampleIdx [[buffer(8)]],
                                  device const uint32_t* queue [[buffer(9)]],
                                  device const uint32_t* control [[buffer(10)]],
-                                 device const EnvAliasEntry* envAliasTable [[buffer(11)]],
+                                 device const uint2* envAliasTable [[buffer(11)]],
                                  device const char* vertexBuffer [[buffer(12)]],
                                  device const char* prevVertexBuffer [[buffer(13)]],
                                  device const uint32_t* indexBuffer [[buffer(14)]],
@@ -3781,7 +3781,7 @@ static inline void wavefrontShadeImpl(uint gid,
                                       device float4* radianceOut,
                                       device IorStack* iorStacks,
                                       device const GeometryEntry* geometryEntries,
-                                      device const EnvAliasEntry* envAliasTable,
+                                      device const uint2* envAliasTable,
                                       device const char* vertexBuffer,
                                       device const char* prevVertexBuffer,
                                       device const uint32_t* indexBuffer,
@@ -6245,7 +6245,7 @@ static inline void wavefrontShadeImpl(uint gid,
         device Material* materials [[buffer(4)]], device PathState* paths [[buffer(5)]],                                \
         device PathRay* rays [[buffer(21)]], device char* hits [[buffer(6)]], device float4* radianceOut [[buffer(7)]], \
         device IorStack* iorStacks [[buffer(8)]], device const GeometryEntry* geometryEntries [[buffer(9)]],            \
-        device const EnvAliasEntry* envAliasTable [[buffer(10)]], device const char* vertexBuffer [[buffer(11)]],       \
+        device const uint2* envAliasTable [[buffer(10)]], device const char* vertexBuffer [[buffer(11)]],               \
         device const char* prevVertexBuffer [[buffer(12)]], device const uint32_t* indexBuffer [[buffer(13)]],          \
         constant uint32_t& sampleIdx [[buffer(14)]], device const uint32_t* queue [[buffer(15)]],                       \
         device uint32_t* queueOut [[buffer(16)]], device atomic_uint* outCounter [[buffer(17)]],                        \
@@ -6392,7 +6392,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                                         device const IesGpuBufferHeader* iesProfiles [[buffer(2)]],
                                         device UniformLight* lights [[buffer(3)]],
                                         device const Material* materials [[buffer(4)]],
-                                        device const EnvAliasEntry* envAliasTable [[buffer(5)]],
+                                        device const uint2* envAliasTable [[buffer(5)]],
                                         device const char* vertexBuffer [[buffer(6)]],
                                         device const char* prevVertexBuffer [[buffer(7)]],
                                         device const uint32_t* indexBuffer [[buffer(8)]],

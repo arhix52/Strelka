@@ -1,8 +1,6 @@
 #include "MetalEnvironment.h"
 #include <host/ibl_alias_table.h>
 
-#include "ShaderTypes.h"
-
 #include <log.h>
 
 #include <algorithm>
@@ -39,6 +37,13 @@ struct EnvRowCosBounds
     float south;
 };
 static_assert(sizeof(EnvRowCosBounds) == 8);
+
+struct EnvAliasSelection
+{
+    uint32_t threshold;
+    uint32_t alias;
+};
+static_assert(sizeof(EnvAliasSelection) == 8);
 
 bool loadFloatImage(const std::string& texturePath, const char* kind, FloatImage& image)
 {
@@ -155,6 +160,11 @@ void MetalEnvironment::clearMap()
         mState.aliasBuffer->release();
         mState.aliasBuffer = nullptr;
     }
+    if (mState.pdfBuffer)
+    {
+        mState.pdfBuffer->release();
+        mState.pdfBuffer = nullptr;
+    }
     if (mState.rowCosBoundsBuffer)
     {
         mState.rowCosBoundsBuffer->release();
@@ -184,7 +194,13 @@ void MetalEnvironment::ensurePlaceholderAliasBuffer()
         return;
     if (!mState.aliasBuffer)
     {
-        mState.aliasBuffer = mDevice->newBuffer(sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);
+        const EnvAliasSelection selection{};
+        mState.aliasBuffer = mDevice->newBuffer(&selection, sizeof(selection), MTL::ResourceStorageModeShared);
+    }
+    if (!mState.pdfBuffer)
+    {
+        const float pdf = 0.0f;
+        mState.pdfBuffer = mDevice->newBuffer(&pdf, sizeof(pdf), MTL::ResourceStorageModeShared);
     }
     if (!mState.rowCosBoundsBuffer)
     {
@@ -229,14 +245,20 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
     const int aliasHeight = std::min(image.height, kMaxAliasHeight);
     const IblAliasTableResult aliasResult =
         buildDownsampledSolidAngleIblAliasTable(image.pixels, image.width, image.height, aliasWidth, aliasHeight);
-    static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
-                  "host EnvAliasEntry must match ShaderTypes EnvAliasEntry");
     mState.totalPower = aliasResult.totalPower;
     mState.aliasWidth = static_cast<uint32_t>(aliasWidth);
     mState.aliasHeight = static_cast<uint32_t>(aliasHeight);
 
+    std::vector<EnvAliasSelection> selection(aliasResult.alias.size());
+    std::vector<float> pdf(aliasResult.alias.size());
+    for (size_t i = 0; i < aliasResult.alias.size(); ++i)
+    {
+        selection[i] = { aliasResult.alias[i].threshold, aliasResult.alias[i].alias };
+        pdf[i] = aliasResult.alias[i].solidAnglePdf;
+    }
     mState.aliasBuffer = mDevice->newBuffer(
-        aliasResult.alias.data(), aliasResult.alias.size() * sizeof(EnvAliasEntry), MTL::ResourceStorageModeShared);
+        selection.data(), selection.size() * sizeof(EnvAliasSelection), MTL::ResourceStorageModeShared);
+    mState.pdfBuffer = mDevice->newBuffer(pdf.data(), pdf.size() * sizeof(float), MTL::ResourceStorageModeShared);
 
     std::vector<EnvRowCosBounds> rowCosBounds(static_cast<size_t>(aliasHeight));
     for (int y = 0; y < aliasHeight; ++y)
@@ -250,7 +272,7 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
     }
     mState.rowCosBoundsBuffer = mDevice->newBuffer(
         rowCosBounds.data(), rowCosBounds.size() * sizeof(EnvRowCosBounds), MTL::ResourceStorageModeShared);
-    if (!mState.mapTexture || !mState.aliasBuffer || !mState.rowCosBoundsBuffer)
+    if (!mState.mapTexture || !mState.aliasBuffer || !mState.pdfBuffer || !mState.rowCosBoundsBuffer)
     {
         releaseFloatImage(image);
         STRELKA_ERROR("Failed to allocate Metal environment resources for {}", texturePath);
@@ -258,6 +280,8 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
         return;
     }
     mState.rowCosBoundsBuffer->setLabel(NS::String::string("environment row cosine bounds", NS::UTF8StringEncoding));
+    mState.aliasBuffer->setLabel(NS::String::string("environment alias selection", NS::UTF8StringEncoding));
+    mState.pdfBuffer->setLabel(NS::String::string("environment solid-angle PDF", NS::UTF8StringEncoding));
 
     releaseFloatImage(image);
 
@@ -274,8 +298,8 @@ void MetalEnvironment::loadMap(const std::string& texturePath)
         "Env map alias table built: {}x{} entries for {}x{} map ({:.1f} MB), total power: {:.1f}, avgLum: {:.4f}, "
         "autoScale: {:.1f}",
         aliasWidth, aliasHeight, image.width, image.height,
-        aliasResult.alias.size() * sizeof(EnvAliasEntry) / (1024.0 * 1024.0), aliasResult.totalPower, avgWeightedLum,
-        mState.autoScale);
+        aliasResult.alias.size() * (sizeof(EnvAliasSelection) + sizeof(float)) / (1024.0 * 1024.0),
+        aliasResult.totalPower, avgWeightedLum, mState.autoScale);
 }
 
 } // namespace oka::metal

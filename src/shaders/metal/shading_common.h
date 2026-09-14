@@ -1228,7 +1228,7 @@ LightConnection connectEnvDirection(constant Uniforms& uniforms,
 LightConnection connectEnvLight(constant Uniforms& uniforms,
                                 thread SamplerState& samplerRnd,
                                 thread SurfaceInteraction& si,
-                                device const EnvAliasEntry* envAliasTable,
+                                device const uint2* envAliasTable,
                                 texture2d<float> envMapTexture,
                                 bool volumeEvent)
 {
@@ -1240,8 +1240,8 @@ LightConnection connectEnvLight(constant Uniforms& uniforms,
 
     float envPdf = 0.0f;
     float2 envUv;
-    float3 dir = sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envRowCosBounds, uniforms.envMapWidth,
-                              uniforms.envMapHeight, uniforms.envMapRotationSinCos, envUv, envPdf);
+    float3 dir = sampleEnvMap(aliasWords, jitter, envAliasTable, uniforms.envPdfTable, uniforms.envRowCosBounds,
+                              uniforms.envMapWidth, uniforms.envMapHeight, uniforms.envMapRotationSinCos, envUv, envPdf);
 
     // The alias sample already owns the exact texture coordinate. Reversing
     // its direction through atan2/asin only to recover that coordinate adds
@@ -1549,7 +1549,7 @@ LightConnection connectToLight(constant Uniforms& uniforms,
                                float motionTime,
                                thread SamplerState& samplerRnd,
                                thread SurfaceInteraction& si,
-                               device const EnvAliasEntry* envAliasTable,
+                               device const uint2* envAliasTable,
                                texture2d<float> envMapTexture,
                                device const IesGpuBufferHeader* iesBuffer,
                                bool volumeEvent = false)
@@ -1625,7 +1625,7 @@ LightConnection reconnectRestirSampleContext(constant Uniforms& uniforms,
                                              device const uint32_t* indexBuffer,
                                              float motionTime,
                                              thread SurfaceInteraction& si,
-                                             device const EnvAliasEntry* envAliasTable,
+                                             device const uint2* envAliasTable,
                                              texture2d<float> envMapTexture,
                                              device const IesGpuBufferHeader* iesBuffer,
                                              thread const RestirLightSample& sample)
@@ -1639,7 +1639,7 @@ LightConnection reconnectRestirSampleContext(constant Uniforms& uniforms,
     if (sampleType == RESTIR_SAMPLE_ENVIRONMENT && SPEC_ENV_MAP && hasEnvMap)
     {
         const float3 direction = restirSampleData3(sample);
-        const float envPdf = envMapPdf(direction, envAliasTable, uniforms.envMapWidth, uniforms.envMapHeight,
+        const float envPdf = envMapPdf(direction, uniforms.envPdfTable, uniforms.envMapWidth, uniforms.envMapHeight,
                                        uniforms.envMapRotationSinCos) *
                              (hasLocal ? envSelectionPdf : 1.0f);
         return connectEnvDirection(uniforms, direction, envPdf, si, envMapTexture, false);
@@ -1672,7 +1672,7 @@ LightConnection reconnectRestirSample(constant Uniforms& uniforms,
                                       device const uint32_t* indexBuffer,
                                       float motionTime,
                                       thread SurfaceInteraction& si,
-                                      device const EnvAliasEntry* envAliasTable,
+                                      device const uint2* envAliasTable,
                                       texture2d<float> envMapTexture,
                                       device const IesGpuBufferHeader* iesBuffer,
                                       thread const RestirLightSample& sample)

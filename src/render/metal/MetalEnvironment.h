@@ -14,6 +14,7 @@ struct EnvMapState
     MTL::Texture* mapTexture = nullptr;
     MTL::Texture* backgroundTexture = nullptr;
     MTL::Buffer* aliasBuffer = nullptr;
+    MTL::Buffer* pdfBuffer = nullptr;
     // cos(theta) at the north/south edge of each alias-table row.
     MTL::Buffer* rowCosBoundsBuffer = nullptr;
     double totalPower = 0.0;
@@ -41,7 +42,7 @@ public:
     void clearBackground();
     void release();
 
-    // One-entry placeholder when no env is loaded (uniforms still bind a buffer).
+    // One-entry placeholders when no env is loaded (uniforms still bind the buffers).
     void ensurePlaceholderAliasBuffer();
 
     const EnvMapState& state() const

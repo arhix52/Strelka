@@ -43,6 +43,19 @@ static inline float3 metalEnvDirection(float u, float cosTheta, float2 rotationS
     return float3(cosR * x + sinR * z, cosTheta, -sinR * x + cosR * z);
 }
 
+// Metal keeps the random alias walk separate from the PDF table. A sampled
+// direction needs one random 8-byte selection record followed by one 4-byte
+// PDF load; MIS-only evaluation touches the dense PDF array alone.
+static inline uint32_t metalEnvAliasTexel(device const uint2* aliasTable,
+                                          uint32_t texelCount,
+                                          uint32_t bucketWord,
+                                          uint32_t coinWord)
+{
+    const uint32_t bucket = discreteUniformIndex(texelCount, bucketWord);
+    const uint2 entry = aliasTable[bucket];
+    return discreteAliasSelect(texelCount, bucket, coinWord, entry.x, entry.y);
+}
+
 // Sample the environment map with an alias table (Walker/Vose).
 //
 // The alias table avoids the serial dependent loads of a two-dimensional CDF search.
@@ -51,7 +64,8 @@ static inline float3 metalEnvDirection(float u, float cosTheta, float2 rotationS
 // independently jitter within the selected texel.
 static inline float3 sampleEnvMap(const uint2 aliasWords,
                                   const float2 jitter,
-                                  device const EnvAliasEntry* aliasTable,
+                                  device const uint2* aliasTable,
+                                  device const float* pdfTable,
                                   device const packed_float2* rowCosBounds,
                                   uint32_t envMapWidth,
                                   uint32_t envMapHeight,
@@ -62,12 +76,10 @@ static inline float3 sampleEnvMap(const uint2 aliasWords,
     const uint32_t w = envMapWidth;
     const uint32_t h = envMapHeight;
 
-    // Shared with OptiX and the host: see common/env_alias_sampling.h, which
-    // tests/render/test_env_alias_sampling.cpp exercises without a GPU.
-    const EnvAliasDraw draw = envAliasDraw(aliasTable, w * h, aliasWords.x, aliasWords.y);
+    const uint32_t texel = metalEnvAliasTexel(aliasTable, w * h, aliasWords.x, aliasWords.y);
 
-    const uint32_t x = draw.texel % w;
-    const uint32_t y = draw.texel / w;
+    const uint32_t x = texel % w;
+    const uint32_t y = texel / w;
 
     const float u = (float(x) + envOpenRandom(jitter.x)) / float(w);
     const float2 row = float2(rowCosBounds[y]);
@@ -76,18 +88,15 @@ static inline float3 sampleEnvMap(const uint2 aliasWords,
     uv = float2(u, v);
     const float3 dir = metalEnvDirection(u, cosTheta, rotationSinCos);
 
-    pdf = aliasTable[draw.texel].solidAnglePdf;
+    pdf = pdfTable[texel];
 
     return dir;
 }
 
 // Evaluate the solid-angle PDF for a direction — used for MIS against BSDF
 // sampling. One texel fetch, no search.
-static inline float envMapPdf(const float3 dir,
-                              device const EnvAliasEntry* aliasTable,
-                              uint32_t envMapWidth,
-                              uint32_t envMapHeight,
-                              float2 rotationSinCos)
+static inline float envMapPdf(
+    const float3 dir, device const float* pdfTable, uint32_t envMapWidth, uint32_t envMapHeight, float2 rotationSinCos)
 {
     const float2 uv = metalDirToEnvUv(dir, rotationSinCos);
 
@@ -96,5 +105,5 @@ static inline float envMapPdf(const float3 dir,
     const int x = clamp((int)(uv.x * (float)w), 0, w - 1);
     const int y = clamp((int)(uv.y * (float)h), 0, h - 1);
 
-    return aliasTable[(uint)y * envMapWidth + (uint)x].solidAnglePdf;
+    return pdfTable[(uint)y * envMapWidth + (uint)x];
 }

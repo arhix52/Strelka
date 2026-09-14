@@ -766,7 +766,7 @@ bool MetalRender::memoryReport(MemoryReport& report) const
         add("Textures", bytes);
     }
     add("Environment", texBytes(mEnvironment.state().mapTexture) + texBytes(mEnvironment.state().backgroundTexture) +
-                           bufBytes(mEnvironment.state().aliasBuffer) +
+                           bufBytes(mEnvironment.state().aliasBuffer) + bufBytes(mEnvironment.state().pdfBuffer) +
                            bufBytes(mEnvironment.state().rowCosBoundsBuffer));
 
     {
@@ -903,7 +903,8 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, cameraRayForward) == 1088);
     static_assert(offsetof(Uniforms, envMapRotationSinCos) == 1104);
     static_assert(offsetof(Uniforms, envRowCosBounds) == 1112);
-    static_assert(sizeof(Uniforms) == 1120, "Uniforms host/Metal ABI changed");
+    static_assert(offsetof(Uniforms, envPdfTable) == 1120);
+    static_assert(sizeof(Uniforms) == 1136, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium
@@ -1079,6 +1080,7 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mGeometry.curveRadiusBuffer());
     add(mGeometry.curveSegmentBuffer());
     add(mEnvironment.state().aliasBuffer);
+    add(mEnvironment.state().pdfBuffer);
     add(mEnvironment.state().rowCosBoundsBuffer);
     add(mAccumulationBuffer);
     mIntegrator.addResidentAllocations(add);
