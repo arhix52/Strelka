@@ -55,19 +55,13 @@ static __inline__ PackedAnalyticHit intersectPackedRectangle(
         return { maxDistance, false };
     }
 
-    const float numerator = dot(corner - rayOrigin, planeNormal);
-    const float distanceHigh = numerator / denominator;
-    // Preserve the quotient remainder when reconstructing the hit point. This
-    // is three FMAs and one divide, not a general compensated affine solve, and
-    // keeps a ray exactly on a practical rectangle edge from moving across it.
-    const float distanceLow = fma(-distanceHigh, denominator, numerator) / denominator;
-    const float distance = distanceHigh + distanceLow;
+    const float distance = dot(corner - rayOrigin, planeNormal) / denominator;
     if (!(distance >= minDistance && distance < maxDistance))
     {
         return { maxDistance, false };
     }
 
-    const float3 offset = fma(rayDirection, float3(distanceHigh), rayOrigin - corner) + distanceLow * rayDirection;
+    const float3 offset = fma(rayDirection, float3(distance), rayOrigin - corner);
     const float projectedX = dot(offset, edgeX);
     const float projectedY = dot(offset, edgeY);
     const float3 inverseGram = float3(light.points[2]);

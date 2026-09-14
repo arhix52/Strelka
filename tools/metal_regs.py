@@ -59,7 +59,13 @@ def trace_inputs(bundle, kernel):
     name = kernel.encode()
     at = store.find(name)
     while at >= 0:
-        v = [struct.unpack_from("<Q", store, o)[0] for o in range(max(at - 1400, 0), at - 8, 8)]
+        # A fully specialised wavefront pipeline currently carries 38 values
+        # at 48 bytes each. The old 1400-byte window silently dropped constants
+        # 0..9, then metal-nt compiled their conservative defaults (including
+        # motion blur) and reported inflated code/register hotspots. Leave room
+        # for the API's full 64-index range; entries nearest the function name
+        # overwrite any same-index values picked up from an adjacent record.
+        v = [struct.unpack_from("<Q", store, o)[0] for o in range(max(at - 4096, 0), at - 8, 8)]
         found = {}
         for k in range(len(v) - 5):
             idx, z1, ty, z2, size, val = v[k:k + 6]

@@ -1421,8 +1421,9 @@ bool MetalAccelStructure::step(double budgetMs)
         }
         else
         {
-            STRELKA_INFO("Hardware alpha IFT ready for all {} cutout geometries (external 12-byte UV records)",
-                         mCutoutGeometryCount);
+            STRELKA_INFO(
+                "Hardware alpha IFT ready for all {} cutout geometries (external 8-byte UV records + block decode)",
+                mCutoutGeometryCount);
         }
     }
     STRELKA_INFO("Primitive surface data: {} geometries, {} triangles embedded in BLAS", mPrimitiveSurfaceGeometryCount,
