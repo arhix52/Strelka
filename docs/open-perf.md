@@ -130,6 +130,40 @@ NCU measured 17.684 -> 17.42 ms, 1.65% fewer instructions and 3.4% less
 `no_instruction`. DRAM barely moved because the forest's geometry still owns
 that traffic. Pine and kids outputs were bit-identical.
 
+### Metal-style compaction probes that do not transfer to the megakernel
+
+The Metal renderer streams records between wavefront stages; OptiX shades the
+hit in the same continuation that traced it. Nine direct ports were measured
+on pine at the 1080p/depth-8 target and reverted when that difference made them
+neutral or slower:
+
+- removing `SurfaceHitData::position` and reconstructing it from ray origin,
+  direction and `t` moved 16.470 -> 16.563 ms and changed path trajectories;
+  replacing the 12-byte binormal with its 4-byte handedness was bit-identical
+  but 16.481 ms;
+- reducing the glTF lobe probabilities to four integer CDFs was 16.931 ms, and
+  dropping the unused lobe weights was 16.598 ms;
+- a dense exact cutout-UV record replaced three index and three 32-byte vertex
+  lookups with one 12-byte load. It added 14.1 MiB, remained bit-identical, and
+  was 16.562 ms. NCU saw only 0.8% less DRAM read and 0.75% fewer instructions,
+  with launch time flat at 17.297 ms: the alpha geometry was already resident
+  enough that duplicating it did not pay;
+- moving the 16-byte participating-medium tail out of `PerRayData` reduced
+  local load/store sectors 4.7/6.2% and DRAM read/write 2.1/9.9%, but the OptiX
+  continuation allocation remained 256 bytes. Nsys was only 16.416 ms and NCU
+  17.275 ms, while `no_instruction` worsened 16.37 -> 17.77 cycles. Merely
+  gating the same medium copies inside `NextBounce` regressed to 16.889 ms;
+- capping opacity micromaps at level 3 reduced their storage 76 -> 28 MiB and
+  build overhead about 67 -> 45 s, but lost half the frame-time benefit:
+  16.020 -> 16.241 ms. Keeping level 4 while discarding triangle maps below
+  25% resolved coverage used 50 MiB, did not shorten classification, and
+  regressed to 16.643 ms. Static resolved density is not hit frequency.
+
+These are not evidence that traffic is free: the medium split removed exactly
+the traffic predicted. They show that the next pine change must shorten the
+latency chain or avoid work, not only make an already-rounded local record or
+an L2-resident duplicate smaller.
+
 ## The profile after the traffic work, 2026-09-11
 
 `--set full` on the render launch, kids_room, one launch of 16 samples at
