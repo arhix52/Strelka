@@ -147,3 +147,27 @@ A broad CUDA port of Metal's finite-input assumptions was rejected: it removed
 long-scoreboard 26.75 -> 39.14, and frame time 4.8%. Narrow bound-value probes
 for all-BLEND and unit base alpha were also neutral or slower; do not combine
 scene facts merely because they are true.
+
+### Rejected follow-up probes
+
+Every launch below is one sample, matching the editor. A larger CLI sample
+count only repeats one-sample launches for warm-up and timing.
+
+- Copying BC3 alpha into a dedicated BC4 texture added about 30 MB, changed
+  interpolation at the alpha cutoff (RMSE 0.00042), and was neutral in Nsight
+  Systems: 16.306 versus 16.293 ms median. It was rejected before NCU.
+- Special-casing the one-candidate RIS reservoir was bit-identical at 120
+  one-sample launches, but a repeated A/B measured 18.134 versus 18.049 ms.
+  The first apparent win was the RTX 4090 switching between its roughly 16.4
+  and 18.1 ms boost plateaus, not the branch.
+- Pine specializes with bounded medium and subsurface both false. Gating the
+  20-byte medium part of `NextBounce` on that bound value removed 0.46% of
+  instructions and reduced local load/store sectors 2.39%/3.35%. It still
+  increased elapsed GPU cycles 0.22%, DRAM reads/writes 0.59%/0.37%, and warp
+  cycles per issued instruction 0.73%, so it was reverted. The full NCU report
+  was launch 9 after eight warm-up launches at 1920x1080, depth 8, Sobol; the
+  one-sample output was byte-identical and all four tests passed.
+
+Nsight reports for these probes and the accepted alpha-input baseline are kept
+outside the repository in `/home/ilya/optix_profiles/2026-09-14/` so a reboot
+does not discard them.
