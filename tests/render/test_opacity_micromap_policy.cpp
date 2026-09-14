@@ -78,6 +78,10 @@ TEST_CASE("a blend material is opaque only where its alpha saturates")
 
     CHECK(classifyCoverage(rule, 1.0f, 1.0f, kExactAlphaTolerance) == Coverage::Opaque);
     CHECK(classifyCoverage(rule, 0.0f, 0.0f, kExactAlphaTolerance) == Coverage::Transparent);
+    CHECK(classifyCoverage(rule, 1.0f, 1.0f, kBlockCompressedAlphaTolerance) == Coverage::Opaque);
+    CHECK(classifyCoverage(rule, 0.0f, 0.0f, kBlockCompressedAlphaTolerance) == Coverage::Transparent);
+    CHECK(classifyCoverage(rule, 1.0f - 1.0f / 255.0f, 1.0f, kBlockCompressedAlphaTolerance) == Coverage::Mixed);
+    CHECK(classifyCoverage(rule, 0.0f, 1.0f / 255.0f, kBlockCompressedAlphaTolerance) == Coverage::Mixed);
     // 08_alpha_blend: a constant 0.45 with no texture. Nothing about it is
     // resolvable, so every triangle falls through to the shader and the micromap
     // has nothing to say.

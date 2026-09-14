@@ -58,7 +58,7 @@ Two things measured against that and neither kept:
   launch takes an illegal address rather than failing at build time. The flag
   means keeping the vertex buffer a second time, which is 1.5 GB in this scene.
 
-### Opacity micromaps: the hardware has them, this renderer could not use them
+### Opacity micromaps: binary BLEND regions now reach the hardware
 
 Before writing an any-hit program, the feature that already exists for this:
 `render/pt/opacityMicromaps`, off by default, with `opacity_micromap_policy.h`
@@ -85,16 +85,23 @@ bias, and the expected kind: a microtriangle resolved transparent reports no hit
 at all, so the path does not spend the pass-through counter that seeds the
 stochastic test, and the sequence shifts.
 
-**It does not pay on pine.** 110.4 ms against 106.3 with it off, repeatably --
-4 % for declaring the feature and building the structures, with nothing to show
-for it, because the classifier resolves *nothing* on this asset: 144 meshes,
-every one "opacity micromap resolves nothing, skipped". A foliage card is two
-triangles across a whole needle atlas, so at the level-4 cap a microtriangle's
-uv footprint covers ~8000 texels and the classifier's 4096-texel bound declares
-it unknown without looking. Raising the two caps -- level 4 -> 6, texels
-4096 -> 65536 -- does not change the verdict either: the meshes still resolve
-nothing and the frame is 108.9 ms, still behind the 106.3 of having the feature
-off. Both probes are reverted; the pipeline flag and the RT core log are not.
+The original pine probe was a false negative. Its foliage is glTF `BLEND` and
+the alpha is BC3, but the classifier applied its `2/255` BC tolerance in the
+wrong direction to the only two resolvable BLEND values. That made even exact
+BC4 endpoints 0 and 255 unknown. Exact endpoints are now accepted while every
+intermediate palette value remains unknown; host classification also applies
+the same `KHR_texture_transform` helper as any-hit.
+
+At level 4 pine now builds 76,161 KB of maps and resolves substantial binary
+regions. The 1080p/24-spp median `optixLaunch` is **16.470 -> 16.020 ms (-2.7%)**;
+one NCU launch is 17.265 -> 16.694 ms, with executed instructions 1,824.6 ->
+1,707.5 M. DRAM read/write barely move (8.198/2.114 -> 8.179/2.099 GB) and
+`long_scoreboard` does not improve, so this saves any-hit instructions rather
+than fixing pine's main memory limit. It remains opt-in: classification adds
+about 67 seconds to this 50.8-M-triangle scene, which is not a universal trade.
+The output mean agrees to six significant digits; individual samples diverge
+because hardware-transparent hits no longer consume the any-hit passthrough
+counter that selects later stochastic-alpha dimensions.
 
 **What the cutouts cost, and what is left of it.** Compiling the coverage test
 out entirely (`hasCutout` forced false -- wrong image, measured for the bound)
@@ -1172,6 +1179,13 @@ to six decimals and normalized MAE is 1.49e-6; rare paths diverge only when the
 changed FP order selects a different Monte Carlo branch. pine_scene is
 bit-identical and unchanged because it contains no OpenPBR material.
 
+Three narrower ports of the remaining Metal OpenPBR lifetime work did not clear
+the measurement threshold and were reverted: compact base inputs regressed NCU
+3.651 -> 3.752 ms despite slightly less local traffic; retaining only the
+translucency decision across the bounce was 3.651 -> 3.644 ms; and the
+surface-only prepare path was 3.651 -> 3.709 ms. The 136-byte prepared-state
+SBT split above is the part that pays on CUDA.
+
 ## The measurement everything below is read against
 
 RTX 4090, OptiX 9.1, Release, sobol, one sample per launch. Scenes are the three
@@ -1239,7 +1253,7 @@ Two mechanisms behind that, both now measured rather than inferred:
 - **Texture resolution.** `pine_scene` with `texture_downscale` 1 vs 4:
   11.2 vs 11.0 ms/sample. Its 4.46 GB of textures are not what the DRAM read
   traffic is.
-- **`texture_lod`, `sharc`, `opacity_micromaps`** on pine: 11.0, 11.0, 11.2 --
+- **`texture_lod` and `sharc`** on pine: 11.0 and 11.0 ms/sample --
   all inside run-to-run noise. `sharc` has since been re-measured against a cache
   that actually persists between frames (it used to be cleared on every
   accumulation restart, so it never held more than one frame). It now cuts the
@@ -1249,10 +1263,8 @@ Two mechanisms behind that, both now measured rather than inferred:
   at 38.1 cycles with the SM at 6-12%, so removing traversal work removes
   something the frame was not waiting on. See `docs/open-defects.md` entry 12 for
   the full table, and for the warning about measuring any of this on runs too
-  short for the GPU clocks to come up. Micromaps in particular build nothing there: all
-  144 meshes log `opacity micromap resolves nothing, skipped`, which is a
-  separate question (does that scene have alpha cutouts at all?) rather than a
-  cost.
+  short for the GPU clocks to come up. The old micromap result from the same run
+  was invalidated by the BLEND endpoint fix documented above.
 - **Software alpha microgeometry/contours, measured 2026-09-13.**
   `StrelkaAlphaGeometryAnalyzer` now evaluates the actual pine inputs with
   transformed UVs, repeat addressing, BC3-decoded alpha, and the renderer's

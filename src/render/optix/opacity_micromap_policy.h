@@ -198,16 +198,15 @@ inline Coverage classifyCoverage(const AlphaRule& rule, float minTexAlpha, float
         return Coverage::Mixed;
     }
 
-    // BLEND. resolveOpacity returns saturate(alpha), and the shader treats
-    // anything below 1 as partially transparent, so the only opaque region is
-    // the one that saturates. No slack in the other direction either: an alpha
-    // of a thousandth is not zero, and calling it transparent would lose the
-    // light it blocks.
-    if (lo - tol >= 1.0f)
+    // BLEND. BC4 stores 0 and 255 as exact palette endpoints, so an all-endpoint
+    // footprint remains exactly transparent or opaque under bilinear filtering.
+    // The tolerance is only relevant to intermediate palette entries, which
+    // remain unknown here.
+    if (lo >= 1.0f)
     {
         return Coverage::Opaque;
     }
-    if (hi + tol <= 0.0f)
+    if (hi <= 0.0f)
     {
         return Coverage::Transparent;
     }
@@ -411,4 +410,3 @@ struct BuildSummary
 };
 
 } // namespace oka::optix_omm
-

@@ -60,6 +60,7 @@ static_assert((uint32_t)oka::optix_accel::kFlagAllowRandomVertexAccess ==
               (uint32_t)OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS);
 
 #include "opacity_micromap_policy.h"
+#include <shading/texture_transform.h>
 #include <optix_micromap.h>
 // The uv the micromap classifies has to be the uv the shader tests, and both
 // come out of this: 14 bits a component over [-10, 10], unpacked by the same
@@ -887,10 +888,11 @@ struct Uv
     float y = 0.0f;
 };
 
-Uv unpackUvHost(uint32_t packed)
+Uv unpackUvHost(uint32_t packed, const MaterialParams& material)
 {
     const glm::float2 uv = oka::unpackUV(packed);
-    return Uv{ uv.x, uv.y };
+    const float2 transformed = apply_texture_transform(make_float2(uv.x, uv.y), material);
+    return Uv{ transformed.x, transformed.y };
 }
 
 Uv barycentricUv(const Uv& a, const Uv& b, const Uv& c, float2 bary)
@@ -1214,9 +1216,9 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
         {
             break;
         }
-        const Uv uv0 = unpackUvHost(vertices[v0].uv);
-        const Uv uv1 = unpackUvHost(vertices[v1].uv);
-        const Uv uv2 = unpackUvHost(vertices[v2].uv);
+        const Uv uv0 = unpackUvHost(vertices[v0].uv, material);
+        const Uv uv1 = unpackUvHost(vertices[v1].uv, material);
+        const Uv uv2 = unpackUvHost(vertices[v2].uv, material);
 
         // The whole triangle first. A cutout is mostly leaf and mostly gap, and
         // both answer here for four bytes instead of sixty-four.
@@ -1295,7 +1297,10 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
 
     if (summary.isPointless())
     {
-        STRELKA_DEBUG("Mesh {}: opacity micromap resolves nothing, skipped", meshIndex);
+        STRELKA_DEBUG("Mesh {} material {}: opacity micromap resolves nothing -- {} triangles, {} unknown, {}/{} "
+                      "microtriangles resolved; skipped",
+                      meshIndex, materialId, summary.triangles, summary.uniformUnknown, summary.microResolved,
+                      summary.microTriangles);
         return out;
     }
 
