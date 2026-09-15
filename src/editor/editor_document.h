@@ -33,12 +33,6 @@ inline std::string formatWindowTitle(bool dirty, const std::string& scenePath)
     return fmt::format("Strelka {}{}", dirty ? "* " : "", doc);
 }
 
-/// After a failed/cancelled open, keep the previous document path (may be empty).
-inline std::string restorePathAfterFailedLoad(const std::string& previousPath)
-{
-    return previousPath;
-}
-
 inline int selectCameraIndexAfterLoad(uint32_t authoredCameraCount, uint32_t totalCameraCount)
 {
     if (totalCameraCount == 0)
@@ -171,4 +165,3 @@ inline bool saveRecentScenes(const std::filesystem::path& file, const std::vecto
 }
 
 } // namespace oka::editor_document
-

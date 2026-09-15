@@ -256,7 +256,7 @@ void EditorApp::handleDeviceError()
 void EditorApp::restoreDocumentAfterFailedLoad(const char* reason)
 {
     const std::string attempted = m_attemptedSceneFile.empty() ? m_sceneFile : m_attemptedSceneFile;
-    m_sceneFile = editor_document::restorePathAfterFailedLoad(m_sceneFileBeforeLoad);
+    m_sceneFile = m_sceneFileBeforeLoad;
     m_documentDirty = m_documentDirtyBeforeLoad;
     m_undoStack = std::move(m_undoStackBeforeLoad);
     m_redoStack = std::move(m_redoStackBeforeLoad);

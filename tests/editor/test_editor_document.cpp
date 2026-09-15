@@ -15,12 +15,6 @@ TEST_CASE("formatWindowTitle marks dirty and empty documents")
     CHECK(formatWindowTitle(false, "/tmp/scenes/cornell_box.glb") == "Strelka cornell_box.glb");
 }
 
-TEST_CASE("restorePathAfterFailedLoad keeps the previous document path")
-{
-    CHECK(restorePathAfterFailedLoad("") == "");
-    CHECK(restorePathAfterFailedLoad("/a/b.glb") == "/a/b.glb");
-}
-
 TEST_CASE("selectCameraIndexAfterLoad prefers the camera the scene authored")
 {
     // No cameras at all: nothing to select but index 0.
