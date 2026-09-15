@@ -30,24 +30,6 @@ TEST_CASE("resolveExtent matches the Metal rule: downscale, then fit maxDimensio
     CHECK(resolveExtent(1, 1, 1, 1) == Extent{ 1, 1 });
 }
 
-TEST_CASE("mip chains stop where the format stops being whole blocks")
-{
-    // Uncompressed goes all the way to 1x1.
-    CHECK(fullMipLevelCount(256, 256) == 9);
-    CHECK(mipLevelCount(Format::RGBA8, 256, 256) == 9);
-    CHECK(mipLevelCount(Format::RGBA8, 1, 1) == 1);
-    CHECK(mipLevelCount(Format::RGBA8, 640, 480) == 10); // driven by the longest edge
-
-    // Compressed stops at 4x4: below that a level is mostly padding.
-    CHECK(mipLevelCount(Format::BC1, 256, 256) == 7); // 256..4
-    CHECK(mipLevelCount(Format::BC5, 256, 256) == 7);
-    CHECK(mipLevelCount(Format::BC1, 4, 4) == 1);
-    CHECK(mipLevelCount(Format::BC1, 2, 2) == 1);
-
-    // A wide, short texture is limited by its short edge, not its long one.
-    CHECK(mipLevelCount(Format::BC1, 1024, 8) == 2); // 1024x8, 512x4, then 256x2
-}
-
 TEST_CASE("levelBytes counts whole blocks, and rounds up")
 {
     CHECK(levelBytes(Format::RGBA8, 16, 16) == 16 * 16 * 4);
@@ -141,24 +123,7 @@ TEST_CASE("format choice: what compresses, and to what")
     CHECK_FALSE(sixteen.srgbBlockFormat);
 }
 
-TEST_CASE("levels are off until something asks for them")
-{
-    PlanInputs in;
-    in.srcWidth = 512;
-    in.srcHeight = 512;
-
-    // tex2D from a ray tracing program has no derivatives, so it reads level 0;
-    // a chain would be a third of the memory for nothing.
-    CHECK(planTexture(in).levels == 1);
-
-    in.wantMips = true;
-    CHECK(planTexture(in).levels == 10);
-
-    in.blockCompress = true;
-    CHECK(planTexture(in).levels == 8); // 512..4
-}
-
-TEST_CASE("totalBytes: a mip chain is a third again, and BC1 is an eighth")
+TEST_CASE("totalBytes reflects block compression")
 {
     PlanInputs in;
     in.srcWidth = 1024;
@@ -167,14 +132,6 @@ TEST_CASE("totalBytes: a mip chain is a third again, and BC1 is an eighth")
 
     const Plan flat = planTexture(in);
     CHECK(flat.totalBytes() == 1024ull * 1024 * 4);
-
-    in.wantMips = true;
-    const Plan chain = planTexture(in);
-    // Sum of a geometric series in 1/4: strictly under 4/3 of the base.
-    CHECK(chain.totalBytes() > flat.totalBytes());
-    CHECK(chain.totalBytes() < flat.totalBytes() * 4 / 3 + 4);
-
-    in.wantMips = false;
     in.blockCompress = true;
     CHECK(planTexture(in).totalBytes() == flat.totalBytes() / 8);
 }

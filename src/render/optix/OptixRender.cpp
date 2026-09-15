@@ -3970,35 +3970,11 @@ bool OptiXRender::memoryReport(MemoryReport& report) const
                                   std::max<size_t>(extent.depth, 1);
             return texels * ((desc.x + desc.y + desc.z + desc.w) / 8);
         };
-        // A mipmapped array only answers per level, so its levels are walked
-        // until the driver says there are no more.
-        auto mipmappedBytes = [&arrayBytes](cudaMipmappedArray_t mipmapped) -> size_t {
-            size_t bytes = 0;
-            for (uint32_t level = 0; mipmapped; ++level)
-            {
-                cudaArray_t levelArray = nullptr;
-                if (cudaGetMipmappedArrayLevel(&levelArray, mipmapped, level) != cudaSuccess)
-                {
-                    cudaGetLastError();
-                    break;
-                }
-                bytes += arrayBytes(levelArray);
-            }
-            return bytes;
-        };
-
-        // Both sets: the general one holds the environment, the material one
-        // holds everything the maps decoded into, and the report is about the
-        // device rather than about which of them owns what.
         size_t bytes = 0;
         for (cudaArray_t array : mTextureArrays)
             bytes += arrayBytes(array);
         for (cudaArray_t array : mMaterialTextureArrays)
             bytes += arrayBytes(array);
-        for (cudaMipmappedArray_t mipmapped : mTextureMipmappedArrays)
-            bytes += mipmappedBytes(mipmapped);
-        for (cudaMipmappedArray_t mipmapped : mMaterialTextureMipmappedArrays)
-            bytes += mipmappedBytes(mipmapped);
         add("Textures", bytes);
     }
     add("Texture table", bufBytes(mTexturesDataBuffer));
@@ -4927,7 +4903,7 @@ void OptiXRender::createIesBuffer()
 oka::optix_tex::DecodeSettings OptiXRender::textureDecodeSettings() const
 {
     // Read through contains(): getAs() on a key nobody set logs an error and
-    // asserts, and these four are optional -- a host that never sets them should
+    // asserts, and these three are optional -- a host that never sets them should
     // get the documented default, not a diagnostic per texture.
     const SettingsManager* s = getSettings();
     oka::optix_tex::DecodeSettings settings;
@@ -4937,8 +4913,6 @@ oka::optix_tex::DecodeSettings OptiXRender::textureDecodeSettings() const
         settings.downscale = std::max(1u, s->getAs<uint32_t>("render/texture/downscale"));
     if (s->contains("render/texture/compress"))
         settings.blockCompress = s->getAs<bool>("render/texture/compress");
-    if (s->contains("render/texture/mips"))
-        settings.wantMips = s->getAs<bool>("render/texture/mips");
     return settings;
 }
 
@@ -4953,7 +4927,7 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
     const std::string cacheFile =
         cacheDir.empty() ? std::string() :
                            (fs::path(cacheDir) / tex::cacheKey(fileName, kind, settings.maxDimension, settings.downscale,
-                                                               settings.blockCompress, settings.wantMips))
+                                                               settings.blockCompress))
                                .string();
 
     tex::Payload payload = tex::readCachedPayload(cacheFile);
@@ -4992,8 +4966,6 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
 
     if (res.array)
         mMaterialTextureArrays.push_back(res.array);
-    if (res.mipmapped)
-        mMaterialTextureMipmappedArrays.push_back(res.mipmapped);
     mMaterialTextureObjects.push_back(res.object);
 
     return { res.object, make_uint3((uint32_t)payload.plan.extent.width, (uint32_t)payload.plan.extent.height, 1),
@@ -5130,10 +5102,6 @@ void OptiXRender::destroyMaterialTextures()
             cudaFreeArray(arr);
     mMaterialTextureArrays.clear();
 
-    for (auto arr : mMaterialTextureMipmappedArrays)
-        if (arr)
-            cudaFreeMipmappedArray(arr);
-    mMaterialTextureMipmappedArrays.clear();
 }
 
 void OptiXRender::destroyTextures()
@@ -5155,11 +5123,6 @@ void OptiXRender::destroyEnvironmentTextures()
         if (arr)
             cudaFreeArray(arr);
     mTextureArrays.clear();
-
-    for (auto arr : mTextureMipmappedArrays)
-        if (arr)
-            cudaFreeMipmappedArray(arr);
-    mTextureMipmappedArrays.clear();
 
     mEnvAliasBuffer.reset();
     mState.params.envMapTexture = 0;

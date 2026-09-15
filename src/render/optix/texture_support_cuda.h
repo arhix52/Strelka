@@ -224,8 +224,7 @@ inline std::string cacheKey(const std::string& fileName,
                             Kind kind,
                             uint32_t maxDimension,
                             uint32_t downscale,
-                            bool blockCompress,
-                            bool wantMips)
+                            bool blockCompress)
 {
     std::error_code ec;
     namespace fs = std::filesystem;
@@ -235,8 +234,7 @@ inline std::string cacheKey(const std::string& fileName,
     oka::metal::TextureCacheKeyInputs in;
     // The salt goes in the file name field rather than in a new struct member so
     // that texture_cache_key.h does not need a backend-specific field.
-    in.fileName = "optix|v" + std::to_string(kOptixPayloadVersion) + (blockCompress ? "|bc" : "|raw") +
-                  (wantMips ? "|mips" : "|lod0") + "|" + fileName;
+    in.fileName = "optix|v" + std::to_string(kOptixPayloadVersion) + (blockCompress ? "|bc|" : "|raw|") + fileName;
     in.fileSize = ec ? 0 : (uint64_t)size;
     in.writeTimeCount = ec ? 0 : (int64_t)stamp;
     in.maxDimension = maxDimension;
@@ -328,7 +326,6 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
     planIn.downscale = settings.downscale;
     planIn.kind = kind;
     planIn.blockCompress = settings.blockCompress;
-    planIn.wantMips = settings.wantMips;
 
     planIn.sourceIsFloat = stbi_is_hdr(fileName.c_str()) != 0;
     planIn.sourceIs16Bit = !planIn.sourceIsFloat && stbi_is_16_bit(fileName.c_str()) != 0;
@@ -385,49 +382,20 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
         else
         {
             plan.extent = Extent{ srcW, srcH };
-            plan.levels = planIn.wantMips ? mipLevelCount(plan.format, srcW, srcH) : 1u;
         }
-    }
-
-    // The uncompressed chain, in the raw element type.
-    std::vector<std::vector<uint8_t>> chain;
-    chain.reserve(plan.levels);
-    chain.push_back(std::move(base));
-    for (uint32_t l = 1; l < plan.levels; ++l)
-    {
-        const int prevW = std::max(1, plan.extent.width >> (l - 1));
-        const int prevH = std::max(1, plan.extent.height >> (l - 1));
-        const int w = std::max(1, plan.extent.width >> l);
-        const int h = std::max(1, plan.extent.height >> l);
-        std::vector<uint8_t> next((size_t)w * h * texelBytesRaw);
-        if (!detail::resampleLevel(plan, chain[l - 1].data(), prevW, prevH, next.data(), w, h))
-        {
-            plan.levels = l;
-            break;
-        }
-        chain.push_back(std::move(next));
     }
 
     if (plan.normalizeLevels && plan.format != Format::RGBA32F && plan.format != Format::RGBA16)
     {
-        for (uint32_t l = 0; l < plan.levels; ++l)
-        {
-            oka::bc::normalizeNormalMap(chain[l].data(), std::max(1, plan.extent.width >> l),
-                                        std::max(1, plan.extent.height >> l));
-        }
+        oka::bc::normalizeNormalMap(base.data(), plan.extent.width, plan.extent.height);
     }
 
     Payload payload;
     payload.plan = plan;
-    payload.levels.reserve(plan.levels);
-    for (uint32_t l = 0; l < plan.levels; ++l)
-    {
-        const int w = std::max(1, plan.extent.width >> l);
-        const int h = std::max(1, plan.extent.height >> l);
-        payload.levels.push_back(isCompressed(plan.format) ?
-                                     oka::bc::compressImage(chain[l].data(), w, h, detail::bcFormat(plan.format)) :
-                                     std::move(chain[l]));
-    }
+    payload.levels.push_back(isCompressed(plan.format) ?
+                                 oka::bc::compressImage(base.data(), plan.extent.width, plan.extent.height,
+                                                        detail::bcFormat(plan.format)) :
+                                 std::move(base));
     payload.valid = true;
     return payload;
 }
@@ -436,7 +404,6 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
 struct TextureResources
 {
     cudaArray_t array = nullptr;
-    cudaMipmappedArray_t mipmapped = nullptr;
     cudaTextureObject_t object = 0;
 };
 
@@ -452,48 +419,17 @@ inline TextureResources createTexture(const Payload& payload,
     const cudaChannelFormatDesc channel = detail::channelDesc(plan);
 
     cudaResourceDesc resDesc{};
-    if (plan.levels > 1)
+    if (cudaMallocArray(&out.array, &channel, (size_t)plan.extent.width, (size_t)plan.extent.height) != cudaSuccess)
+        return TextureResources{};
+    const size_t pitch = detail::levelPitch(plan, plan.extent.width);
+    if (cudaMemcpy2DToArray(out.array, 0, 0, payload.levels[0].data(), pitch, pitch,
+                            detail::levelRows(plan, plan.extent.height), cudaMemcpyHostToDevice) != cudaSuccess)
     {
-        const cudaExtent extent = make_cudaExtent((size_t)plan.extent.width, (size_t)plan.extent.height, 0);
-        if (cudaMallocMipmappedArray(&out.mipmapped, &channel, extent, plan.levels) != cudaSuccess)
-            return TextureResources{};
-        for (uint32_t l = 0; l < plan.levels && l < payload.levels.size(); ++l)
-        {
-            cudaArray_t levelArray = nullptr;
-            if (cudaGetMipmappedArrayLevel(&levelArray, out.mipmapped, l) != cudaSuccess)
-            {
-                cudaFreeMipmappedArray(out.mipmapped);
-                return TextureResources{};
-            }
-            const int w = std::max(1, plan.extent.width >> l);
-            const int h = std::max(1, plan.extent.height >> l);
-            const size_t pitch = detail::levelPitch(plan, w);
-            if (cudaMemcpy2DToArray(levelArray, 0, 0, payload.levels[l].data(), pitch, pitch,
-                                    detail::levelRows(plan, h), cudaMemcpyHostToDevice) != cudaSuccess)
-            {
-                cudaFreeMipmappedArray(out.mipmapped);
-                return TextureResources{};
-            }
-        }
-        resDesc.resType = cudaResourceTypeMipmappedArray;
-        resDesc.res.mipmap.mipmap = out.mipmapped;
+        cudaFreeArray(out.array);
+        return TextureResources{};
     }
-    else
-    {
-        if (cudaMallocArray(&out.array, &channel, (size_t)plan.extent.width, (size_t)plan.extent.height) !=
-            cudaSuccess)
-            return TextureResources{};
-        const size_t pitch = detail::levelPitch(plan, plan.extent.width);
-        if (cudaMemcpy2DToArray(out.array, 0, 0, payload.levels[0].data(), pitch, pitch,
-                                detail::levelRows(plan, plan.extent.height),
-                                cudaMemcpyHostToDevice) != cudaSuccess)
-        {
-            cudaFreeArray(out.array);
-            return TextureResources{};
-        }
-        resDesc.resType = cudaResourceTypeArray;
-        resDesc.res.array.array = out.array;
-    }
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = out.array;
 
     cudaTextureDesc texDesc{};
     texDesc.addressMode[0] = addressModeU;
@@ -505,18 +441,8 @@ inline TextureResources createTexture(const Payload& payload,
     texDesc.readMode = plan.format == Format::RGBA32F ? cudaReadModeElementType : cudaReadModeNormalizedFloat;
     texDesc.normalizedCoords = 1;
     texDesc.sRGB = (plan.srgbTextureFlag || plan.srgbBlockFormat) ? 1 : 0;
-    if (plan.levels > 1)
-    {
-        texDesc.mipmapFilterMode = cudaFilterModeLinear;
-        texDesc.maxAnisotropy = 16;
-        texDesc.minMipmapLevelClamp = 0.0f;
-        texDesc.maxMipmapLevelClamp = (float)(plan.levels - 1);
-    }
-
     if (cudaCreateTextureObject(&out.object, &resDesc, &texDesc, nullptr) != cudaSuccess)
     {
-        if (out.mipmapped)
-            cudaFreeMipmappedArray(out.mipmapped);
         if (out.array)
             cudaFreeArray(out.array);
         return TextureResources{};

@@ -369,7 +369,6 @@ private:
     // Material textures are tracked apart from the environment because
     // publishMaterialParams() may replace them without replacing the env map.
     std::vector<cudaArray_t> mTextureArrays;
-    std::vector<cudaMipmappedArray_t> mTextureMipmappedArrays;
     std::vector<cudaTextureObject_t> mTextureObjects;
     /// A textureless dome's colour, carried to the miss program. See
     /// buildSceneEnvironment for why a constant sky is a miss colour rather than
@@ -378,7 +377,6 @@ private:
     uint32_t mTextureCacheHits = 0;
     uint32_t mTextureCacheMisses = 0;
     std::vector<cudaArray_t> mMaterialTextureArrays;
-    std::vector<cudaMipmappedArray_t> mMaterialTextureMipmappedArrays;
     std::vector<cudaTextureObject_t> mMaterialTextureObjects;
     // A third set, apart from both of the above: a projector's slide belongs to
     // the light set, so it survives a material reload, and it is not the

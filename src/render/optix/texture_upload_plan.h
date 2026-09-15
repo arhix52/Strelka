@@ -105,41 +105,12 @@ inline Extent resolveExtent(int srcWidth, int srcHeight, uint32_t maxDimension, 
     return Extent{ w, h };
 }
 
-/// Levels in a full chain down to 1x1, which is what an uncompressed array
-/// takes.
-inline uint32_t fullMipLevelCount(int width, int height)
-{
-    uint32_t levels = 1;
-    const uint32_t longest = (uint32_t)std::max({ 1, width, height });
-    while ((1u << levels) <= longest)
-        ++levels;
-    return levels;
-}
-
-inline uint32_t mipLevelCount(Format format, int width, int height)
-{
-    const uint32_t full = fullMipLevelCount(width, height);
-    if (!isCompressed(format))
-        return full;
-    uint32_t levels = 1;
-    for (uint32_t l = 1; l < full; ++l)
-    {
-        const int w = std::max(1, width >> l);
-        const int h = std::max(1, height >> l);
-        if (std::min(w, h) < 4)
-            break;
-        levels = l + 1;
-    }
-    return levels;
-}
-
-/// The four knobs the settings carry, read once per texture.
+/// Decode settings read once per texture.
 struct DecodeSettings
 {
     uint32_t maxDimension = 0; // render/texture/maxDimension, 0 = unbounded
     uint32_t downscale = 1; // render/texture/downscale
     bool blockCompress = false; // render/texture/compress
-    bool wantMips = false; // render/texture/mips
 };
 
 struct PlanInputs
@@ -157,9 +128,6 @@ struct PlanInputs
     bool blockCompress = false;
     /// Whether any texel's alpha is below opaque. Only consulted for colour.
     bool hasAlpha = false;
-    /// Whether mip levels are wanted. Off until ray cones select levels because
-    /// `tex2D` has no ray-tracing derivatives and otherwise reads level 0.
-    bool wantMips = false;
 };
 
 struct Plan
@@ -185,10 +153,7 @@ struct Plan
 
     size_t totalBytes() const
     {
-        size_t total = 0;
-        for (uint32_t l = 0; l < levels; ++l)
-            total += levelBytes(l);
-        return total;
+        return levelBytes(0);
     }
 };
 
@@ -226,9 +191,7 @@ inline Plan planTexture(const PlanInputs& in)
     plan.srgbTextureFlag = wantsSrgb && eightBit && !isCompressed(plan.format);
     plan.resampleInSrgb = wantsSrgb && eightBit;
     plan.normalizeLevels = in.kind == Kind::Normal;
-    plan.levels = in.wantMips ? mipLevelCount(plan.format, plan.extent.width, plan.extent.height) : 1u;
     return plan;
 }
 
 } // namespace oka::optix_tex
-
