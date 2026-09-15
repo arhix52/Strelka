@@ -11,7 +11,6 @@ set(FOUNDATION_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/log/logmanager.h
     ${CMAKE_CURRENT_SOURCE_DIR}/log/logmanager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/settings/settings.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/settings/settings.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/env/env.h
     ${CMAKE_CURRENT_SOURCE_DIR}/paths/paths.h
     ${CMAKE_CURRENT_SOURCE_DIR}/progress/loadprogress.h
