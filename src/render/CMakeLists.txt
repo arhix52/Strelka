@@ -7,6 +7,7 @@ set(RENDER_SOURCES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/render.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/buffer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/strelka/render/common.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/scene_preparation.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/scene_stream.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/render_resolution.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/ibl_alias_table.h

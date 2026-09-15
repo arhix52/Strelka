@@ -3757,6 +3757,12 @@ void MetalRender::rebuildAccelerationStructures()
 metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
 {
     metal::SceneBuildHooks hooks;
+    hooks.nowMs = []() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    hooks.onStageTimed = [](metal::BuildStage stage, double elapsedMs) {
+        STRELKA_DEBUG("Scene build stage '{}' took {:.0f} ms", metal::buildStageName(stage), elapsedMs);
+    };
     hooks.onBuffersEnter = [this]() {
         mBuildStartMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -3794,10 +3800,6 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         {
             mLoadProgress->beginStage(LoadProgress::Stage::Structures);
         }
-    };
-    hooks.onStructuresBegin = [this]() {
-        // Nothing is playing yet, so start static; the per-frame check in render()
-        // switches to motion structures if playback begins.
         mAccel.setScene(mScene);
         mAccel.setSettings(getSettings());
         mAccel.setLoadProgress(mLoadProgress);
