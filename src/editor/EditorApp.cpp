@@ -1678,6 +1678,14 @@ void EditorApp::drawUI()
             undo();
         if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !m_redoStack.empty()))
             redo();
+        ImGui::Separator();
+        const bool hasSelection = m_selectedNodeId != kInvalidIndex || m_selectedInstanceId != kInvalidIndex ||
+                                  m_selectedLightId != kInvalidIndex;
+        if (ImGui::MenuItem("Deselect All", "Esc", false, hasSelection))
+        {
+            STRELKA_INFO("ACTION select clear");
+            clearSelection();
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View"))

@@ -170,6 +170,21 @@ void EditorApp::drawOutlinerPanel()
         ImGui::TreePop();
     }
 
+    const ImVec2 emptySpace = ImGui::GetContentRegionAvail();
+    if (emptySpace.x > 0.0f && emptySpace.y > 0.0f)
+    {
+        ImGui::InvisibleButton("##outlinerBackground", emptySpace);
+        if (ImGui::IsItemClicked())
+        {
+            if (m_selectedNodeId != kInvalidIndex || m_selectedInstanceId != kInvalidIndex ||
+                m_selectedLightId != kInvalidIndex)
+            {
+                STRELKA_INFO("ACTION select clear");
+            }
+            clearSelection();
+        }
+    }
+
     ImGui::End();
 }
 

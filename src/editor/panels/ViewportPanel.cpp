@@ -312,6 +312,42 @@ void EditorApp::drawViewportPanel()
             itemHovered = false;
         }
 
+        // Selection readout and an explicit way out for scenes where every
+        // viewport ray hits enclosing geometry.
+        ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 8.0f, panelMin.y + 8.0f));
+        const bool hasSelection = m_selectedNodeId != kInvalidIndex || m_selectedInstanceId != kInvalidIndex ||
+                                  m_selectedLightId != kInvalidIndex;
+        if (m_selectedLightId != kInvalidIndex)
+        {
+            ImGui::Text("Selected: light %u", m_selectedLightId);
+        }
+        else if (m_selectedNodeId != kInvalidIndex && m_selectedNodeId < m_scene->getNodes().size())
+        {
+            const Scene::Node& node = m_scene->getNodes()[m_selectedNodeId];
+            ImGui::Text("Selected: %s", node.name.empty() ? "(unnamed)" : node.name.c_str());
+        }
+        else
+        {
+            ImGui::TextDisabled("Click an object to select");
+        }
+        if (hasSelection)
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("×##clearSelection"))
+            {
+                STRELKA_INFO("ACTION select clear");
+                clearSelection();
+            }
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+            {
+                itemHovered = false;
+            }
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Deselect (Esc)");
+            }
+        }
+
         if (itemHovered)
         {
             m_display->setViewPortHovered(true);
@@ -332,26 +368,10 @@ void EditorApp::drawViewportPanel()
             }
         }
 
-        // Selection readout: the only in-viewport confirmation that a click landed.
-        ImGui::SetCursorScreenPos(ImVec2(panelMin.x + 8.0f, panelMin.y + 8.0f));
-        if (m_selectedLightId != kInvalidIndex)
-        {
-            ImGui::Text("Selected: light %u", m_selectedLightId);
-        }
-        else if (m_selectedNodeId != kInvalidIndex && m_selectedNodeId < m_scene->getNodes().size())
-        {
-            const Scene::Node& node = m_scene->getNodes()[m_selectedNodeId];
-            ImGui::Text("Selected: %s", node.name.empty() ? "(unnamed)" : node.name.c_str());
-        }
-        else
-        {
-            ImGui::TextDisabled("Click an object to select");
-        }
-
         // Render stats: used to live in the OS window title, which updated at a
         // rate no title bar is meant for. This is the HUD they belong in.
-        const std::string stats = fmt::format(
-            "{:.1f} ms · {} spp", m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
+        const std::string stats =
+            fmt::format("{:.1f} ms · {} spp", m_render->getLastRenderTimeMs(), m_sharedCtx->mSubframeIndex);
         const ImVec2 statsSize = ImGui::CalcTextSize(stats.c_str());
         constexpr float kHudMargin = 8.0f;
         constexpr ImVec2 kHudPadding(6.0f, 3.0f);
