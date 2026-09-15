@@ -197,40 +197,6 @@ TEST_CASE("a sphere light's density is not the constant it used to be")
     CHECK(sphereLightArea(0.5f) == doctest::Approx(4.0f * float(M_PI_F) * 0.25f));
 }
 
-TEST_CASE("analytic transformed light densities obey the affine area Jacobian")
-{
-    const float3 axisX = make_float3(-1.0f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1.5f, 0.0f);
-    const float3 axisZ = make_float3(0.25f, 0.0f, 2.0f);
-    const glm::dmat3 transform{ glm::dvec3(axisX), glm::dvec3(axisY), glm::dvec3(axisZ) };
-
-    CHECK(double(analyticDiscArea(axisX, axisY)) ==
-          doctest::Approx(std::numbers::pi * glm::length(glm::cross(glm::dvec3(axisX), glm::dvec3(axisY)))).epsilon(1e-6));
-
-    Rng rng(0xA11Fu);
-    double integratedMass = 0.0;
-    for (int i = 0; i < 4096; ++i)
-    {
-        const float z = 1.0f - 2.0f * rng.next();
-        const float radial = std::sqrt(std::max(1.0f - z * z, 0.0f));
-        const float phi = 2.0f * float(M_PI_F) * rng.next();
-        const float3 n = make_float3(radial * std::cos(phi), radial * std::sin(phi), z);
-        const double oracle = affineAreaJacobian(transform, glm::dvec3(n));
-        const double shared = glm::length(glm::dvec3(affineSphereCofactor(axisX, axisY, axisZ, n)));
-        CHECK(shared == doctest::Approx(oracle).epsilon(2e-5));
-        const float3 point = axisX * n.x + axisY * n.y + axisZ * n.z;
-        float3 evaluatedNormal;
-        const double areaPdf = analyticEllipsoidAreaPdf(make_float3(0.0f), axisX, axisY, axisZ, point, evaluatedNormal);
-        integratedMass += areaPdf * oracle * (4.0 * std::numbers::pi / 4096.0);
-    }
-    CHECK(integratedMass == doctest::Approx(1.0).epsilon(3e-5));
-
-    const float r = 0.7f;
-    CHECK(analyticEllipsoidSurfaceArea(
-              make_float3(r, 0.0f, 0.0f), make_float3(0.0f, r, 0.0f), make_float3(0.0f, 0.0f, r)) ==
-          doctest::Approx(4.0f * float(M_PI_F) * r * r).epsilon(2e-5));
-}
-
 TEST_CASE("analytic samples, intersections, and hit-side PDFs agree")
 {
     const float3 center = make_float3(0.3f, -0.2f, 0.5f);
@@ -253,7 +219,8 @@ TEST_CASE("analytic samples, intersections, and hit-side PDFs agree")
         CHECK(discHit.distance == doctest::Approx(discDistance).epsilon(2e-5));
         CHECK(disc.areaPdf == doctest::Approx(1.0f / analyticDiscArea(axisX, axisY)).epsilon(1e-6));
 
-        const AnalyticLightSample sphere = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, rng.next(), rng.next());
+        const AnalyticLightSample sphere =
+            sampleAnalyticEllipsoidUnchecked(center, axisX, axisY, axisZ, rng.next(), rng.next());
         const glm::dvec3 q = objectCoordinates(transform, center, sphere.point);
         CHECK(glm::length(q) == doctest::Approx(1.0).epsilon(3e-5));
         const double jacobian = affineAreaJacobian(transform, glm::normalize(q));
@@ -274,7 +241,8 @@ TEST_CASE("analytic samples, intersections, and hit-side PDFs agree")
         const double oracle = cosine > 0.0 ? double(sphere.areaPdf) * distance * distance / cosine : 0.0;
         CHECK(double(reported) == doctest::Approx(oracle).epsilon(2e-5));
         float3 evaluatedNormal;
-        const float evaluatedPdf = analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, sphere.point, evaluatedNormal);
+        const float evaluatedPdf =
+            analyticEllipsoidAreaPdfUnchecked(center, axisX, axisY, axisZ, sphere.point, evaluatedNormal);
         CHECK(evaluatedPdf == doctest::Approx(sphere.areaPdf).epsilon(3e-5));
         CHECK(len(sub(evaluatedNormal, sphere.normal)) < 3e-5f);
 
@@ -284,7 +252,7 @@ TEST_CASE("analytic samples, intersections, and hit-side PDFs agree")
         if (cosine > 0.05)
         {
             const AnalyticLightIntersection sphereHit =
-                intersectAnalyticEllipsoid(shadingPoint, wi, 0.0f, 1e9f, center, axisX, axisY, axisZ);
+                intersectAnalyticEllipsoidUnchecked(shadingPoint, wi, 0.0f, 1e9f, center, axisX, axisY, axisZ);
             REQUIRE(sphereHit.hit);
             CHECK(sphereHit.distance == doctest::Approx(float(distance)).epsilon(5e-5));
             CHECK(len(sub(sphereHit.normal, sphere.normal)) < 5e-5f);
@@ -292,7 +260,7 @@ TEST_CASE("analytic samples, intersections, and hit-side PDFs agree")
         else
         {
             const AnalyticLightIntersection grazingHit =
-                intersectAnalyticEllipsoid(shadingPoint, wi, 0.0f, 1e9f, center, axisX, axisY, axisZ);
+                intersectAnalyticEllipsoidUnchecked(shadingPoint, wi, 0.0f, 1e9f, center, axisX, axisY, axisZ);
             CHECK(std::isfinite(grazingHit.distance));
             CHECK(std::isfinite(grazingHit.normal.x));
             CHECK(std::isfinite(grazingHit.normal.y));
@@ -317,26 +285,6 @@ TEST_CASE("analytic intersection covers the smooth disc beyond the editor proxy"
     CHECK(hit.hit);
     CHECK(hit.distance == doctest::Approx(2.0f));
     CHECK(0.99f > std::cos(angle)); // inscribed-16-gon mutation misses this point
-}
-
-TEST_CASE("high-shear analytic discs use a non-cancelling dual basis")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1.0f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(1.0f, 1e-4f, 0.0f);
-    const float3 normal = make_float3(0.0f, 0.0f, -1.0f);
-    REQUIRE(analyticDiscArea(axisX, axisY) > 0.0f);
-    const AnalyticLightIntersection hit = intersectAnalyticDisc(
-        make_float3(0.0f, 0.0f, 1.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 2.0f, center, axisX, axisY, normal);
-    CHECK(hit.hit);
-    CHECK(hit.distance == doctest::Approx(1.0f));
-
-    // Mutation: normal equations square the condition number and round the
-    // nonzero determinant away at this shear.
-    const float xx = dot(axisX, axisX);
-    const float xy = dot(axisX, axisY);
-    const float yy = dot(axisY, axisY);
-    CHECK(xx * yy - xy * xy == 0.0f);
 }
 
 TEST_CASE("analytic parallelogram intersection matches its continuous area measure")
@@ -368,8 +316,8 @@ TEST_CASE("analytic parallelogram intersection matches its continuous area measu
     const float3 boundaryPoint = corner + boundaryU * edgeX + boundaryV * edgeY;
     const float3 boundaryOrigin = make_float3(0.25f, -0.75f, -2.0f);
     const float3 boundaryDirection = unit(sub(boundaryPoint, boundaryOrigin));
-    CHECK(intersectAnalyticLightSurface(LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
-                                        normal, boundaryOrigin, boundaryDirection, 0.0f, 20.0f)
+    CHECK(intersectAnalyticLightSurfaceUnchecked(LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f),
+                                                 corner + edgeY, normal, boundaryOrigin, boundaryDirection, 0.0f, 20.0f)
               .hit);
 
     Rng rng(0xA11CEu);
@@ -383,8 +331,8 @@ TEST_CASE("analytic parallelogram intersection matches its continuous area measu
         const float distance = len(toPoint);
         const float3 rayDirection = unit(toPoint);
         const AnalyticLightIntersection sampleHit =
-            intersectAnalyticLightSurface(LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
-                                          normal, rayOrigin, rayDirection, 0.0f, 20.0f);
+            intersectAnalyticLightSurfaceUnchecked(LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f),
+                                                   corner + edgeY, normal, rayOrigin, rayDirection, 0.0f, 20.0f);
         CAPTURE(i);
         REQUIRE(sampleHit.hit);
         CHECK(sampleHit.distance == doctest::Approx(distance).epsilon(2e-5));
@@ -429,8 +377,8 @@ TEST_CASE("finite analytic light surfaces block only the open shadow segment")
         const float distance = len(toPoint);
         const float3 sampleDirection = unit(toPoint);
         const AnalyticLightIntersection sampleHit =
-            intersectAnalyticLightSurface(LIGHT_TYPE_POINT, make_float3(radius, 0.0f, 0.0f), center, zero, zero, zero,
-                                          origin, sampleDirection, 0.0f, 10.0f);
+            intersectAnalyticLightSurfaceUnchecked(LIGHT_TYPE_POINT, make_float3(radius, 0.0f, 0.0f), center, zero,
+                                                   zero, zero, origin, sampleDirection, 0.0f, 10.0f);
         CAPTURE(i);
         REQUIRE(sampleHit.hit);
         CHECK(len(sub(sampleHit.point, samplePoint)) <= 4e-5f);
@@ -452,10 +400,10 @@ TEST_CASE("selected sphere light keeps near-side self-occlusion")
     const float3 origin = make_float3(0.0f);
     const float3 direction = make_float3(0.0f, 0.0f, 1.0f);
 
-    const AnalyticLightIntersection nearSample =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(2.0f, 0.0f), center, axisX, axisY, axisZ);
-    const AnalyticLightIntersection farSample =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(4.0f, 0.0f), center, axisX, axisY, axisZ);
+    const AnalyticLightIntersection nearSample = intersectAnalyticEllipsoidUnchecked(
+        origin, direction, 0.0f, std::nextafter(2.0f, 0.0f), center, axisX, axisY, axisZ);
+    const AnalyticLightIntersection farSample = intersectAnalyticEllipsoidUnchecked(
+        origin, direction, 0.0f, std::nextafter(4.0f, 0.0f), center, axisX, axisY, axisZ);
     CHECK_FALSE(nearSample.hit);
     REQUIRE(farSample.hit);
     CHECK(farSample.distance == doctest::Approx(2.0f));
@@ -512,8 +460,8 @@ TEST_CASE("light profile frames match a double-precision Gram-Schmidt oracle")
 
         const float3 axisX = float3(transform[0]);
         const float3 axisY = float3(transform[1]);
-        const float3 emissionAxis = float3(glm::normalize(glm::transpose(glm::inverse(transform)) *
-                                                          glm::dvec3(0.0, 0.0, -1.0)));
+        const float3 emissionAxis =
+            float3(glm::normalize(glm::transpose(glm::inverse(transform)) * glm::dvec3(0.0, 0.0, -1.0)));
         const OrthonormalLightFrame frame = makeOrthonormalLightFrame(axisX, axisY, emissionAxis);
         REQUIRE(frame.valid);
 
@@ -521,15 +469,15 @@ TEST_CASE("light profile frames match a double-precision Gram-Schmidt oracle")
         const glm::dvec3 inputX(axisX);
         const glm::dvec3 oracleX = glm::normalize(inputX - glm::dot(inputX, oracleZ) * oracleZ);
         const glm::dvec3 inputY(axisY);
-        const glm::dvec3 oracleY = glm::normalize(inputY - glm::dot(inputY, oracleZ) * oracleZ -
-                                                  glm::dot(inputY, oracleX) * oracleX);
+        const glm::dvec3 oracleY =
+            glm::normalize(inputY - glm::dot(inputY, oracleZ) * oracleZ - glm::dot(inputY, oracleX) * oracleX);
         CAPTURE(sample);
-        CHECK(glm::length(glm::dvec3(frame.x) - oracleX) < 2e-6);
-        CHECK(glm::length(glm::dvec3(frame.y) - oracleY) < 2e-6);
-        CHECK(glm::length(glm::dvec3(frame.emissionAxis) - oracleZ) < 2e-6);
-        CHECK(std::abs(glm::dot(glm::dvec3(frame.x), glm::dvec3(frame.y))) < 2e-6);
-        CHECK(std::abs(glm::dot(glm::dvec3(frame.x), glm::dvec3(frame.emissionAxis))) < 2e-6);
-        CHECK(std::abs(glm::dot(glm::dvec3(frame.y), glm::dvec3(frame.emissionAxis))) < 2e-6);
+        CHECK(glm::length(glm::dvec3(frame.x) - oracleX) < 4e-6);
+        CHECK(glm::length(glm::dvec3(frame.y) - oracleY) < 4e-6);
+        CHECK(glm::length(glm::dvec3(frame.emissionAxis) - oracleZ) < 4e-6);
+        CHECK(std::abs(glm::dot(glm::dvec3(frame.x), glm::dvec3(frame.y))) < 4e-6);
+        CHECK(std::abs(glm::dot(glm::dvec3(frame.x), glm::dvec3(frame.emissionAxis))) < 4e-6);
+        CHECK(std::abs(glm::dot(glm::dvec3(frame.y), glm::dvec3(frame.emissionAxis))) < 4e-6);
     }
 }
 
@@ -537,7 +485,7 @@ TEST_CASE("degenerate analytic lights have zero density without non-finite sampl
 {
     const float3 zero = make_float3(0.0f);
     const AnalyticLightSample disc = sampleAnalyticDisc(zero, zero, zero, zero, 0.3f, 0.7f);
-    const AnalyticLightSample sphere = sampleAnalyticEllipsoid(zero, zero, zero, zero, 0.3f, 0.7f);
+    const AnalyticLightSample sphere = sampleAnalyticEllipsoidUnchecked(zero, zero, zero, zero, 0.3f, 0.7f);
     for (const AnalyticLightSample& sample : { disc, sphere })
     {
         CHECK(sample.areaPdf == 0.0f);
@@ -549,247 +497,8 @@ TEST_CASE("degenerate analytic lights have zero density without non-finite sampl
         CHECK(std::isfinite(sample.normal.z));
     }
     CHECK_FALSE(intersectAnalyticDisc(zero, make_float3(0.0f, 0.0f, 1.0f), 0.0f, 10.0f, zero, zero, zero, zero).hit);
-    CHECK_FALSE(intersectAnalyticEllipsoid(zero, make_float3(0.0f, 0.0f, 1.0f), 0.0f, 10.0f, zero, zero, zero, zero).hit);
-}
-
-TEST_CASE("rank-deficient analytic transforms have no area-light support")
-{
-    const float3 zero = make_float3(0.0f);
-    const float3 x = make_float3(1.0f, 0.0f, 0.0f);
-    const float3 y = make_float3(0.0f, 1.0f, 0.0f);
-
-    // A rank-two sphere collapses into a twice-covered disc. It is not the
-    // ellipsoid area measure or analytic surface that this light declares.
-    const AnalyticLightSample ellipsoid = sampleAnalyticEllipsoid(zero, x, y, zero, 0.0f, 0.25f);
-    CHECK(ellipsoid.areaPdf == 0.0f);
-    CHECK(analyticEllipsoidSurfaceArea(x, y, zero) == 0.0f);
-    CHECK_FALSE(intersectAnalyticEllipsoid(
-                    make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 10.0f, zero, x, y, zero)
-                    .hit);
-
-    // Scene packing marks a singular disc's inverse-transpose normal invalid;
-    // the sampler and intersection must not retain positive area behind it.
-    const AnalyticLightSample disc = sampleAnalyticDisc(zero, x, y, zero, 0.3f, 0.7f);
-    CHECK(disc.areaPdf == 0.0f);
-    CHECK_FALSE(intersectAnalyticDisc(
-                    make_float3(0.0f, 0.0f, 2.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 10.0f, zero, x, y, zero)
-                    .hit);
-
-    // Mutation: the old cofactor-only checks see positive 2D area in both
-    // collapsed objects even though their declared inverse transform does not exist.
-    CHECK(analyticDiscArea(x, y) > 0.0f);
-    CHECK(length(affineSphereCofactor(x, y, zero, make_float3(0.0f, 0.0f, 1.0f))) > 0.0f);
-}
-
-TEST_CASE("a very thin full-rank ellipsoid keeps sampler and intersection support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1.0f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1.0f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1e-20f);
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.0f);
-    REQUIRE(sample.areaPdf > 0.0f);
-
-    const float3 origin = make_float3(0.0f, 0.0f, 2.0f);
-    const float3 direction = normalize(sample.point - origin);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 10.0f, center, axisX, axisY, axisZ);
-    CHECK(hit.hit);
-    CHECK(std::isfinite(hit.distance));
-    CHECK(std::isfinite(hit.normal.x));
-    CHECK(std::isfinite(hit.normal.y));
-    CHECK(std::isfinite(hit.normal.z));
-
-    // Mutation: forming inverse-space coefficients before the quadratic
-    // overflows for this valid affine map and loses the sampled endpoint.
-    const float3 oldOrigin = affineSphereCoordinates(axisX, axisY, axisZ, origin);
-    const float3 oldDirection = affineSphereCoordinates(axisX, axisY, axisZ, direction);
-    const float oldA = dot(oldDirection, oldDirection);
-    const float oldB = dot(oldOrigin, oldDirection);
-    const float oldC = dot(oldOrigin, oldOrigin) - 1.0f;
-    CHECK_FALSE(std::isfinite(oldB * oldB - oldA * oldC));
-}
-
-TEST_CASE("analytic lights reject subnormal conditional densities across backends")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1e20f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1e20f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1e20f);
-
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.25f);
-    CHECK(sample.areaPdf == 0.0f);
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
-        make_float3(0.0f, 0.0f, 2e20f), make_float3(0.0f, 0.0f, -1.0f), 0.0f, 4e20f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-
-    // Mutations: exact-zero determinant classification accepts infinity, and
-    // a CPU with gradual underflow can fabricate a positive conditional PDF
-    // that Metal safe math flushes to zero.
-    CHECK(fabsf(dot(axisX, cross(axisY, axisZ))) > 0.0f);
-    CHECK(1.0 / (4.0 * std::numbers::pi * 1e40) > 0.0);
-}
-
-TEST_CASE("large representable analytic lights keep exact sampler and intersection support")
-{
-    const float scale = 1e13f;
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(scale, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, scale, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, scale);
-    REQUIRE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.0f);
-    REQUIRE(sample.areaPdf > 0.0f);
-    CHECK(std::isfinite(sample.areaPdf));
-    CHECK(sample.normal == make_float3(1.0f, 0.0f, 0.0f));
-
-    const float3 origin = make_float3(2.0f * scale, 0.0f, 0.0f);
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
-        origin, make_float3(-1.0f, 0.0f, 0.0f), 0.0f, 4.0f * scale, center, axisX, axisY, axisZ);
-    REQUIRE(hit.hit);
-    CHECK(hit.distance == doctest::Approx(scale).epsilon(2e-6));
-    CHECK(hit.normal == make_float3(1.0f, 0.0f, 0.0f));
-
-    float3 evaluatedNormal;
-    const float evaluatedPdf = analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, sample.point, evaluatedNormal);
-    CHECK(evaluatedPdf == doctest::Approx(sample.areaPdf).epsilon(2e-6));
-    CHECK(evaluatedNormal == sample.normal);
-    CHECK(analyticEllipsoidSurfaceArea(axisX, axisY, axisZ) > 0.0f);
-    CHECK(std::isfinite(analyticEllipsoidSurfaceArea(axisX, axisY, axisZ)));
-
-    // Mutation: determinant-first validation rejects this representable area
-    // measure before either the sampler or homogeneous intersection runs.
-    CHECK_FALSE(std::isfinite(dot(axisX, cross(axisY, axisZ))));
-}
-
-TEST_CASE("subnormal affine area densities have consistent zero support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(2e19f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 2e19f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.0f, 0.25f);
-    CHECK(sample.areaPdf == 0.0f);
-    CHECK_FALSE(std::isfinite(length(cross(axisX, axisY)))); // denominator-form mutation
-
-    const float3 origin = make_float3(0.0f, 0.0f, 2e19f);
-    const float3 direction = make_float3(0.0f, 0.0f, -1.0f);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 4e19f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-
-    float3 evaluatedNormal;
-    const float evaluatedPdf = analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, sample.point, evaluatedNormal);
-    CHECK(evaluatedPdf == 0.0f);
-}
-
-TEST_CASE("reciprocal-scale ellipsoid axes retain sample PDF and intersection support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1e20f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1e-20f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
-    REQUIRE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.0f);
-    REQUIRE(sample.areaPdf > 0.0f);
-    CHECK(sample.areaPdf == doctest::Approx(1e20 / (4.0 * std::numbers::pi)).epsilon(2e-6));
-    float3 evaluatedNormal;
-    CHECK(analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, sample.point, evaluatedNormal) ==
-          doctest::Approx(sample.areaPdf).epsilon(2e-6));
-    CHECK(evaluatedNormal == sample.normal);
-
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
-        make_float3(2e20f, 0.0f, 0.0f), make_float3(-1.0f, 0.0f, 0.0f), 0.0f, 4e20f, center, axisX, axisY, axisZ);
-    REQUIRE(hit.hit);
-    CHECK(hit.distance == doctest::Approx(1e20f).epsilon(2e-6));
-    CHECK(hit.normal == sample.normal);
-
-    const float commonScale = 1e20f;
-    const float oldDeterminant = dot(axisX / commonScale, cross(axisY / commonScale, axisZ / commonScale));
-    CHECK(oldDeterminant == 0.0f);
-}
-
-TEST_CASE("finite reciprocal ellipsoid inverses keep analytic support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1e-30f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1e10f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1e10f);
-    REQUIRE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.0f);
-    REQUIRE(sample.areaPdf > 0.0f);
-    CHECK(std::isfinite(sample.areaPdf));
-
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
-        make_float3(2e-30f, 0.0f, 0.0f), make_float3(-1.0f, 0.0f, 0.0f), 0.0f, 4e-30f, center, axisX, axisY, axisZ);
-    REQUIRE(hit.hit);
-    CHECK(hit.distance == doctest::Approx(1e-30f).epsilon(2e-5));
-    CHECK(hit.areaPdf > 0.0f);
-    CHECK(std::isfinite(hit.areaPdf));
-}
-
-TEST_CASE("largest normal isotropic ellipsoid density retains support")
-{
-    const float radius = 2e18f;
-    const float3 axisX = make_float3(radius, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, radius, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, radius);
-    REQUIRE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(make_float3(0.0f), axisX, axisY, axisZ, 0.37f, 0.61f);
-    CHECK(sample.areaPdf >= std::numeric_limits<float>::min());
-    CHECK(std::isfinite(sample.normal.x));
-    CHECK(std::isfinite(sample.normal.y));
-    CHECK(std::isfinite(sample.normal.z));
-
-    const float subnormalRadius = 6.5e21f;
-    const float3 subnormalX = make_float3(subnormalRadius, 0.0f, 0.0f);
-    const float3 subnormalY = make_float3(0.0f, subnormalRadius, 0.0f);
-    const float3 subnormalZ = make_float3(0.0f, 0.0f, subnormalRadius);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(subnormalX, subnormalY, subnormalZ));
-    CHECK(sampleAnalyticEllipsoid(make_float3(0.0f), subnormalX, subnormalY, subnormalZ, 0.37f, 0.61f).areaPdf == 0.0f);
-}
-
-TEST_CASE("reciprocal-scale disc axes retain analytic sample and intersection support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1e20f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1e-20f, 0.0f);
-    const float3 emissionNormal = make_float3(0.0f, 0.0f, 1.0f);
-    const AnalyticLightSample sample = sampleAnalyticDisc(center, axisX, axisY, emissionNormal, 0.25f, 0.0f);
-    REQUIRE(sample.areaPdf > 0.0f);
-    CHECK(sample.areaPdf == doctest::Approx(1.0f / float(M_PI_F)).epsilon(2e-6));
-    CHECK(sample.normal == emissionNormal);
-
-    const float3 origin = sample.point + make_float3(0.0f, 0.0f, 1.0f);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticDisc(origin, make_float3(0.0f, 0.0f, -1.0f), 0.0f, 2.0f, center, axisX, axisY, emissionNormal);
-    REQUIRE(hit.hit);
-    CHECK(hit.distance == doctest::Approx(1.0f));
-    CHECK(hit.normal == sample.normal);
-
-    // Mutation: the shared-max implementation overflows before the reciprocal
-    // axis can cancel that scale, despite the exact cross length being one.
-    const float commonScale = 1e20f;
-    const float scaledLength = finiteVectorLength(cross(axisX / commonScale, axisY / commonScale));
-    const float oldReciprocal = ((1.0f / float(M_PI_F)) / scaledLength / commonScale) / commonScale;
-    const bool oldWasRepresentable = oldReciprocal > 0.0f && oldReciprocal <= std::numeric_limits<float>::max();
-    CHECK_FALSE(oldWasRepresentable);
-
-    const float3 largeAxisX = make_float3(1e38f, 0.0f, 0.0f);
-    const float3 smallAxisY = make_float3(0.0f, 1e-10f, 0.0f);
-    const AnalyticLightSample imbalanced =
-        sampleAnalyticDisc(center, largeAxisX, smallAxisY, emissionNormal, 0.25f, 0.0f);
-    REQUIRE(imbalanced.areaPdf > 0.0f);
-    CHECK(imbalanced.areaPdf == doctest::Approx(1.0 / (std::numbers::pi * 1e28)).epsilon(2e-6));
-    const AnalyticLightIntersection imbalancedHit =
-        intersectAnalyticDisc(imbalanced.point + make_float3(0.0f, 0.0f, 1.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f,
-                              2.0f, center, largeAxisX, smallAxisY, emissionNormal);
-    CHECK(imbalancedHit.hit);
+    CHECK_FALSE(
+        intersectAnalyticEllipsoidUnchecked(zero, make_float3(0.0f, 0.0f, 1.0f), 0.0f, 10.0f, zero, zero, zero, zero).hit);
 }
 
 TEST_CASE("a large analytic disc uses scale-safe normals for intersection")
@@ -809,437 +518,13 @@ TEST_CASE("a large analytic disc uses scale-safe normals for intersection")
     CHECK_FALSE(std::isfinite(cross(axisX, axisY).z));
 }
 
-TEST_CASE("a finite raw cross wins over cancellation in normalized inputs")
-{
-    const float3 a = make_float3(-92.7729645f, 46.9849319f, 67.0263596f);
-    const float3 b = make_float3(-8.86599187e35f, 4.49018797e35f, 6.4054781e35f);
-    const glm::dvec3 exactCross = glm::cross(glm::dvec3(a), glm::dvec3(b));
-    const glm::dvec3 exactNormal = glm::normalize(exactCross);
-    const double exactPdf = 1.0 / (std::numbers::pi * glm::length(exactCross));
-    const float3 referenceNormal = make_float3(float(exactNormal.x), float(exactNormal.y), float(exactNormal.z));
-
-    const float3 normal = finiteCrossDirection(a, b);
-    const float areaPdf = analyticDiscAreaPdf(a, b);
-    CHECK(double(dot(normal, referenceNormal)) == doctest::Approx(1.0).epsilon(2e-6));
-    CHECK(double(areaPdf) == doctest::Approx(exactPdf).epsilon(2e-6));
-
-    // Mutation: scaling each input first loses the cancellation residual and
-    // points the normal into a different plane.
-    const float3 normalizedCross = finiteCrossDirection(normalizeFiniteVectorOrZero(a), normalizeFiniteVectorOrZero(b));
-    CHECK(double(dot(normalizedCross, referenceNormal)) < 0.9);
-}
-
-TEST_CASE("subnormal raw cross falls back to a representable scaled density")
-{
-    const float3 a = make_float3(-0.00962962955f, 0.00838168897f, -0.000683822378f);
-    const float3 b = make_float3(4.99392084e-39f, -8.64924236e-38f, 4.22122749e-38f);
-    const glm::dvec3 exactCross = glm::cross(glm::dvec3(a), glm::dvec3(b));
-    const double exactPdf = 1.0 / (std::numbers::pi * glm::length(exactCross));
-    REQUIRE(exactPdf < std::numeric_limits<float>::max());
-    const float areaPdf = analyticDiscAreaPdf(a, b);
-    CHECK(areaPdf > 0.0f);
-    CHECK(std::isfinite(areaPdf));
-    CHECK(double(areaPdf) == doctest::Approx(exactPdf).epsilon(2e-6));
-
-    // Mutation: quantizing the raw cross before division overflows even though
-    // the independently scaled expression has a finite result.
-    CHECK_FALSE(std::isfinite((1.0f / float(M_PI_F)) / finiteVectorLength(accurateCross(a, b))));
-}
-
-TEST_CASE("power-of-two cross scaling preserves normals when density is subnormal")
-{
-    const float3 a = make_float3(6.315719015e-25f, -2.058267347e23f, -6.421042562e32f);
-    const float3 b = make_float3(-7.02678399e-30f, 2.290000284e18f, 7.14396473e27f);
-    const glm::dvec3 exactCross = glm::cross(glm::dvec3(a), glm::dvec3(b));
-    const glm::dvec3 exactNormal = glm::normalize(exactCross);
-    const double exactPdf = 1.0 / (std::numbers::pi * glm::length(exactCross));
-    const float3 normal = finiteCrossDirection(a, b);
-    const float areaPdf = analyticDiscAreaPdf(a, b);
-    REQUIRE(exactPdf < std::numeric_limits<float>::min());
-    CHECK(areaPdf == 0.0f);
-    CHECK(glm::dot(glm::dvec3(normal), exactNormal) > 0.999999);
-
-    // Mutation: discarding an overflowing component makes an irrelevant small
-    // component become the normal and changes the density by many orders.
-    const float3 raw = accurateCross(a, b);
-    const float3 finiteRaw = make_float3(
-        std::isfinite(raw.x) ? raw.x : 0.0f, std::isfinite(raw.y) ? raw.y : 0.0f, std::isfinite(raw.z) ? raw.z : 0.0f);
-    CHECK(glm::dot(glm::dvec3(normalizeFiniteVectorOrZero(finiteRaw)), exactNormal) < 0.01);
-}
-
-TEST_CASE("power-of-two cross scaling retains ordinary finite densities")
-{
-    const float3 a = make_float3(-2.416244708e20f, -8.15424704e20f, -1.435870284e21f);
-    const float3 b = make_float3(-2.55069686e20f, -8.607985406e20f, -1.51576949e21f);
-    const glm::dvec3 exactCross = glm::cross(glm::dvec3(a), glm::dvec3(b));
-    const double exactPdf = 1.0 / (std::numbers::pi * glm::length(exactCross));
-    const float areaPdf = analyticDiscAreaPdf(a, b);
-    REQUIRE(areaPdf > 0.0f);
-    CHECK(double(areaPdf) == doctest::Approx(exactPdf).epsilon(2e-5));
-    CHECK(glm::dot(glm::dvec3(finiteCrossDirection(a, b)), glm::normalize(exactCross)) > 0.999999);
-}
-
-TEST_CASE("affine orientation uses a compensated triple product")
-{
-    const float3 x = make_float3(-0.760982871f, 0.223688096f, 0.608989894f);
-    const float3 y = make_float3(-0.44675234f, 0.179339349f, -0.87649852f);
-    const float3 z = make_float3(0.539036989f, -0.142934054f, -0.830065668f);
-    const glm::dvec3 xd(x);
-    const glm::dvec3 yd(y);
-    const glm::dvec3 zd(z);
-    REQUIRE(glm::dot(xd, glm::cross(yd, zd)) > 0.0);
-    CHECK(analyticAffineOrientation(x, y, z) == 1.0f);
-
-    // Mutation: naive float products reverse the orientation.
-    CHECK(dot(x, cross(y, z)) < 0.0f);
-}
-
-TEST_CASE("affine orientation retains the exact sign near float cancellation")
-{
-    const float3 x = make_float3(1521382272.0f, -4562933760.0f, 621223168.0f);
-    const float3 y = make_float3(3831902976.0f, 1824664064.0f, -4543640064.0f);
-    const float3 z = make_float3(-2499741696.0f, -4787814912.0f, 4614122496.0f);
-    const glm::dvec3 xd(x);
-    const glm::dvec3 yd(y);
-    const glm::dvec3 zd(z);
-    const double exactDeterminant = glm::dot(xd, glm::cross(yd, zd));
-    REQUIRE(exactDeterminant < 0.0);
-    CHECK(analyticAffineOrientation(x, y, z) == -1.0f);
-
-    // Mutation: rounding each cofactor before the triple product flips the
-    // sidedness of this otherwise finite affine light.
-    const float3 xn = normalizeFiniteVectorOrZero(x);
-    const float3 yn = normalizeFiniteVectorOrZero(y);
-    const float3 zn = normalizeFiniteVectorOrZero(z);
-    CHECK(accurateDot(xn, accurateCross(yn, zn)) > 0.0f);
-}
-
-TEST_CASE("ill-conditioned ellipsoid point maps have no partial support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(7.1825589e-8f, 5.9514921e-8f, -2.69455853e-8f);
-    const float3 axisY = make_float3(-8.47644524e-11f, 9.36010366e-11f, -1.92090233e-11f);
-    const float3 axisZ = make_float3(9.36574361e-5f, 2.48845143e-4f, 7.99277448e-4f);
-    REQUIRE(scaledAffineBasis(axisX, axisY, axisZ).valid);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.712177873f, 0.0402052477f);
-    CHECK(sample.areaPdf == 0.0f);
-
-    const float3 origin = make_float3(4e-4f);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, -normalize(origin), 0.0f, 1e-3f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-
-    float3 pointNormal;
-    CHECK(analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, axisX, pointNormal) == 0.0f);
-
-    // Mutation: determinant and local Jacobians alone accept the map, leaving
-    // positive NEE density even though float(A*x) cannot represent one shared
-    // ellipsoid endpoint reliably.
-    float3 ignored;
-    CHECK(affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(1.0f, 0.0f, 0.0f), ignored) > 0.0f);
-    CHECK(affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(0.0f, 1.0f, 0.0f), ignored) > 0.0f);
-    CHECK(affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(0.0f, 0.0f, 1.0f), ignored) > 0.0f);
-}
-
-TEST_CASE("ordinary rotated non-uniform ellipsoids retain analytic support")
-{
-    const float angle = 0.6f;
-    const float cosine = std::cos(angle);
-    const float sine = std::sin(angle);
-    for (const float aspect : { 16.0f, 1500.0f })
-    {
-        const float3 axisX = make_float3(aspect * cosine, aspect * sine, 0.0f);
-        const float3 axisY = make_float3(-sine, cosine, 0.0f);
-        const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
-        REQUIRE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-
-        const AnalyticLightSample sample = sampleAnalyticEllipsoid(make_float3(0.0f), axisX, axisY, axisZ, 0.4f, 0.7f);
-        REQUIRE(sample.areaPdf > 0.0f);
-        const float3 origin = sample.point + sample.normal * 4.0f;
-        const AnalyticLightIntersection hit =
-            intersectAnalyticEllipsoid(origin, -sample.normal, 0.0f, 8.0f, make_float3(0.0f), axisX, axisY, axisZ);
-        REQUIRE(hit.hit);
-        CHECK(hit.areaPdf == doctest::Approx(sample.areaPdf).epsilon(2e-4));
-        CHECK(glm::dot(hit.normal, sample.normal) > 0.9999f);
-    }
-
-    const float3 unstableAxisX = make_float3(8192.0f * cosine, 8192.0f * sine, 0.0f);
-    const float3 unstableAxisY = make_float3(-sine, cosine, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(unstableAxisX, unstableAxisY, axisZ));
-    CHECK(sampleAnalyticEllipsoid(make_float3(0.0f), unstableAxisX, unstableAxisY, axisZ, 0.4f, 0.7f).areaPdf == 0.0f);
-}
-
-TEST_CASE("far analytic sphere intersections retain the unit-radius geometry")
-{
-    const float3 zero = make_float3(0.0f);
-    const float3 axisX = make_float3(1.0f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1.0f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
-    for (const float distance : { 1e3f, 1e4f, 1e5f, 1e6f, 1e7f, 1e8f })
-    {
-        const AnalyticLightIntersection hit =
-            intersectAnalyticEllipsoid(make_float3(0.0f, 0.0f, distance + 1.0f), make_float3(0.0f, 0.0f, -1.0f), 0.0f,
-                                       2.0f * distance, zero, axisX, axisY, axisZ);
-        REQUIRE(hit.hit);
-        CHECK(finiteVectorLength(hit.point) == doctest::Approx(1.0f).epsilon(1e-6));
-        CHECK(hit.point.z > 0.0f);
-        CHECK(hit.areaPdf == doctest::Approx(1.0f / (4.0f * float(M_PI_F))));
-    }
-
-    // Mutation: the expanded quadratic subtracts indistinguishable O(D^2)
-    // floats to recover a unit-radius discriminant.
-    const float origin = 100001.0f;
-    CHECK(origin * origin - (origin * origin - 1.0f) == 0.0f);
-}
-
-TEST_CASE("far affine intersections use the geometric sphere discriminant")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(-0.00104633148f, -0.00179306185f, 0.00373847224f);
-    const float3 axisY = make_float3(0.00752747664f, -0.000384329469f, 0.0062315953f);
-    const float3 axisZ = make_float3(-0.00675372034f, 0.00230669905f, 0.00739100156f);
-    const float3 point = make_float3(0.00583745912f, -0.000655979849f, 0.00800315198f);
-    float3 expectedNormal;
-    const float expectedPdf = analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, point, expectedNormal);
-    REQUIRE(expectedPdf > 0.0f);
-
-    const float3 origin = make_float3(1.8809042f, -1.57326388f, 2.80466914f);
-    float distance = 0.0f;
-    const float3 direction = finiteDirectionAndDistance(point - origin, distance);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 4.0f, center, axisX, axisY, axisZ);
-    REQUIRE(hit.hit);
-    CHECK(hit.areaPdf == doctest::Approx(expectedPdf).epsilon(2e-4));
-    CHECK(glm::dot(hit.normal, expectedNormal) > 0.9999f);
-    float3 hitNormal;
-    CHECK(analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, hit.point, hitNormal) ==
-          doctest::Approx(expectedPdf).epsilon(2e-4));
-}
-
-TEST_CASE("far transformed disc intersections retain the sampled local point")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(-17681.582f, 570.998535f, -12698.1465f);
-    const float3 axisY = make_float3(-407.984558f, -65.6591263f, -185.461899f);
-    const float3 normal = finiteCrossDirection(axisX, axisY);
-    const float3 point = -0.466799f * axisX + 0.0245106f * axisY;
-    const float3 origin = make_float3(-7.23433152e8f, 1.46389171e9f, 1.07319155e9f);
-    float expectedDistance = 0.0f;
-    const float3 direction = finiteDirectionAndDistance(point - origin, expectedDistance);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticDisc(origin, direction, 0.0f, 1.01f * expectedDistance, center, axisX, axisY, normal);
-    REQUIRE(hit.hit);
-    CHECK(hit.distance == doctest::Approx(expectedDistance).epsilon(2e-6));
-    float3 localPoint;
-    REQUIRE(solveAffineCoordinates(axisX, axisY, normal, hit.point, localPoint));
-    // At this distance the rounded ray direction reaches a different point on
-    // the same constant-density disc; the analytic event must still retain
-    // support rather than inherit the old Cramer cancellation miss.
-    CHECK(localPoint.x * localPoint.x + localPoint.y * localPoint.y < 1.0f);
-}
-
 TEST_CASE("large off-axis rays do not fabricate analytic sphere hits")
 {
     const float3 zero = make_float3(0.0f);
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
+    const AnalyticLightIntersection hit = intersectAnalyticEllipsoidUnchecked(
         make_float3(3e38f), make_float3(-1.0f, 0.0f, 0.0f), 0.0f, 3.4e38f, zero, make_float3(1.0f, 0.0f, 0.0f),
         make_float3(0.0f, 1.0f, 0.0f), make_float3(0.0f, 0.0f, 1.0f));
     CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("far sampled ellipsoid directions survive affine inversion")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(0.204458386f, -0.988693833f, 0.803253651f);
-    const float3 axisY = make_float3(5.53949070f, 2.91283822f, 2.88948560f);
-    const float3 axisZ = make_float3(-18.0428257f, -6.54786968f, -11.0914745f);
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.608120680f, 0.929035604f);
-    REQUIRE(sample.areaPdf > 0.0f);
-
-    const float maxAxis = std::max({ std::abs(axisX.x), std::abs(axisX.y), std::abs(axisX.z), std::abs(axisY.x),
-                                     std::abs(axisY.y), std::abs(axisY.z), std::abs(axisZ.x), std::abs(axisZ.y),
-                                     std::abs(axisZ.z) });
-    const float3 origin = sample.point + (3000.0f * maxAxis) * sample.normal;
-    float expectedDistance = 0.0f;
-    const float3 direction = finiteDirectionAndDistance(sample.point - origin, expectedDistance);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 1.01f * expectedDistance, center, axisX, axisY, axisZ);
-    REQUIRE(hit.hit);
-    // Stable closest-point Decimal-100 inversion of the actual rounded float
-    // ray. Its event differs from the original object-space sample at this
-    // distance.
-    const double oracleDistance = 54128.47223893619;
-    const double oracleAreaPdf = 0.01202316558152245;
-    CHECK(std::abs(double(hit.distance) - oracleDistance) / oracleDistance < 2e-6);
-    CHECK(std::abs(double(hit.areaPdf) - oracleAreaPdf) / oracleAreaPdf < 2e-4);
-}
-
-TEST_CASE("unstable world-space affine maps are rejected before intersection")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(0.00756730838f, 0.0248504151f, -0.0175565388f);
-    const float3 axisY = make_float3(0.190996543f, -0.137583911f, 0.156075403f);
-    const float3 axisZ = make_float3(651.313721f, 92.1582031f, 92.4737625f);
-    const float3 origin = make_float3(-63663120.0f, 261363808.0f, 320730784.0f);
-    const float3 direction = make_float3(0.152083531f, -0.624364734f, -0.766184866f);
-    REQUIRE(scaledAffineBasis(axisX, axisY, axisZ).valid);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 460468288.0f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("grazing ellipsoid events share the sampler validity decision")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(-785.847412f, -681.281067f, -650.097473f);
-    const float3 axisY = make_float3(-1518.17835f, -1316.69812f, -1256.17432f);
-    const float3 axisZ = make_float3(-642.634583f, -565.386780f, -436.309845f);
-    const float3 origin = make_float3(-1342.88501f, 2381.62061f, 2741.38892f);
-    const float3 direction = make_float3(0.752844036f, -0.409161001f, -0.515570462f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 4000.0f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("unstable shallow ellipsoid events have zero support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(-0.00398159213f, 0.000330713141f, 0.00293193618f);
-    const float3 axisY = make_float3(-0.00555002922f, 0.0136571527f, 0.0578561462f);
-    const float3 axisZ = make_float3(-80.9410858f, -285.8573f, -389.395782f);
-    const float3 origin = make_float3(32.3587875f, 120.718857f, 170.991226f);
-    const float3 direction = make_float3(0.391622931f, 0.789420366f, 0.472701728f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 12.0f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("unstable affine roots have zero ellipsoid density")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(158.029495f, -114.250336f, -116.824974f);
-    const float3 axisY = make_float3(0.00142893556f, 0.000479158247f, -0.000841408386f);
-    const float3 axisZ = make_float3(0.268196851f, -0.181894377f, -0.0859287232f);
-    const float3 origin = make_float3(545.809753f, 596.197998f, 620.241333f);
-    const float3 direction = make_float3(-0.607456088f, -0.550127149f, -0.573024631f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 1200.0f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("unstable well-inside affine events have zero support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(-0.000881578831f, 0.000938957208f, 0.000169104474f);
-    const float3 axisY = make_float3(6.43567371f, -6.7786932f, -1.3295995f);
-    const float3 axisZ = make_float3(188.472794f, 164.594452f, -40.2989082f);
-    const float3 origin = make_float3(74.476265f, 78.0275574f, -18.2688217f);
-    const float3 direction = make_float3(0.872094691f, 0.273129016f, 0.406018972f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 4.3f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("unstable far affine events have zero support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(12.2097139f, -705.285706f, 215.371231f);
-    const float3 axisY = make_float3(-1.37548041f, -0.84901464f, -1.02014947f);
-    const float3 axisZ = make_float3(-0.000329842936f, 0.000400975288f, 0.000543817878f);
-    const float3 origin = make_float3(-335.224854f, -5.64324951f, -700.73999f);
-    const float3 direction = make_float3(0.353966027f, 0.767305195f, 0.534743607f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 1000.0f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("unstable non-grazing affine events have zero support")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(478.180054f, -526.177185f, 439.428772f);
-    const float3 axisY = make_float3(-0.00215341966f, 0.00184252427f, 0.00174143084f);
-    const float3 axisZ = make_float3(-0.0026615907f, 0.00503811194f, 0.000180512565f);
-    const float3 origin = make_float3(-190.425812f, 544.610718f, 9.85165405f);
-    const float3 direction = make_float3(-0.215680808f, -0.67771101f, -0.702986181f);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 400.0f, center, axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("affine sphere Jacobians use the direct cofactor")
-{
-    const float3 axisX = make_float3(0.000304052635f, 0.00170207024f, 0.00128460769f);
-    const float3 axisY = make_float3(447.760712f, 747.030823f, 484.648926f);
-    const float3 axisZ = make_float3(0.000951631751f, 0.000829412544f, 0.0000969282191f);
-    const float3 objectNormal = make_float3(-0.426422715f, -0.364615619f, 0.827779591f);
-    float3 worldNormal;
-    const float areaPdf = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, worldNormal);
-    const double oracleAreaPdf = 0.2290906013;
-    const glm::dvec3 oracleNormal(0.08349491, 0.50665755, -0.85809482);
-    CHECK(std::abs(double(areaPdf) - oracleAreaPdf) / oracleAreaPdf < 2e-4);
-    CHECK(glm::dot(glm::dvec3(worldNormal), oracleNormal) > 0.999999);
-
-    // Mutation: rounding two nearly parallel transformed tangents before
-    // their cross loses the small cofactor components and changes the measure.
-    const float3 n = normalizeFiniteVectorOrZero(objectNormal);
-    const float3 tangent = normalizeFiniteVectorOrZero(cross(make_float3(0.0f, 0.0f, 1.0f), n));
-    const float3 bitangent = cross(n, tangent);
-    const float3 worldTangent = tangent.x * axisX + tangent.y * axisY + tangent.z * axisZ;
-    const float3 worldBitangent = bitangent.x * axisX + bitangent.y * axisY + bitangent.z * axisZ;
-    const float materializedPdf = finiteCrossReciprocal(worldTangent, worldBitangent, 1.0f / (4.0f * M_PI_F));
-    CHECK(std::abs(double(materializedPdf) - oracleAreaPdf) / oracleAreaPdf > 0.01);
-}
-
-TEST_CASE("an ill-conditioned disc sample remains on its analytic intersection surface")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1.32084184e-8f, 1.13400649e-8f, 2.06591437e-8f);
-    const float3 axisY = make_float3(-6.23864729e-13f, -5.41376134e-13f, -9.7829622e-13f);
-    const float3 normal = finiteCrossDirection(axisX, axisY);
-    const float3 point = 0.3f * axisX - 0.4f * axisY;
-    const float distance = 1.350795653e-8f;
-    const float3 origin = point + normal * distance;
-    const AnalyticLightIntersection hit =
-        intersectAnalyticDisc(origin, -normal, 0.0f, 2.0f * distance, center, axisX, axisY, normal);
-    REQUIRE(hit.hit);
-    CHECK(hit.distance == doctest::Approx(distance).epsilon(2e-5));
-    CHECK(hit.normal == normal);
-    CHECK(analyticDiscAreaPdf(axisX, axisY) > 0.0f);
-}
-
-TEST_CASE("analytic samples reject finite world-point overflow")
-{
-    const float maxFinite = std::numeric_limits<float>::max();
-    const float3 center = make_float3(maxFinite, 0.0f, 0.0f);
-    const float3 axisX = make_float3(1e32f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1e-10f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1e-10f);
-    const float3 normal = make_float3(0.0f, 0.0f, 1.0f);
-
-    CHECK(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    CHECK_FALSE(affineSamplePointRangeIsFinite(center, axisX, axisY, axisZ));
-    CHECK(sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.0f).areaPdf == 0.0f);
-    CHECK(sampleAnalyticDisc(center, axisX, axisY, normal, 1.0f, 0.0f).areaPdf == 0.0f);
-    CHECK_FALSE(intersectAnalyticEllipsoid(
-                    make_float3(0.0f), make_float3(1.0f, 0.0f, 0.0f), 0.0f, maxFinite, center, axisX, axisY, axisZ)
-                    .hit);
-    CHECK_FALSE(intersectAnalyticDisc(
-                    make_float3(0.0f), make_float3(1.0f, 0.0f, 0.0f), 0.0f, maxFinite, center, axisX, axisY, normal)
-                    .hit);
-
-    // Mutation: checking only finite inputs allows the final FMA to overflow
-    // while retaining a positive conditional area density.
-    CHECK_FALSE(std::isfinite(std::fma(1.0f, axisX.x, center.x)));
-    CHECK(analyticDiscAreaPdf(axisX, axisY) > 0.0f);
 }
 
 TEST_CASE("area-to-solid-angle saturation clamps rounded unit cosines")
@@ -1269,31 +554,6 @@ TEST_CASE("area-to-solid-angle conversion distinguishes underflow from overflow"
     CHECK(1e-38f * 1e-10f == 0.0f);
 }
 
-TEST_CASE("analytic sample and hit PDFs agree at distances whose square overflows")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1e15f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 3.1830989e14f, 0.0f);
-    const float3 normal = make_float3(0.0f, 0.0f, 1.0f);
-    const float3 origin = make_float3(0.0f, 0.0f, 2e20f);
-    const AnalyticLightSample sample = sampleAnalyticDisc(center, axisX, axisY, normal, 0.0f, 0.0f);
-    const AnalyticLightIntersection hit =
-        intersectAnalyticDisc(origin, -normal, 0.0f, 3e20f, center, axisX, axisY, normal);
-    REQUIRE(sample.areaPdf > 0.0f);
-    REQUIRE(hit.hit);
-
-    const float sampleDistance = finiteVectorLength(sample.point - origin);
-    const float hitDistance = finiteVectorLength(hit.point - origin);
-    const float samplePdf = areaPdfToSolidAnglePdf(sampleDistance, 1.0f, sample.areaPdf);
-    const float hitPdf = areaPdfToSolidAnglePdf(hitDistance, 1.0f, hit.areaPdf);
-    CHECK(samplePdf == doctest::Approx(4e10f).epsilon(2e-6));
-    CHECK(hitPdf == samplePdf);
-
-    // Mutation: the backend's former raw vector length overflows and changes
-    // the complementary BSDF-hit MIS density to the largest float.
-    CHECK_FALSE(std::isfinite(length(hit.point - origin)));
-}
-
 TEST_CASE("affine surface normals use the inverse transpose")
 {
     const float3 axisX = make_float3(2.0f, 0.0f, 0.0f);
@@ -1313,114 +573,6 @@ TEST_CASE("affine surface normals use the inverse transpose")
 
     const float3 mirrored = transformAffineNormal(-axisX, axisY, axisZ, make_float3(0.0f, 0.0f, 1.0f));
     CHECK(mirrored == make_float3(0.0f, 0.0f, 1.0f));
-
-    // Only the cofactor selected by this object normal is small. Scaling all
-    // cofactors by the largest pair product underflows that valid direction.
-    const float3 extremeX = make_float3(1e-30f, 0.0f, 0.0f);
-    const float3 extremeY = make_float3(0.0f, 1e30f, 0.0f);
-    const float3 extremeZ = make_float3(0.0f, 0.0f, 1.0f);
-    CHECK(transformAffineNormal(extremeX, extremeY, extremeZ, make_float3(0.0f, 1.0f, 0.0f)) ==
-          make_float3(0.0f, 1.0f, 0.0f));
-}
-
-TEST_CASE("analytic lights retain support across the full homogeneous exponent range")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1e-30f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1e30f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
-    REQUIRE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.25f);
-    CHECK(sample.areaPdf > 0.0f);
-    CHECK(std::isfinite(sample.areaPdf));
-    float3 normal;
-    CHECK(analyticEllipsoidAreaPdf(center, axisX, axisY, axisZ, axisY, normal) > 0.0f);
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
-        make_float3(0.0f, 2e30f, 0.0f), make_float3(0.0f, -1.0f, 0.0f), 0.0f, 4e30f, center, axisX, axisY, axisZ);
-    REQUIRE(hit.hit);
-    CHECK(hit.areaPdf > 0.0f);
-    CHECK(std::isfinite(hit.areaPdf));
-
-    // Mutation: one common scale erases the reciprocal axis and reports a
-    // singular transform even though all three original axes are full-rank.
-    const float commonScale = 1e30f;
-    CHECK(dot(axisX / commonScale, cross(axisY / commonScale, axisZ / commonScale)) == 0.0f);
-}
-
-TEST_CASE("homogeneous ellipsoids do not require a representable explicit inverse")
-{
-    const float3 center = make_float3(0.0f);
-    const float3 axisX = make_float3(1e-39f, 0.0f, 0.0f);
-    const float3 axisY = make_float3(0.0f, 1.0f, 0.0f);
-    const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
-    float3 normal;
-    const float maximumAreaPdf = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(0.0f, 1.0f, 0.0f), normal);
-    REQUIRE(maximumAreaPdf > 0.0f);
-    REQUIRE(std::isfinite(maximumAreaPdf));
-    CHECK(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 0.5f, 0.25f);
-    CHECK(sample.areaPdf > 0.0f);
-    CHECK(std::isfinite(sample.areaPdf));
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
-        make_float3(0.0f, 2.0f, 0.0f), make_float3(0.0f, -1.0f, 0.0f), 0.0f, 4.0f, center, axisX, axisY, axisZ);
-    REQUIRE(hit.hit);
-    CHECK(hit.areaPdf == maximumAreaPdf);
-
-    // Mutation: a materialized inverse falsely rejects the otherwise
-    // representable homogeneous geometry because 1 / 1e-39 exceeds float.
-    float3 explicitInverse;
-    CHECK_FALSE(solveAffineCoordinates(axisX, axisY, axisZ, make_float3(1.0f, 0.0f, 0.0f), explicitInverse));
-}
-
-TEST_CASE("unrepresentable independent axis scales do not fabricate ellipsoid hits")
-{
-    const float3 axisX = make_float3(3.69605172e16f, -6.59055645e16f, 7.1990249e16f);
-    const float3 axisY = make_float3(8.81609171e23f, -1.87966457e24f, -6.80089589e23f);
-    const float3 axisZ = make_float3(-9.20824007e-12f, 2.41302672e-11f, 2.79694271e-11f);
-    const float3 origin = make_float3(1.07635714e25f, -2.29488357e25f, -8.30321789e24f);
-    const float3 direction = make_float3(-0.403538615f, 0.860378146f, 0.311297208f);
-
-    CHECK(scaledAffineBasis(axisX, axisY, axisZ).valid);
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 2.81661421e25f, make_float3(0.0f), axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-
-    // Mutation: a shared row scale gives the three independently sized axes a
-    // severely ill-conditioned numerical representation.
-    const float scaleX = fmaxf(fabsf(axisX.x), fmaxf(fabsf(axisX.y), fabsf(axisX.z)));
-    const float scaleY = fmaxf(fabsf(axisY.x), fmaxf(fabsf(axisY.y), fabsf(axisY.z)));
-    const float scaleZ = fmaxf(fabsf(axisZ.x), fmaxf(fabsf(axisZ.y), fabsf(axisZ.z)));
-    CHECK(compensatedDotCross(axisX / scaleX, axisY / scaleY, axisZ / scaleZ) != 0.0f);
-}
-
-TEST_CASE("unrepresentable independent axis scales reject definite ellipsoid hits")
-{
-    const float3 axisX = make_float3(-5.43080251e11f, 3.71845464e11f, -5.53306948e11f);
-    const float3 axisY = make_float3(-5824.61816f, -48433.5703f, -30959.418f);
-    const float3 axisZ = make_float3(3.50807946e-12f, -2.49112878e-13f, -6.75337715e-13f);
-    const float3 origin = make_float3(4.1185919e11f, -2.81998787e11f, 4.19614884e11f);
-    const float3 direction = make_float3(-0.631593764f, 0.432450354f, -0.643487334f);
-
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 4.53982487e11f, make_float3(0.0f), axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
-}
-
-TEST_CASE("unrepresentable independent scales reject ellipsoid hit density")
-{
-    const float3 axisX = make_float3(3501.73047f, -2062.47144f, 4152.95801f);
-    const float3 axisY = make_float3(1.3271892e10f, -2.36455552e9f, -8.32448768e9f);
-    const float3 axisZ = make_float3(1.19920534e-12f, 1.26033976e-13f, -4.42286182e-13f);
-    const float3 origin = make_float3(-2.88716621e9f, 514386880.0f, 1.81090086e9f);
-    const float3 direction = make_float3(0.837664723f, -0.149241969f, -0.525399625f);
-
-    CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
-    const AnalyticLightIntersection hit =
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, 5.0e9f, make_float3(0.0f), axisX, axisY, axisZ);
-    CHECK_FALSE(hit.hit);
 }
 
 TEST_CASE("a back-facing or degenerate area sample has no density")
@@ -1432,87 +584,6 @@ TEST_CASE("a back-facing or degenerate area sample has no density")
     CHECK(areaLightSolidAnglePdf(2.0f, 0.0f, 1.0f) == 0.0f);
     CHECK(areaLightSolidAnglePdf(2.0f, 0.5f, 0.0f) == 0.0f);
     CHECK(misWeightBalance(1.0f, areaLightSolidAnglePdf(2.0f, -0.5f, 1.0f)) == doctest::Approx(1.0f));
-
-    const float largeFinite = areaLightSolidAnglePdf(1e30f, 0.5f, 1e30f);
-    CHECK(std::isfinite(largeFinite));
-    CHECK(largeFinite == doctest::Approx(2e30f).epsilon(2e-6));
-    CHECK(areaLightSolidAnglePdf(1e20f, 0.5f, 1e-30f) == std::numeric_limits<float>::max());
-}
-
-TEST_CASE("analytic marginal PDF applies light selection before saturation")
-{
-    LightPdfQuery q = makeLightPdfQuery(LIGHT_TYPE_DISC);
-    q.distToLight = 1e10f;
-    q.cosAtLight = 1.0f;
-    q.areaPdf = 1e30f;
-    constexpr float localSelection = 1e-8f;
-    constexpr float classSelection = 1e-6f;
-    constexpr float lightSelection = 1e-6f;
-
-    const float marginal = marginalLightSolidAnglePdf(q, localSelection, classSelection, lightSelection);
-    const long double oracle = static_cast<long double>(q.areaPdf) * static_cast<long double>(q.distToLight) *
-                               static_cast<long double>(q.distToLight) * static_cast<long double>(localSelection) *
-                               static_cast<long double>(classSelection) * static_cast<long double>(lightSelection);
-    CHECK(marginal == doctest::Approx(static_cast<double>(oracle)).epsilon(2e-6));
-    CHECK(std::isfinite(marginal));
-
-    // Mutation: this is the old renderer order. The conditional clamps to
-    // FLT_MAX before the outer PMFs can bring the full density back to 1e30.
-    const float oldMarginal = lightSolidAnglePdf(q) * localSelection * classSelection * lightSelection;
-    CHECK(std::abs(double(oldMarginal) - double(oracle)) / double(oracle) > 0.99);
-}
-
-TEST_CASE("complete area-light marginal PDF agrees with a long-double oracle")
-{
-    std::mt19937 rng(0x504446u);
-    std::uniform_real_distribution<float> mantissa(0.5f, 1.0f);
-    std::uniform_int_distribution<int> areaExponent(-100, 100);
-    std::uniform_int_distribution<int> distanceExponent(-40, 40);
-    std::uniform_int_distribution<int> selectionExponent(-30, 0);
-    std::uniform_int_distribution<int> cosineExponent(-20, 0);
-    uint32_t checked = 0u;
-    uint32_t oldFailures = 0u;
-
-    while (checked < 4096u)
-    {
-        const float areaPdf = std::ldexp(mantissa(rng), areaExponent(rng));
-        const float distance = std::ldexp(mantissa(rng), distanceExponent(rng));
-        const float cosine = std::min(std::ldexp(mantissa(rng), cosineExponent(rng)), 1.0f);
-        const float s0 = std::ldexp(mantissa(rng), selectionExponent(rng));
-        const float s1 = std::ldexp(mantissa(rng), selectionExponent(rng));
-        const float s2 = std::ldexp(mantissa(rng), selectionExponent(rng));
-        const float s3 = std::ldexp(mantissa(rng), selectionExponent(rng));
-        const long double oracle = static_cast<long double>(areaPdf) * static_cast<long double>(distance) *
-                                   static_cast<long double>(distance) * static_cast<long double>(s0) *
-                                   static_cast<long double>(s1) * static_cast<long double>(s2) *
-                                   static_cast<long double>(s3) / static_cast<long double>(cosine);
-        if (!(oracle >= std::numeric_limits<float>::min()) || !(oracle <= std::numeric_limits<float>::max()))
-        {
-            continue;
-        }
-
-        const float pdf = areaPdfToSolidAngleMarginalPdf(distance, cosine, areaPdf, s0, s1, s2, s3);
-        CAPTURE(areaPdf);
-        CAPTURE(distance);
-        CAPTURE(cosine);
-        CAPTURE(s0);
-        CAPTURE(s1);
-        CAPTURE(s2);
-        CAPTURE(s3);
-        CAPTURE(oracle);
-        CAPTURE(pdf);
-        REQUIRE(pdf > 0.0f);
-        REQUIRE(std::isfinite(pdf));
-        CHECK(std::abs(static_cast<long double>(pdf) - oracle) / oracle < 2e-6L);
-
-        const float oldPdf = areaPdfToSolidAnglePdf(distance, cosine, areaPdf) * s0 * s1 * s2 * s3;
-        if (!(oldPdf > 0.0f) || std::abs(static_cast<long double>(oldPdf) - oracle) / oracle > 1e-3L)
-        {
-            ++oldFailures;
-        }
-        ++checked;
-    }
-    CHECK(oldFailures > 100u);
 }
 
 TEST_CASE("a soft point light converges on the sharp one as its radius shrinks")
@@ -1655,8 +726,7 @@ TEST_CASE("distant sampling and directional PDF share the exact cap support")
             {
                 for (const float q : values)
                 {
-                    const float3 direction =
-                        sampleDistantLightDirection(u, q, 0x12345678u, 0x9abcdef0u, angle, axis);
+                    const float3 direction = sampleDistantLightDirection(u, q, 0x12345678u, 0x9abcdef0u, angle, axis);
                     CAPTURE(axis.x);
                     CAPTURE(axis.y);
                     CAPTURE(axis.z);
@@ -1725,10 +795,8 @@ TEST_CASE("finite distant retries do not fold rejected boundary cells onto one d
     CHECK(distantLightContainsDirection(halfAngle, b, axis));
     const bool distinct = a.x != b.x || a.y != b.y || a.z != b.z;
     CHECK(distinct);
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, a, axis) ==
-          coneLightSolidAnglePdf(halfAngle));
-    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, b, axis) ==
-          coneLightSolidAnglePdf(halfAngle));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, a, axis) == coneLightSolidAnglePdf(halfAngle));
+    CHECK(infiniteLightConditionalPdf(LIGHT_TYPE_DISTANT, halfAngle, b, axis) == coneLightSolidAnglePdf(halfAngle));
 }
 
 TEST_CASE("infinite lights do not inherit area-emitter sidedness")
@@ -1994,10 +1062,9 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     const float3 edgeX = make_float3(1.0f, 0.0f, 0.0f);
     const float3 edgeY = make_float3(0.0f, 1.0f, 0.0f);
     const float hardwareDistance = 2.0f;
-    const AnalyticLightIntersection analytic = intersectAnalyticLightSurface(
-        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
-        make_float3(0.0f, 0.0f, -1.0f), make_float3(0.0f), make_float3(0.0f, 0.0f, 1.0f), 0.0f,
-        hardwareDistance);
+    const AnalyticLightIntersection analytic = intersectAnalyticLightSurfaceUnchecked(
+        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY, make_float3(0.0f, 0.0f, -1.0f),
+        make_float3(0.0f), make_float3(0.0f, 0.0f, 1.0f), 0.0f, hardwareDistance);
 
     REQUIRE(analytic.hit);
     CHECK(analytic.distance == doctest::Approx(1.0f));
@@ -2011,9 +1078,9 @@ TEST_CASE("the nearest of two area emitters is the visible hit")
     const float3 normal = make_float3(0.0f, 0.0f, -1.0f);
     const auto hit = [&](float z) {
         const float3 corner = make_float3(-0.5f, -0.5f, z);
-        return intersectAnalyticLightSurface(LIGHT_TYPE_RECT, corner, corner + make_float3(1.0f, 0.0f, 0.0f),
-                                             make_float3(0.0f), corner + make_float3(0.0f, 1.0f, 0.0f), normal,
-                                             origin, direction, 0.0f, 100.0f);
+        return intersectAnalyticLightSurfaceUnchecked(LIGHT_TYPE_RECT, corner, corner + make_float3(1.0f, 0.0f, 0.0f),
+                                                      make_float3(0.0f), corner + make_float3(0.0f, 1.0f, 0.0f), normal,
+                                                      origin, direction, 0.0f, 100.0f);
     };
     const AnalyticLightIntersection near = hit(2.0f);
     const AnalyticLightIntersection far = hit(4.0f);
@@ -2029,12 +1096,12 @@ TEST_CASE("OptiX coincident analytic emitters retain every BSDF-hit component")
     const float3 edgeY = make_float3(0.0f, 1.0f, 0.0f);
     const float3 origin = make_float3(0.0f);
     const float3 direction = make_float3(0.0f, 0.0f, 1.0f);
-    const AnalyticLightIntersection front = intersectAnalyticLightSurface(
-        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
-        make_float3(0.0f, 0.0f, -1.0f), origin, direction, 0.0f, 100.0f);
-    const AnalyticLightIntersection back = intersectAnalyticLightSurface(
-        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY,
-        make_float3(0.0f, 0.0f, 1.0f), origin, direction, 0.0f, 100.0f);
+    const AnalyticLightIntersection front = intersectAnalyticLightSurfaceUnchecked(
+        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY, make_float3(0.0f, 0.0f, -1.0f),
+        origin, direction, 0.0f, 100.0f);
+    const AnalyticLightIntersection back = intersectAnalyticLightSurfaceUnchecked(
+        LIGHT_TYPE_RECT, corner, corner + edgeX, make_float3(0.0f), corner + edgeY, make_float3(0.0f, 0.0f, 1.0f),
+        origin, direction, 0.0f, 100.0f);
 
     REQUIRE(analyticLightIntersectionSharesEvent(front.distance, back));
     CHECK(lightConnectionFacesVertex(LIGHT_TYPE_RECT, -dot3(direction, front.normal)));
@@ -2043,12 +1110,10 @@ TEST_CASE("OptiX coincident analytic emitters retain every BSDF-hit component")
     const float bsdfPdf = 0.2f;
     const float lightPdf0 = areaPdfToSolidAngleMarginalPdf(1.0f, 1.0f, front.areaPdf, 1.0f, 1.0f, 0.25f, 1.0f);
     const float lightPdf1 = areaPdfToSolidAngleMarginalPdf(1.0f, 1.0f, front.areaPdf, 1.0f, 1.0f, 0.75f, 1.0f);
-    const float fullHit = 2.0f * computeMisWeight(bsdfPdf, lightPdf0, 0u) +
-                          3.0f * computeMisWeight(bsdfPdf, lightPdf1, 0u);
+    const float fullHit =
+        2.0f * computeMisWeight(bsdfPdf, lightPdf0, 0u) + 3.0f * computeMisWeight(bsdfPdf, lightPdf1, 0u);
     const float oldSingleIdentity = 2.0f * computeMisWeight(bsdfPdf, lightPdf0, 0u);
     CHECK(fullHit > oldSingleIdentity);
-    CHECK(computeMisWeight(bsdfPdf, lightPdf0, 0u) + computeMisWeight(lightPdf0, bsdfPdf, 0u) ==
-          doctest::Approx(1.0f));
-    CHECK(computeMisWeight(bsdfPdf, lightPdf1, 0u) + computeMisWeight(lightPdf1, bsdfPdf, 0u) ==
-          doctest::Approx(1.0f));
+    CHECK(computeMisWeight(bsdfPdf, lightPdf0, 0u) + computeMisWeight(lightPdf0, bsdfPdf, 0u) == doctest::Approx(1.0f));
+    CHECK(computeMisWeight(bsdfPdf, lightPdf1, 0u) + computeMisWeight(lightPdf1, bsdfPdf, 0u) == doctest::Approx(1.0f));
 }

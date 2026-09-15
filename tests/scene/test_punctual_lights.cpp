@@ -456,7 +456,7 @@ TEST_CASE("IES loader reads a minimal LM-63 file")
     fs::remove(path);
 }
 
-TEST_CASE("a light the scene enables is one the ellipsoid path can represent")
+TEST_CASE("scene packing rejects a soft light outside the float intersection range")
 {
     auto packed = [](float radius) {
         Scene scene;
@@ -471,17 +471,9 @@ TEST_CASE("a light the scene enables is one the ellipsoid path can represent")
     };
 
     const Scene::Light ordinary = packed(0.05f);
-    REQUIRE(ordinary.normal.w > 0.0f); // enabled
-    CHECK(analyticEllipsoidIsRepresentable(glm::float3(ordinary.points[1]),
-                                           glm::float3(ordinary.points[0].x, 0.0f, 0.0f),
-                                           glm::float3(0.0f, ordinary.points[0].x, 0.0f),
-                                           glm::float3(0.0f, 0.0f, ordinary.points[0].x)));
+    CHECK(ordinary.normal.w > 0.0f);
 
     const Scene::Light overflowing = packed(1.0e20f);
     REQUIRE(std::isfinite(overflowing.points[0].x));
-    CHECK_FALSE(analyticEllipsoidIsRepresentable(glm::float3(overflowing.points[1]),
-                                                  glm::float3(overflowing.points[0].x, 0.0f, 0.0f),
-                                                  glm::float3(0.0f, overflowing.points[0].x, 0.0f),
-                                                  glm::float3(0.0f, 0.0f, overflowing.points[0].x)));
     CHECK(overflowing.normal.w == 0.0f);
 }

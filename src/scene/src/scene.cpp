@@ -29,6 +29,48 @@ namespace oka
 namespace
 {
 
+bool finiteVector(const glm::float3& value)
+{
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+float inverseCrossLength(const glm::float3& a, const glm::float3& b)
+{
+    const double length = glm::length(glm::cross(glm::dvec3(a), glm::dvec3(b)));
+    const float result = length > 0.0 && std::isfinite(length) ? static_cast<float>(1.0 / length) : 0.0f;
+    return result > 0.0f && std::isfinite(result) ? result : 0.0f;
+}
+
+bool affineSampleRangeIsFinite(const glm::float3& center,
+                               const glm::float3& axisX,
+                               const glm::float3& axisY,
+                               const glm::float3& axisZ)
+{
+    const glm::dvec3 bound = glm::abs(glm::dvec3(center)) + glm::abs(glm::dvec3(axisX)) + glm::abs(glm::dvec3(axisY)) +
+                             glm::abs(glm::dvec3(axisZ));
+    constexpr double maxFloat = std::numeric_limits<float>::max();
+    return finiteVector(center) && finiteVector(axisX) && finiteVector(axisY) && finiteVector(axisZ) &&
+           bound.x <= maxFloat && bound.y <= maxFloat && bound.z <= maxFloat;
+}
+
+bool affineBasisIsRepresentable(const glm::float3& axisX, const glm::float3& axisY, const glm::float3& axisZ)
+{
+    const glm::float3 cofactorX = glm::cross(axisY, axisZ);
+    const glm::float3 cofactorY = glm::cross(axisZ, axisX);
+    const glm::float3 cofactorZ = glm::cross(axisX, axisY);
+    const float determinant = glm::dot(axisX, cofactorX);
+    return finiteVector(axisX) && finiteVector(axisY) && finiteVector(axisZ) && finiteVector(cofactorX) &&
+           finiteVector(cofactorY) && finiteVector(cofactorZ) && std::isfinite(determinant) && determinant != 0.0f;
+}
+
+bool ellipsoidIsRepresentable(const glm::float3& center,
+                              const glm::float3& axisX,
+                              const glm::float3& axisY,
+                              const glm::float3& axisZ)
+{
+    return affineSampleRangeIsFinite(center, axisX, axisY, axisZ) && affineBasisIsRepresentable(axisX, axisY, axisZ);
+}
+
 glm::float3 transformedAreaLightNormal(const glm::float4x4& transform)
 {
     const glm::float3 axisX(transform * glm::float4(1.0f, 0.0f, 0.0f, 0.0f));
@@ -66,7 +108,7 @@ bool accelerationStructureProxyTransformIsSafe(const glm::float4x4& transform)
     {
         return false;
     }
-    return scaledAffineBasis(glm::float3(transform[0]), glm::float3(transform[1]), glm::float3(transform[2])).valid;
+    return affineBasisIsRepresentable(glm::float3(transform[0]), glm::float3(transform[1]), glm::float3(transform[2]));
 }
 
 glm::float4x4 safeAccelerationStructureProxyTransform(const glm::float4x4& transform)
@@ -143,7 +185,7 @@ float packedAnalyticLightSurfaceArea(const Scene::Light& light)
     {
         const glm::float3 edgeX(light.points[1] - light.points[0]);
         const glm::float3 edgeY(light.points[3] - light.points[0]);
-        const float inverseArea = inverseFiniteCrossLength(edgeX, edgeY);
+        const float inverseArea = inverseCrossLength(edgeX, edgeY);
         return inverseArea > 0.0f ? 1.0f / inverseArea : 0.0f;
     }
     if (light.type == LIGHT_TYPE_DISC)
@@ -882,22 +924,19 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 
         mLights[lightId].type = LIGHT_TYPE_RECT;
         mLights[lightId].halfAngle = 0.0f;
-        mLights[lightId].pad0 =
-            inverseFiniteCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
-                                     glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]));
+        mLights[lightId].pad0 = inverseCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
+                                                   glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]));
         // Controlled-falloff cutoff distance for area lights, read by
         // areaFalloff(); 0 (the default range) leaves the light unbounded.
         mLights[lightId].pad1 = desc.range;
         rectangleFloatBasisIsStable = rectangleHasStableFloatGramInverse(mLights[lightId]);
-        lightHasSupport =
-            affineSamplePointRangeIsFinite(glm::float3(mLights[lightId].points[0]),
-                                           glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
-                                           glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]),
-                                           glm::float3(0.0f)) &&
-            inverseFiniteCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
-                                     glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0])) > 0.0f &&
-            glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f &&
-            rectangleFloatBasisIsStable;
+        lightHasSupport = affineSampleRangeIsFinite(glm::float3(mLights[lightId].points[0]),
+                                                    glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
+                                                    glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]),
+                                                    glm::float3(0.0f)) &&
+                          mLights[lightId].pad0 > 0.0f &&
+                          glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f &&
+                          rectangleFloatBasisIsStable;
     }
     else if (desc.type == LIGHT_TYPE_DISC)
     {
@@ -918,12 +957,11 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         // Controlled-falloff cutoff distance for area lights, read by
         // areaFalloff(); 0 (the default range) leaves the light unbounded.
         mLights[lightId].pad1 = desc.range;
-        lightHasSupport = affineSamplePointRangeIsFinite(glm::float3(mLights[lightId].points[1]),
-                                                         glm::float3(mLights[lightId].points[2]),
-                                                         glm::float3(mLights[lightId].points[3]), glm::float3(0.0f)) &&
-                          analyticDiscAreaPdf(glm::float3(mLights[lightId].points[2]),
-                                              glm::float3(mLights[lightId].points[3])) > 0.0f &&
-                          glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f;
+        lightHasSupport =
+            affineSampleRangeIsFinite(glm::float3(mLights[lightId].points[1]), glm::float3(mLights[lightId].points[2]),
+                                      glm::float3(mLights[lightId].points[3]), glm::float3(0.0f)) &&
+            analyticDiscAreaPdf(glm::float3(mLights[lightId].points[2]), glm::float3(mLights[lightId].points[3])) > 0.0f &&
+            glm::dot(glm::float3(mLights[lightId].normal), glm::float3(mLights[lightId].normal)) > 0.0f;
     }
     else if (desc.type == LIGHT_TYPE_SPHERE)
     {
@@ -942,9 +980,9 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].halfAngle = 0.0f;
         mLights[lightId].pad0 = 0.0f;
         mLights[lightId].pad1 = 0.0f;
-        lightHasSupport = analyticEllipsoidIsRepresentable(
-            glm::float3(mLights[lightId].points[1]), glm::float3(mLights[lightId].points[0]),
-            glm::float3(mLights[lightId].points[2]), glm::float3(mLights[lightId].points[3]));
+        lightHasSupport =
+            ellipsoidIsRepresentable(glm::float3(mLights[lightId].points[1]), glm::float3(mLights[lightId].points[0]),
+                                     glm::float3(mLights[lightId].points[2]), glm::float3(mLights[lightId].points[3]));
     }
     else if (lightTypeIsPunctual(desc.type))
     {
@@ -973,13 +1011,13 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
                                 desc.type == LIGHT_TYPE_SPOT ? desc.innerConeAngle :
                                                                desc.radius;
         mLights[lightId].pad1 = desc.range;
-        const bool positionValid = affineVectorIsFinite(glm::float3(mLights[lightId].points[1]));
+        const bool positionValid = finiteVector(glm::float3(mLights[lightId].points[1]));
         const bool needsEmissionAxis = desc.type != LIGHT_TYPE_POINT || needsProfileFrame;
         const float softRadius = mLights[lightId].points[0].x;
-        const bool ellipsoidValid = !punctualLightIsSoft(softRadius) ||
-                                    analyticEllipsoidIsRepresentable(
-                                        glm::float3(mLights[lightId].points[1]), glm::float3(softRadius, 0.0f, 0.0f),
-                                        glm::float3(0.0f, softRadius, 0.0f), glm::float3(0.0f, 0.0f, softRadius));
+        const bool ellipsoidValid =
+            !punctualLightIsSoft(softRadius) ||
+            ellipsoidIsRepresentable(glm::float3(mLights[lightId].points[1]), glm::float3(softRadius, 0.0f, 0.0f),
+                                     glm::float3(0.0f, softRadius, 0.0f), glm::float3(0.0f, 0.0f, softRadius));
         lightHasSupport = positionValid && ellipsoidValid &&
                           (!needsEmissionAxis || glm::dot(emissionAxis, emissionAxis) > 0.0f) &&
                           (!needsProfileFrame || profileFrame.valid);
@@ -1585,7 +1623,7 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
             const Light& light = mLights[inst.mLightId];
             if (lightUsesAnalyticSurfaceIntersection(light.type, light.points[0].x))
             {
-                const AnalyticLightIntersection analyticHit = intersectAnalyticLightSurface(
+                const AnalyticLightIntersection analyticHit = intersectAnalyticLightSurfaceUnchecked(
                     light.type, glm::float3(light.points[0]), glm::float3(light.points[1]), glm::float3(light.points[2]),
                     glm::float3(light.points[3]), glm::float3(light.normal), origin, dir, 1e-5f, best.distance);
                 if (analyticHit.hit)

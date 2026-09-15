@@ -1,8 +1,3 @@
-// Real render inputs are finite and range-checked on the host. Keep the robust
-// CPU arithmetic available for reference tests, but never carry its
-// double-float/exponent machinery through a production GPU material lobe.
-#define STRELKA_FAST_FINITE_GPU_MATH 1
-
 #include "shading_common.h"
 
 #define STRELKA_OPENPBR_FEATURE_EnableSheenAndCoat SPEC_OPENPBR_SHEEN_AND_COAT

@@ -75,103 +75,22 @@ DEVICE_FUNC bool lightSampleFacesVertex(float cosAtLight)
     return cosAtLight > 0.0f && cosAtLight <= 3.402823466e38f;
 }
 
-struct PdfProductAccumulator
-{
-    float mantissa;
-    int exponent;
-};
-
-DEVICE_FUNC bool multiplyPdfFactor(THREAD_REF PdfProductAccumulator& product, float factor)
+DEVICE_FUNC float finitePdf(float value)
 {
     constexpr float maxFinite = 3.402823466e38f;
-    if (!(factor > 0.0f) || !(factor <= maxFinite))
-    {
-        return false;
-    }
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    product.mantissa *= factor;
-#else
-    int exponent = 0;
-    product.mantissa *= decomposeFloatExponent(factor, exponent);
-    product.exponent += exponent;
-#endif
-    return true;
-}
-
-DEVICE_FUNC bool dividePdfFactor(THREAD_REF PdfProductAccumulator& product, float factor)
-{
-    constexpr float maxFinite = 3.402823466e38f;
-    if (!(factor > 0.0f) || !(factor <= maxFinite))
-    {
-        return false;
-    }
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    product.mantissa /= factor;
-#else
-    int exponent = 0;
-    product.mantissa /= decomposeFloatExponent(factor, exponent);
-    product.exponent -= exponent;
-#endif
-    return true;
-}
-
-DEVICE_FUNC bool multiplySquaredPdfFactor(THREAD_REF PdfProductAccumulator& product, float factor)
-{
-    constexpr float maxFinite = 3.402823466e38f;
-    if (!(factor > 0.0f) || !(factor <= maxFinite))
-    {
-        return false;
-    }
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    product.mantissa *= factor * factor;
-#else
-    int exponent = 0;
-    const float mantissa = decomposeFloatExponent(factor, exponent);
-    product.mantissa *= mantissa * mantissa;
-    product.exponent += 2 * exponent;
-#endif
-    return true;
-}
-
-DEVICE_FUNC float finishPdfProduct(const THREAD_REF PdfProductAccumulator& product)
-{
-    constexpr float maxFinite = 3.402823466e38f;
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    const float result = product.mantissa;
-#else
-    const float result = scaleFloatExponent(product.mantissa, product.exponent);
-#endif
-    if (!(result > 0.0f))
-    {
-        return 0.0f;
-    }
-    return result <= maxFinite ? result : maxFinite;
+    return value > 0.0f ? fminf(value, maxFinite) : 0.0f;
 }
 
 DEVICE_FUNC float scalePdfBySelection(
     float conditionalPdf, float selection0, float selection1, float selection2, float selection3)
 {
-    PdfProductAccumulator product{ 1.0f, 0 };
-    if (!multiplyPdfFactor(product, conditionalPdf) || !multiplyPdfFactor(product, selection0) ||
-        !multiplyPdfFactor(product, selection1) || !multiplyPdfFactor(product, selection2) ||
-        !multiplyPdfFactor(product, selection3))
-    {
-        return 0.0f;
-    }
-    return finishPdfProduct(product);
+    return finitePdf(conditionalPdf * selection0 * selection1 * selection2 * selection3);
 }
 
 DEVICE_FUNC float reciprocalPdfWithSelection(
     float denominator, float selection0, float selection1, float selection2, float selection3)
 {
-    PdfProductAccumulator product{ 1.0f, 0 };
-    if (!dividePdfFactor(product, denominator) || !multiplyPdfFactor(product, selection0) ||
-        !multiplyPdfFactor(product, selection1) || !multiplyPdfFactor(product, selection2) ||
-        !multiplyPdfFactor(product, selection3))
-    {
-        return 0.0f;
-    }
-    return finishPdfProduct(product);
+    return denominator > 0.0f ? finitePdf(selection0 * selection1 * selection2 * selection3 / denominator) : 0.0f;
 }
 
 DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, float area)
@@ -180,14 +99,7 @@ DEVICE_FUNC float areaLightSolidAnglePdf(float distToLight, float cosAtLight, fl
     {
         return 0.0f;
     }
-    cosAtLight = fminf(cosAtLight, 1.0f);
-    PdfProductAccumulator product{ 1.0f, 0 };
-    if (!multiplySquaredPdfFactor(product, distToLight) || !dividePdfFactor(product, cosAtLight) ||
-        !dividePdfFactor(product, area))
-    {
-        return 0.0f;
-    }
-    return finishPdfProduct(product);
+    return finitePdf(distToLight * distToLight / (fminf(cosAtLight, 1.0f) * area));
 }
 
 DEVICE_FUNC float areaPdfToSolidAngleMarginalPdf(float distToLight,
@@ -202,16 +114,8 @@ DEVICE_FUNC float areaPdfToSolidAngleMarginalPdf(float distToLight,
     {
         return 0.0f;
     }
-    cosAtLight = fminf(cosAtLight, 1.0f);
-    PdfProductAccumulator product{ 1.0f, 0 };
-    if (!multiplyPdfFactor(product, areaPdf) || !multiplySquaredPdfFactor(product, distToLight) ||
-        !dividePdfFactor(product, cosAtLight) || !multiplyPdfFactor(product, selection0) ||
-        !multiplyPdfFactor(product, selection1) || !multiplyPdfFactor(product, selection2) ||
-        !multiplyPdfFactor(product, selection3))
-    {
-        return 0.0f;
-    }
-    return finishPdfProduct(product);
+    return finitePdf(areaPdf * distToLight * distToLight / fminf(cosAtLight, 1.0f) * selection0 * selection1 *
+                     selection2 * selection3);
 }
 
 /// Area density converted to solid angle without first materialising its

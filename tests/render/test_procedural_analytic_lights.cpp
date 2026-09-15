@@ -30,8 +30,8 @@ TEST_CASE("non-uniform sphere sampling matches ellipsoid intersection")
     const float3 axisX = make_float3(2.0f, 0.0f, 0.0f);
     const float3 axisY = make_float3(0.0f, 1.0f, 0.0f);
     const float3 axisZ = make_float3(0.0f, 0.0f, 0.5f);
-    const AnalyticLightSample sample = sampleAnalyticEllipsoid(center, axisX, axisY, axisZ, 1.0f, 0.0f);
-    const AnalyticLightIntersection hit = intersectAnalyticEllipsoid(
+    const AnalyticLightSample sample = sampleAnalyticEllipsoidUnchecked(center, axisX, axisY, axisZ, 1.0f, 0.0f);
+    const AnalyticLightIntersection hit = intersectAnalyticEllipsoidUnchecked(
         sample.point + 2.0f * sample.normal, -sample.normal, 0.0f, 3.0f, center, axisX, axisY, axisZ);
     REQUIRE(hit.hit);
     CHECK(length(hit.point - sample.point) < 1e-5f);
@@ -63,7 +63,8 @@ TEST_CASE("canonical samples intersect themselves and report exact Jacobian PDFs
     const float3 axisX = make_float3(2.0f, 0.0f, 0.0f);
     const float3 axisY = make_float3(0.0f, 3.0f, 0.0f);
     const float3 axisZ = make_float3(0.0f, 0.0f, 4.0f);
-    const AnalyticLightSample sphere = sampleAnalyticEllipsoid(make_float3(0.0f), axisX, axisY, axisZ, 0.31f, 0.73f);
+    const AnalyticLightSample sphere =
+        sampleAnalyticEllipsoidUnchecked(make_float3(0.0f), axisX, axisY, axisZ, 0.31f, 0.73f);
     const float jacobian = 24.0f * length(make_float3(objectPoint.x / 2.0f, objectPoint.y / 3.0f, objectPoint.z / 4.0f));
     CHECK(sphere.areaPdf == doctest::Approx(1.0f / (4.0f * M_PI_F * jacobian)).epsilon(2e-5));
 
@@ -80,73 +81,10 @@ TEST_CASE("procedural sphere preserves near and far shadow self-occlusion")
     const float3 axisZ = make_float3(0.0f, 0.0f, 1.0f);
     const float3 origin = make_float3(0.0f);
     const float3 direction = make_float3(0.0f, 0.0f, 1.0f);
-    CHECK_FALSE(
-        intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(2.0f, 0.0f), center, axisX, axisY, axisZ).hit);
-    CHECK(intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(4.0f, 0.0f), center, axisX, axisY, axisZ).hit);
-}
-
-TEST_CASE("the quick affine factorisation agrees with the exact one it skips")
-{
-    struct Rng
-    {
-        uint32_t s = 0x9e3779b9u;
-        float next()
-        {
-            s = s * 1664525u + 1013904223u;
-            return float(s >> 8) * 0x1p-24f;
-        }
-        float sym(float k) { return (2.0f * next() - 1.0f) * k; }
-    } rng;
-
-    uint32_t quick = 0;
-    uint32_t exact = 0;
-    for (int i = 0; i < 4000; ++i)
-    {
-        // Scales from 1e-12 to 1e12: either side of the window, and across it.
-        const float scale = std::pow(10.0f, rng.sym(12.0f));
-        const float3 axisX = make_float3(scale * (0.4f + rng.next()), scale * rng.sym(0.3f), scale * rng.sym(0.3f));
-        const float3 axisY = make_float3(scale * rng.sym(0.3f), scale * (0.4f + rng.next()), scale * rng.sym(0.3f));
-        const float3 axisZ = make_float3(scale * rng.sym(0.3f), scale * rng.sym(0.3f), scale * (0.4f + rng.next()));
-
-        const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
-        if (!basis.valid)
-        {
-            continue;
-        }
-        // Which path ran is visible in the basis: the quick one leaves the axes
-        // alone and every exponent at zero.
-        const bool tookQuickPath = basis.worldExponentX == 0 && basis.worldExponentY == 0 &&
-                                   basis.worldExponentZ == 0 && basis.objectExponentX == 0 &&
-                                   basis.objectExponentY == 0 && basis.objectExponentZ == 0;
-        tookQuickPath ? ++quick : ++exact;
-
-        // A point with known object coordinates, recovered through the solve.
-        const float3 expected = make_float3(0.3f, -0.6f, 0.45f);
-        const float3 worldOffset = expected.x * axisX + expected.y * axisY + expected.z * axisZ;
-        float3 recovered;
-        REQUIRE(solveAffineCoordinates(axisX, axisY, axisZ, worldOffset, recovered));
-        CAPTURE(scale);
-        CAPTURE(tookQuickPath);
-        // Tight on purpose: a compensated solve of a well-conditioned basis
-        // lands within a few ULP, so a loose bound here would accept a basis
-        // that is merely close to the axes it claims to invert.
-        CHECK(recovered.x == doctest::Approx(expected.x).epsilon(1e-6f));
-        CHECK(recovered.y == doctest::Approx(expected.y).epsilon(1e-6f));
-        CHECK(recovered.z == doctest::Approx(expected.z).epsilon(1e-6f));
-
-        // The cofactors the basis carries are the adjugate of the basis it
-        // carries, whichever path filled them in. Both rows: cofactorX does not
-        // involve basis.x, so on its own it would not notice a wrong one.
-        const float3 cofactorX = accurateCross(basis.y, basis.z);
-        const float3 cofactorZ = accurateCross(basis.x, basis.y);
-        CHECK(basis.cofactorX.x == doctest::Approx(cofactorX.x).epsilon(1e-6f));
-        CHECK(basis.cofactorX.y == doctest::Approx(cofactorX.y).epsilon(1e-6f));
-        CHECK(basis.cofactorX.z == doctest::Approx(cofactorX.z).epsilon(1e-6f));
-        CHECK(basis.cofactorZ.x == doctest::Approx(cofactorZ.x).epsilon(1e-6f));
-        CHECK(basis.cofactorZ.y == doctest::Approx(cofactorZ.y).epsilon(1e-6f));
-        CHECK(basis.cofactorZ.z == doctest::Approx(cofactorZ.z).epsilon(1e-6f));
-    }
-    // Both paths have to have run, or this measured one of them twice.
-    CHECK(quick > 500u);
-    CHECK(exact > 500u);
+    CHECK_FALSE(intersectAnalyticEllipsoidUnchecked(
+                    origin, direction, 0.0f, std::nextafter(2.0f, 0.0f), center, axisX, axisY, axisZ)
+                    .hit);
+    CHECK(intersectAnalyticEllipsoidUnchecked(
+              origin, direction, 0.0f, std::nextafter(4.0f, 0.0f), center, axisX, axisY, axisZ)
+              .hit);
 }

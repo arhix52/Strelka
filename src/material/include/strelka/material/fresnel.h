@@ -36,7 +36,7 @@ DEVICE_FUNC float fresnel_schlick_scalar(float F0, float cos_theta)
     return F0 + (1.0f - F0) * t5;
 }
 
-DEVICE_FUNC float fresnel_dielectric(InterfaceCosine cos_theta_i, float eta)
+DEVICE_FUNC float fresnel_dielectric(float cos_theta_i, float eta)
 {
     // Identical media have no interface. At exactly grazing incidence the
     // generic formula becomes 0/0 even though its physical limit is zero.
@@ -46,24 +46,14 @@ DEVICE_FUNC float fresnel_dielectric(InterfaceCosine cos_theta_i, float eta)
         return 1.0f;
 
     // Ensure cos_theta_i is positive (flip if needed)
-    float cosineValue = interfaceCosineValue(cos_theta_i);
-    if (cosineValue < 0.0f)
+    if (cos_theta_i < 0.0f)
     {
         eta = 1.0f / eta;
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
         cos_theta_i = -cos_theta_i;
-#else
-        cos_theta_i = negateCompensated(cos_theta_i);
-#endif
-        cosineValue = -cosineValue;
     }
 
-    if (!(cosineValue > 0.0f))
-        cos_theta_i = makeInterfaceCosine(0.0f);
-    else if (cosineValue >= 1.0f)
-        cos_theta_i = makeInterfaceCosine(1.0f);
+    cos_theta_i = saturate(cos_theta_i);
 
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
     const float cos2_t = fmaf(eta * eta, cos_theta_i * cos_theta_i - 1.0f, 1.0f);
     if (!(cos2_t > 0.0f))
         return 1.0f;
@@ -74,31 +64,8 @@ DEVICE_FUNC float fresnel_dielectric(InterfaceCosine cos_theta_i, float eta)
     const float r_s = (eta_cos_theta_i - cos_theta_t) / (eta_cos_theta_i + cos_theta_t);
     const float r_p = (cos_theta_i - eta_cos_theta_t) / (cos_theta_i + eta_cos_theta_t);
     return saturate(0.5f * fmaf(r_s, r_s, r_p * r_p));
-#else
-    const CompensatedFloat cos2_t = dielectricTransmittedCosineSquared(cos_theta_i, eta);
-    if (!(compensatedValue(cos2_t) > 0.0f))
-        return 1.0f; // total internal reflection
-
-    const CompensatedFloat cos_theta_t = sqrtCompensated(cos2_t);
-    const CompensatedFloat eta_cos_theta_i = scaleCompensated(cos_theta_i, eta);
-    const CompensatedFloat eta_cos_theta_t = scaleCompensated(cos_theta_t, eta);
-
-    const float r_s = compensatedValue(divideCompensated(
-        addCompensated(eta_cos_theta_i, negateCompensated(cos_theta_t)), addCompensated(eta_cos_theta_i, cos_theta_t)));
-    const float r_p = compensatedValue(divideCompensated(
-        addCompensated(cos_theta_i, negateCompensated(eta_cos_theta_t)), addCompensated(cos_theta_i, eta_cos_theta_t)));
-
-    const CompensatedFloat reflectance = addCompensated(compensatedProduct(r_s, r_s), compensatedProduct(r_p, r_p));
-    return saturate(0.5f * compensatedValue(reflectance));
-#endif
 }
 
-#if !defined(STRELKA_FAST_FINITE_GPU_MATH) || !STRELKA_FAST_FINITE_GPU_MATH
-DEVICE_FUNC float fresnel_dielectric(float cos_theta_i, float eta)
-{
-    return fresnel_dielectric(makeInterfaceCosine(cos_theta_i), eta);
-}
-#endif
 
 // ---------------------------------------------------------------------------
 // F0 from IOR (for dielectric materials)

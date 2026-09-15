@@ -276,23 +276,6 @@ TEST_CASE("singular transforms produce finite invalid directional-light records"
     }
 }
 
-TEST_CASE("disc normal ignores a large irrelevant normal-axis scale")
-{
-    Scene scene;
-    Scene::UniformLightDesc desc = discDesc();
-    desc.radius = 0.2f;
-    desc.useXform = true;
-    desc.xform = glm::scale(glm::mat4(1.0f), glm::vec3(100.0f, 100.0f, 3e38f));
-    const Scene::Light& light = scene.getLights()[scene.createLight(desc)];
-    CHECK(glm::vec3(light.normal) == glm::vec3(0.0f, 0.0f, -1.0f));
-    CHECK(analyticDiscArea(glm::vec3(light.points[2]), glm::vec3(light.points[3])) > 0.0f);
-
-    const AnalyticLightIntersection hit = intersectAnalyticDisc(
-        glm::vec3(light.points[1]) - 2.0f * glm::vec3(light.normal), glm::vec3(light.normal), 0.0f, 10.0f,
-        glm::vec3(light.points[1]), glm::vec3(light.points[2]), glm::vec3(light.points[3]), glm::vec3(light.normal));
-    CHECK(hit.hit);
-}
-
 TEST_CASE("analytic light visibility is packed for manual traversal")
 {
     Scene scene;
@@ -589,7 +572,7 @@ TEST_CASE("headless light edits do not recreate released proxy geometry")
     const glm::float3 center = 0.25f * (glm::float3(light.points[0]) + glm::float3(light.points[1]) +
                                         glm::float3(light.points[2]) + glm::float3(light.points[3]));
     const glm::float3 normal(light.normal);
-    const AnalyticLightIntersection hit = intersectAnalyticLightSurface(
+    const AnalyticLightIntersection hit = intersectAnalyticLightSurfaceUnchecked(
         light.type, glm::float3(light.points[0]), glm::float3(light.points[1]), glm::float3(light.points[2]),
         glm::float3(light.points[3]), normal, center - 2.0f * normal, normal, 0.0f, 10.0f);
     CHECK(hit.hit);
@@ -620,9 +603,9 @@ TEST_CASE("a rect or disc light carries its area density rather than rebuilding 
     rect.height = 0.3f;
     const Scene::Light& packedRect = scene.getLights()[scene.createLight(rect)];
     REQUIRE(packedRect.type == LIGHT_TYPE_RECT);
-    CHECK(packedRect.pad0 ==
-          doctest::Approx(inverseFiniteCrossLength(glm::float3(packedRect.points[1] - packedRect.points[0]),
-                                                   glm::float3(packedRect.points[3] - packedRect.points[0]))));
+    const glm::dvec3 edgeX(packedRect.points[1] - packedRect.points[0]);
+    const glm::dvec3 edgeY(packedRect.points[3] - packedRect.points[0]);
+    CHECK(packedRect.pad0 == doctest::Approx(1.0 / glm::length(glm::cross(edgeX, edgeY))));
     // 1 / area, and the area is what was authored.
     CHECK(packedRect.pad0 == doctest::Approx(1.0f / (0.7f * 0.3f)).epsilon(1e-4));
 

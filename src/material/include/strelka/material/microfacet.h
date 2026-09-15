@@ -139,31 +139,13 @@ DEVICE_FUNC float ggx_smith_visibility(float alpha, float NdotV, float NdotL)
 DEVICE_FUNC float saturating_nonnegative_product(float a, float b)
 {
     const float maxFloat = 3.402823466e+38f;
-#if defined(STRELKA_FAST_FINITE_GPU_MATH)
-    if (STRELKA_FAST_FINITE_GPU_MATH)
-    {
-        return fminf(a * b, maxFloat);
-    }
-#endif
-    if (!(a >= 0.0f) || !(a <= maxFloat) || !(b >= 0.0f) || !(b <= maxFloat))
-        return 0.0f;
-    if (!(a > 0.0f) || !(b > 0.0f))
-        return 0.0f;
-    return a > maxFloat / b ? maxFloat : a * b;
+    return fminf(a * b, maxFloat);
 }
 
 DEVICE_FUNC float saturating_nonnegative_sum(float a, float b)
 {
     const float maxFloat = 3.402823466e+38f;
-#if defined(STRELKA_FAST_FINITE_GPU_MATH)
-    if (STRELKA_FAST_FINITE_GPU_MATH)
-    {
-        return fminf(a + b, maxFloat);
-    }
-#endif
-    if (!(a >= 0.0f) || !(a <= maxFloat) || !(b >= 0.0f) || !(b <= maxFloat))
-        return 0.0f;
-    return a > maxFloat - b ? maxFloat : a + b;
+    return fminf(a + b, maxFloat);
 }
 
 DEVICE_FUNC float ggx_ndf_visibility(float alpha, float NdotH, float NdotV, float NdotL)
@@ -268,14 +250,13 @@ DEVICE_FUNC float3 refraction_residual(float3 V, float3 wt, float eta)
     return make_float3(fmaf(etaSafe, V.x, wt.x), fmaf(etaSafe, V.y, wt.y), fmaf(etaSafe, V.z, wt.z));
 }
 
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
 
 DEVICE_FUNC float refraction_residual_length(float3 V, float3 wt, float eta)
 {
     return length(refraction_residual(V, wt, eta));
 }
 
-DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf, THREAD_REF InterfaceCosine& viewDotHalf)
+DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf, THREAD_REF float& viewDotHalf)
 {
     const float3 residual = refraction_residual(V, wt, eta);
     const float lengthSquared = dot(residual, residual);
@@ -295,178 +276,10 @@ DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3
 
 DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf)
 {
-    InterfaceCosine viewDotHalf = 0.0f;
+    float viewDotHalf = 0.0f;
     return refraction_half_vector(V, wt, eta, Nf, viewDotHalf);
 }
 
-#else
-
-struct RefractionResidualExpansion
-{
-    CompensatedFloat x;
-    CompensatedFloat y;
-    CompensatedFloat z;
-};
-
-DEVICE_FUNC RefractionResidualExpansion refraction_residual_expansion(float3 V, float3 wt, float eta)
-{
-    const float etaSafe = fmaxf(eta, 1e-6f);
-    RefractionResidualExpansion result{};
-    result.x = addCompensated(compensatedProduct(etaSafe, V.x), compensatedSum(wt.x, 0.0f));
-    result.y = addCompensated(compensatedProduct(etaSafe, V.y), compensatedSum(wt.y, 0.0f));
-    result.z = addCompensated(compensatedProduct(etaSafe, V.z), compensatedSum(wt.z, 0.0f));
-    return result;
-}
-
-DEVICE_FUNC void refraction_residual_metrics(
-    float3 V, float3 wt, float eta, THREAD_REF float& residualLength, THREAD_REF CompensatedFloat& signedVdotH)
-{
-#    if defined(STRELKA_FAST_FINITE_GPU_MATH)
-    if (STRELKA_FAST_FINITE_GPU_MATH)
-    {
-        const float3 residual = refraction_residual(V, wt, eta);
-        residualLength = length(residual);
-        signedVdotH = compensatedSum(residualLength > 0.0f ? dot(V, residual) / residualLength : 0.0f, 0.0f);
-        return;
-    }
-#    endif
-    const RefractionResidualExpansion residual = refraction_residual_expansion(V, wt, eta);
-    const float x = compensatedValue(residual.x);
-    const float y = compensatedValue(residual.y);
-    const float z = compensatedValue(residual.z);
-    const float scale = fmaxf(fabsf(x), fmaxf(fabsf(y), fabsf(z)));
-    if (!(scale > 0.0f) || !(scale <= 3.402823466e38f))
-    {
-        residualLength = 0.0f;
-        signedVdotH = compensatedSum(0.0f, 0.0f);
-        return;
-    }
-
-    int exponent = 0;
-    decomposeFloatExponent(scale, exponent);
-    const CompensatedFloat sx = scaleCompensatedExponent(residual.x, -exponent);
-    const CompensatedFloat sy = scaleCompensatedExponent(residual.y, -exponent);
-    const CompensatedFloat sz = scaleCompensatedExponent(residual.z, -exponent);
-    const CompensatedFloat lengthSquared = addCompensated(
-        addCompensated(multiplyCompensated(sx, sx), multiplyCompensated(sy, sy)), multiplyCompensated(sz, sz));
-    const CompensatedFloat scaledLength = sqrtCompensated(lengthSquared);
-    const float scaledLengthValue = compensatedValue(scaledLength);
-    if (!(scaledLengthValue > 0.0f))
-    {
-        residualLength = 0.0f;
-        signedVdotH = compensatedSum(0.0f, 0.0f);
-        return;
-    }
-
-    residualLength = scaleFloatExponent(scaledLengthValue, exponent);
-    const CompensatedFloat viewNumerator =
-        addCompensated(addCompensated(scaleCompensated(sx, V.x), scaleCompensated(sy, V.y)), scaleCompensated(sz, V.z));
-    signedVdotH = divideCompensated(viewNumerator, scaledLength);
-}
-
-DEVICE_FUNC float refraction_residual_length(float3 V, float3 wt, float eta)
-{
-    float residualLength = 0.0f;
-    CompensatedFloat signedVdotH = compensatedSum(0.0f, 0.0f);
-    refraction_residual_metrics(V, wt, eta, residualLength, signedVdotH);
-    return residualLength;
-}
-
-DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf, THREAD_REF CompensatedFloat& robustVdotH)
-{
-    const float etaSafe = fmaxf(eta, 1e-6f);
-    float3 residual = refraction_residual(V, wt, etaSafe);
-#    if defined(STRELKA_FAST_FINITE_GPU_MATH)
-    if (STRELKA_FAST_FINITE_GPU_MATH)
-    {
-        const float lengthSquared = dot(residual, residual);
-        if (!(lengthSquared > 0.0f))
-        {
-            robustVdotH = compensatedSum(saturate(dot(V, Nf)), 0.0f);
-            return Nf;
-        }
-        float3 H = residual / sqrtf(lengthSquared);
-        if (dot(V, H) < 0.0f)
-        {
-            H = -H;
-        }
-        robustVdotH = compensatedSum(saturate(dot(V, H)), 0.0f);
-        return H;
-    }
-#    endif
-    float residualLength = 0.0f;
-    CompensatedFloat signedVdotH = compensatedSum(0.0f, 0.0f);
-    refraction_residual_metrics(V, wt, etaSafe, residualLength, signedVdotH);
-    if (!(residualLength > 0.0f))
-    {
-        robustVdotH = compensatedSum(saturate(accurateDot(V, Nf)), 0.0f);
-        return Nf;
-    }
-
-    const float roundoffBound = 9.5367431640625e-7f * (etaSafe * (fabsf(V.x) + fabsf(V.y) + fabsf(V.z)) + fabsf(wt.x) +
-                                                       fabsf(wt.y) + fabsf(wt.z));
-    if (compensatedValue(signedVdotH) < 0.0f)
-    {
-        residual = -residual;
-        signedVdotH = negateCompensated(signedVdotH);
-    }
-    const float normalResidual = dot(Nf, residual);
-    bool adjustedRepresentative = false;
-    if (normalResidual < 0.0f && -normalResidual <= roundoffBound)
-    {
-        residual = residual - normalResidual * Nf;
-        adjustedRepresentative = true;
-    }
-
-    float3 H = normalizeFiniteVectorOrZero(residual);
-    if (!(dot(H, H) > 0.0f))
-    {
-        robustVdotH = compensatedSum(saturate(accurateDot(V, Nf)), 0.0f);
-        return Nf;
-    }
-    robustVdotH = adjustedRepresentative ? compensatedSum(saturate(accurateDot(V, H)), 0.0f) : signedVdotH;
-    const float robustVdotHValue = saturate(compensatedValue(robustVdotH));
-    if (etaSafe != 1.0f && robustVdotHValue > 0.0f && fresnel_dielectric(robustVdotH, etaSafe) == 1.0f)
-    {
-        const float etaSquared = etaSafe * etaSafe;
-        const float angularRoundoff = fminf(1.0f, 2.0f * roundoffBound / residualLength);
-        float targetSquared = 0.0f;
-        if (etaSafe > 1.0f)
-        {
-            const float criticalSquared = fmaxf(0.0f, 1.0f - 1.0f / etaSquared);
-            targetSquared = fminf(1.0f, fmaxf(criticalSquared, 1.0f - (1.0f - 3.814697265625e-6f) / etaSquared));
-        }
-        else
-        {
-            const float transmittedNormalCosine = sqrtf(fmaxf(0.0f, 1.0f - etaSquared));
-            const float target = 7.62939453125e-6f * transmittedNormalCosine;
-            targetSquared = target * target;
-        }
-        const float target = sqrtf(targetSquared);
-        if (target > robustVdotHValue && target - robustVdotHValue <= angularRoundoff)
-        {
-            const float3 Vn = normalizeFiniteVectorOrZero(V);
-            const float3 tangent = normalizeFiniteVectorOrZero(H - robustVdotHValue * Vn);
-            if (dot(Vn, Vn) > 0.0f && dot(tangent, tangent) > 0.0f)
-            {
-                // Stay a few float roundoff units inside the represented
-                // non-unit-Fresnel side so sample and eval make the same branch
-                // decision at both critical and exterior grazing limits.
-                H = normalizeFiniteVectorOrZero(target * Vn + sqrtf(fmaxf(0.0f, 1.0f - targetSquared)) * tangent);
-                robustVdotH = compensatedSum(saturate(accurateDot(V, H)), 0.0f);
-            }
-        }
-    }
-    return H;
-}
-
-DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf)
-{
-    CompensatedFloat robustVdotH = compensatedSum(0.0f, 0.0f);
-    return refraction_half_vector(V, wt, eta, Nf, robustVdotH);
-}
-
-#endif
 
 // Reflection has H parallel to V+L. Use a scale-safe normalization and orient
 // a genuinely collapsed tangent-limit sum to the active side rather than to a

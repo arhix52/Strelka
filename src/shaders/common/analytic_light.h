@@ -37,9 +37,6 @@ struct AnalyticLightSample
 {
     float3 point{};
     float3 normal{};
-    // Density with respect to world area. Keeping p_A rather than 1/p_A is
-    // essential when a very large finite surface has a representable density
-    // although its area Jacobian itself exceeds float range.
     float areaPdf = 0.0f;
 };
 
@@ -116,428 +113,21 @@ DEVICE_FUNC bool analyticLightIntersectionSharesEvent(float distance, AnalyticLi
 
 DEVICE_FUNC float analyticDiscArea(float3 axisX, float3 axisY)
 {
-    const float twiceParallelogramArea = finiteVectorLength(cross(axisX, axisY));
-    return twiceParallelogramArea > 0.0f && twiceParallelogramArea <= 3.402823466e38f / M_PI_F ?
-               M_PI_F * twiceParallelogramArea :
-               0.0f;
+    const float3 areaVector = cross(axisX, axisY);
+    return M_PI_F * sqrtf(dot(areaVector, areaVector));
 }
 
 DEVICE_FUNC float analyticDiscAreaPdf(float3 axisX, float3 axisY)
 {
-    const float areaPdf = finiteCrossReciprocal(axisX, axisY, 1.0f / M_PI_F);
-    // Apple GPU safe math flushes subnormal arithmetic. Do not let the CPU
-    // host assign selection mass to a conditional density the device cannot
-    // represent under every supported Metal math mode.
-    return areaPdf >= 1.175494351e-38f ? areaPdf : 0.0f;
-}
-
-DEVICE_FUNC float3 affineSphereCofactor(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
-{
-    return objectNormal.x * cross(axisY, axisZ) + objectNormal.y * cross(axisZ, axisX) +
-           objectNormal.z * cross(axisX, axisY);
-}
-
-struct ScaledAffineBasis
-{
-    float3 x{};
-    float3 y{};
-    float3 z{};
-    // The adjugate rows. Functions of the basis alone, and both the solve and
-    // the representability test want all three, so they are carried rather than
-    // formed again at each use.
-    float3 cofactorX{};
-    float3 cofactorY{};
-    float3 cofactorZ{};
-    CompensatedFloat determinant{};
-    int objectExponentX = 0;
-    int objectExponentY = 0;
-    int objectExponentZ = 0;
-    int worldExponentX = 0;
-    int worldExponentY = 0;
-    int worldExponentZ = 0;
-    bool valid = false;
-};
-
-DEVICE_FUNC bool affineVectorIsFinite(float3 value)
-{
-    return fabsf(value.x) <= 3.402823466e38f && fabsf(value.y) <= 3.402823466e38f && fabsf(value.z) <= 3.402823466e38f;
-}
-
-DEVICE_FUNC bool affineSampleCoordinateRangeIsFinite(float center, float axisX, float axisY, float axisZ)
-{
-    constexpr float maxFinite = 3.402823466e38f;
-    if (!(fabsf(center) <= maxFinite) || !(fabsf(axisX) <= maxFinite) || !(fabsf(axisY) <= maxFinite) ||
-        !(fabsf(axisZ) <= maxFinite))
-    {
-        return false;
-    }
-    float remaining = maxFinite - fabsf(center);
-    if (fabsf(axisX) > remaining)
-    {
-        return false;
-    }
-    remaining -= fabsf(axisX);
-    if (fabsf(axisY) > remaining)
-    {
-        return false;
-    }
-    remaining -= fabsf(axisY);
-    return fabsf(axisZ) <= remaining;
-}
-
-DEVICE_FUNC bool affineSamplePointRangeIsFinite(float3 center, float3 axisX, float3 axisY, float3 axisZ)
-{
-    return affineSampleCoordinateRangeIsFinite(center.x, axisX.x, axisY.x, axisZ.x) &&
-           affineSampleCoordinateRangeIsFinite(center.y, axisX.y, axisY.y, axisZ.y) &&
-           affineSampleCoordinateRangeIsFinite(center.z, axisX.z, axisY.z, axisZ.z);
-}
-
-DEVICE_FUNC bool affineComponentwiseInverseRowIsStable(float3 inverseNumeratorRow,
-                                                       float3 x,
-                                                       float3 y,
-                                                       float3 z,
-                                                       int rowObjectExponent,
-                                                       int objectExponentX,
-                                                       int objectExponentY,
-                                                       int objectExponentZ,
-                                                       float determinant)
-{
-    const float termX = fabsf(inverseNumeratorRow.x) * fabsf(x.x) + fabsf(inverseNumeratorRow.y) * fabsf(x.y) +
-                        fabsf(inverseNumeratorRow.z) * fabsf(x.z);
-    const float termY = fabsf(inverseNumeratorRow.x) * fabsf(y.x) + fabsf(inverseNumeratorRow.y) * fabsf(y.y) +
-                        fabsf(inverseNumeratorRow.z) * fabsf(y.z);
-    const float termZ = fabsf(inverseNumeratorRow.x) * fabsf(z.x) + fabsf(inverseNumeratorRow.y) * fabsf(z.y) +
-                        fabsf(inverseNumeratorRow.z) * fabsf(z.z);
-    int exponentX = -100000;
-    int exponentY = -100000;
-    int exponentZ = -100000;
-    float mantissaX = 0.0f;
-    float mantissaY = 0.0f;
-    float mantissaZ = 0.0f;
-    if (termX > 0.0f)
-    {
-        mantissaX = decomposeFloatExponent(termX, exponentX);
-        exponentX += objectExponentX - rowObjectExponent;
-    }
-    if (termY > 0.0f)
-    {
-        mantissaY = decomposeFloatExponent(termY, exponentY);
-        exponentY += objectExponentY - rowObjectExponent;
-    }
-    if (termZ > 0.0f)
-    {
-        mantissaZ = decomposeFloatExponent(termZ, exponentZ);
-        exponentZ += objectExponentZ - rowObjectExponent;
-    }
-    const int numeratorExponent = exponentX > exponentY ? (exponentX > exponentZ ? exponentX : exponentZ) :
-                                                          (exponentY > exponentZ ? exponentY : exponentZ);
-    if (numeratorExponent == -100000)
-    {
-        return false;
-    }
-    const float numeratorMantissa = scaleFloatExponent(mantissaX, exponentX - numeratorExponent) +
-                                    scaleFloatExponent(mantissaY, exponentY - numeratorExponent) +
-                                    scaleFloatExponent(mantissaZ, exponentZ - numeratorExponent);
-    int determinantExponent = 0;
-    const float determinantMantissa = decomposeFloatExponent(fabsf(determinant), determinantExponent);
-    const float condition =
-        scaleFloatExponent(numeratorMantissa / determinantMantissa, numeratorExponent - determinantExponent);
-    constexpr float maximumComponentwiseCondition = 4096.0f;
-    return condition <= maximumComponentwiseCondition;
-}
-
-DEVICE_FUNC bool affineEllipsoidPointMapIsRepresentable(const THREAD_REF ScaledAffineBasis& basis)
-{
-    const float determinant = compensatedValue(basis.determinant);
-    const float3 cofactorX = basis.cofactorX;
-    const float3 cofactorY = basis.cofactorY;
-    const float3 cofactorZ = basis.cofactorZ;
-    return basis.valid &&
-           affineComponentwiseInverseRowIsStable(cofactorX, basis.x, basis.y, basis.z, basis.objectExponentX,
-                                                 basis.objectExponentX, basis.objectExponentY, basis.objectExponentZ,
-                                                 determinant) &&
-           affineComponentwiseInverseRowIsStable(cofactorY, basis.x, basis.y, basis.z, basis.objectExponentY,
-                                                 basis.objectExponentX, basis.objectExponentY, basis.objectExponentZ,
-                                                 determinant) &&
-           affineComponentwiseInverseRowIsStable(cofactorZ, basis.x, basis.y, basis.z, basis.objectExponentZ,
-                                                 basis.objectExponentX, basis.objectExponentY, basis.objectExponentZ,
-                                                 determinant);
-}
-
-DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, float3 axisZ)
-{
-    ScaledAffineBasis result;
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    result.x = axisX;
-    result.y = axisY;
-    result.z = axisZ;
-    result.cofactorX = cross(axisY, axisZ);
-    result.cofactorY = cross(axisZ, axisX);
-    result.cofactorZ = cross(axisX, axisY);
-    result.determinant = compensatedSum(dot(axisX, result.cofactorX), 0.0f);
-    result.valid = fabsf(result.determinant.high) > 0.0f;
-    return result;
-#else
-    if (!affineVectorIsFinite(axisX) || !affineVectorIsFinite(axisY) || !affineVectorIsFinite(axisZ))
-    {
-        return result;
-    }
-
-    const float scaleX = fmaxf(fabsf(axisX.x), fmaxf(fabsf(axisX.y), fabsf(axisX.z)));
-    const float scaleY = fmaxf(fabsf(axisY.x), fmaxf(fabsf(axisY.y), fabsf(axisY.z)));
-    const float scaleZ = fmaxf(fabsf(axisZ.x), fmaxf(fabsf(axisZ.y), fabsf(axisZ.z)));
-    if (!(scaleX > 0.0f) || !(scaleY > 0.0f) || !(scaleZ > 0.0f))
-    {
-        return result;
-    }
-
-    const float widest = fmaxf(scaleX, fmaxf(scaleY, scaleZ));
-    const float narrowest = fminf(scaleX, fminf(scaleY, scaleZ));
-    if (widest < 1.0e10f && narrowest > 1.0e-10f)
-    {
-        result.x = axisX;
-        result.y = axisY;
-        result.z = axisZ;
-        result.determinant = compensatedDotCrossExpansion(axisX, axisY, axisZ);
-        const float fastDeterminant = compensatedValue(result.determinant);
-        const float3 fastCofactorX = accurateCross(axisY, axisZ);
-        const float3 fastCofactorY = accurateCross(axisZ, axisX);
-        const float3 fastCofactorZ = accurateCross(axisX, axisY);
-        const float fastMatrixNorm = fmaxf(
-            fabsf(axisX.x) + fabsf(axisY.x) + fabsf(axisZ.x),
-            fmaxf(fabsf(axisX.y) + fabsf(axisY.y) + fabsf(axisZ.y), fabsf(axisX.z) + fabsf(axisY.z) + fabsf(axisZ.z)));
-        const float fastAdjugateNorm =
-            fmaxf(fabsf(fastCofactorX.x) + fabsf(fastCofactorX.y) + fabsf(fastCofactorX.z),
-                  fmaxf(fabsf(fastCofactorY.x) + fabsf(fastCofactorY.y) + fabsf(fastCofactorY.z),
-                        fabsf(fastCofactorZ.x) + fabsf(fastCofactorZ.y) + fabsf(fastCofactorZ.z)));
-        if (fabsf(fastDeterminant) > 9.313225746154785e-10f * fastMatrixNorm * fastAdjugateNorm)
-        {
-            result.cofactorX = fastCofactorX;
-            result.cofactorY = fastCofactorY;
-            result.cofactorZ = fastCofactorZ;
-            result.valid = true;
-            return result;
-        }
-        // Ill-conditioned inside the window as well: start over on the exact
-        // path rather than reporting what the quick test could not certify.
-        ScaledAffineBasis restart;
-        result = restart;
-    }
-
-    int exponentX = 0;
-    int exponentY = 0;
-    int exponentZ = 0;
-    decomposeFloatExponent(scaleX, exponentX);
-    decomposeFloatExponent(scaleY, exponentY);
-    decomposeFloatExponent(scaleZ, exponentZ);
-    const int globalExponent = exponentX > exponentY ? (exponentX > exponentZ ? exponentX : exponentZ) :
-                                                       (exponentY > exponentZ ? exponentY : exponentZ);
-    const float3 normalizedX =
-        make_float3(scaleFloatExponent(axisX.x, -exponentX), scaleFloatExponent(axisX.y, -exponentX),
-                    scaleFloatExponent(axisX.z, -exponentX));
-    const float3 normalizedY =
-        make_float3(scaleFloatExponent(axisY.x, -exponentY), scaleFloatExponent(axisY.y, -exponentY),
-                    scaleFloatExponent(axisY.z, -exponentY));
-    const float3 normalizedZ =
-        make_float3(scaleFloatExponent(axisZ.x, -exponentZ), scaleFloatExponent(axisZ.y, -exponentZ),
-                    scaleFloatExponent(axisZ.z, -exponentZ));
-    const float rowScaleX = fmaxf(fabsf(normalizedX.x), fmaxf(fabsf(normalizedY.x), fabsf(normalizedZ.x)));
-    const float rowScaleY = fmaxf(fabsf(normalizedX.y), fmaxf(fabsf(normalizedY.y), fabsf(normalizedZ.y)));
-    const float rowScaleZ = fmaxf(fabsf(normalizedX.z), fmaxf(fabsf(normalizedY.z), fabsf(normalizedZ.z)));
-    if (!(rowScaleX > 0.0f) || !(rowScaleY > 0.0f) || !(rowScaleZ > 0.0f))
-    {
-        return result;
-    }
-
-    int rowExponentX = 0;
-    int rowExponentY = 0;
-    int rowExponentZ = 0;
-    decomposeFloatExponent(rowScaleX, rowExponentX);
-    decomposeFloatExponent(rowScaleY, rowExponentY);
-    decomposeFloatExponent(rowScaleZ, rowExponentZ);
-    result.x =
-        make_float3(scaleFloatExponent(normalizedX.x, -rowExponentX), scaleFloatExponent(normalizedX.y, -rowExponentY),
-                    scaleFloatExponent(normalizedX.z, -rowExponentZ));
-    result.y =
-        make_float3(scaleFloatExponent(normalizedY.x, -rowExponentX), scaleFloatExponent(normalizedY.y, -rowExponentY),
-                    scaleFloatExponent(normalizedY.z, -rowExponentZ));
-    result.z =
-        make_float3(scaleFloatExponent(normalizedZ.x, -rowExponentX), scaleFloatExponent(normalizedZ.y, -rowExponentY),
-                    scaleFloatExponent(normalizedZ.z, -rowExponentZ));
-    result.determinant = compensatedDotCrossExpansion(result.x, result.y, result.z);
-
-    const float determinant = compensatedValue(result.determinant);
-    const float3 cofactorX = accurateCross(result.y, result.z);
-    const float3 cofactorY = accurateCross(result.z, result.x);
-    const float3 cofactorZ = accurateCross(result.x, result.y);
-    const float matrixNorm = fmaxf(fabsf(result.x.x) + fabsf(result.y.x) + fabsf(result.z.x),
-                                   fmaxf(fabsf(result.x.y) + fabsf(result.y.y) + fabsf(result.z.y),
-                                         fabsf(result.x.z) + fabsf(result.y.z) + fabsf(result.z.z)));
-    const float adjugateNorm = fmaxf(fabsf(cofactorX.x) + fabsf(cofactorX.y) + fabsf(cofactorX.z),
-                                     fmaxf(fabsf(cofactorY.x) + fabsf(cofactorY.y) + fabsf(cofactorY.z),
-                                           fabsf(cofactorZ.x) + fabsf(cofactorZ.y) + fabsf(cofactorZ.z)));
-    // With a two-float determinant, cond_inf(B)<=2^30 leaves at least about
-    // eighteen meaningful result bits. Beyond that, the shared float inputs
-    // cannot certify intersection support or orientation reliably.
-    if (!(fabsf(determinant) > 9.313225746154785e-10f * matrixNorm * adjugateNorm))
-    {
-        return result;
-    }
-
-    result.cofactorX = cofactorX;
-    result.cofactorY = cofactorY;
-    result.cofactorZ = cofactorZ;
-    result.objectExponentX = exponentX - globalExponent;
-    result.objectExponentY = exponentY - globalExponent;
-    result.objectExponentZ = exponentZ - globalExponent;
-    result.worldExponentX = rowExponentX + globalExponent;
-    result.worldExponentY = rowExponentY + globalExponent;
-    result.worldExponentZ = rowExponentZ + globalExponent;
-    result.valid = true;
-    return result;
-#endif
-}
-
-DEVICE_FUNC float analyticAffineOrientation(float3 axisX, float3 axisY, float3 axisZ)
-{
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    const float determinant = dot(axisX, cross(axisY, axisZ));
-    return determinant > 0.0f ? 1.0f : (determinant < 0.0f ? -1.0f : 0.0f);
-#else
-    const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
-    const float determinant = compensatedValue(basis.determinant);
-    return basis.valid ? (determinant > 0.0f ? 1.0f : -1.0f) : 0.0f;
-#endif
-}
-
-DEVICE_FUNC int compensatedExponent(CompensatedFloat value, int externalExponent)
-{
-    const float magnitude = fmaxf(fabsf(value.high), fabsf(value.low));
-    if (!(magnitude > 0.0f) || !(magnitude <= 3.402823466e38f))
-    {
-        return -100000;
-    }
-    int exponent = 0;
-    decomposeFloatExponent(magnitude, exponent);
-    return exponent + externalExponent;
-}
-
-DEVICE_FUNC float affineCofactorReciprocalAndDirection(float3 axisX,
-                                                       float3 axisY,
-                                                       float3 axisZ,
-                                                       CompensatedFloat objectX,
-                                                       CompensatedFloat objectY,
-                                                       CompensatedFloat objectZ,
-                                                       float numerator,
-                                                       THREAD_REF float3& direction)
-{
-    direction = make_float3(0.0f);
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    const float3 object = make_float3(objectX.high, objectY.high, objectZ.high);
-    const float inputLengthSquared = dot(object, object);
-    const float3 cofactor = affineSphereCofactor(axisX, axisY, axisZ, object);
-    const float cofactorLengthSquared = dot(cofactor, cofactor);
-    if (!(inputLengthSquared > 0.0f) || !(cofactorLengthSquared > 0.0f) || !(numerator > 0.0f))
-    {
-        return 0.0f;
-    }
-    const float inverseCofactorLength = 1.0f / sqrtf(cofactorLengthSquared);
-    direction = cofactor * inverseCofactorLength;
-    return numerator * sqrtf(inputLengthSquared) * inverseCofactorLength;
-#else
-    const float3 rowX = make_float3(axisX.x, axisY.x, axisZ.x);
-    const float3 rowY = make_float3(axisX.y, axisY.y, axisZ.y);
-    const float3 rowZ = make_float3(axisX.z, axisY.z, axisZ.z);
-    const float scaleX = fmaxf(fabsf(rowX.x), fmaxf(fabsf(rowX.y), fabsf(rowX.z)));
-    const float scaleY = fmaxf(fabsf(rowY.x), fmaxf(fabsf(rowY.y), fabsf(rowY.z)));
-    const float scaleZ = fmaxf(fabsf(rowZ.x), fmaxf(fabsf(rowZ.y), fabsf(rowZ.z)));
-    float inputScale = fmaxf(fabsf(objectX.high), fabsf(objectX.low));
-    inputScale = fmaxf(inputScale, fmaxf(fabsf(objectY.high), fabsf(objectY.low)));
-    inputScale = fmaxf(inputScale, fmaxf(fabsf(objectZ.high), fabsf(objectZ.low)));
-    if (!(inputScale > 0.0f) || !(inputScale <= 3.402823466e38f) || !(scaleX > 0.0f) || !(scaleX <= 3.402823466e38f) ||
-        !(scaleY > 0.0f) || !(scaleY <= 3.402823466e38f) || !(scaleZ > 0.0f) || !(scaleZ <= 3.402823466e38f))
-    {
-        return 0.0f;
-    }
-
-    int inputExponent = 0;
-    int exponentX = 0;
-    int exponentY = 0;
-    int exponentZ = 0;
-    decomposeFloatExponent(inputScale, inputExponent);
-    decomposeFloatExponent(scaleX, exponentX);
-    decomposeFloatExponent(scaleY, exponentY);
-    decomposeFloatExponent(scaleZ, exponentZ);
-    objectX = scaleCompensatedExponent(objectX, -inputExponent);
-    objectY = scaleCompensatedExponent(objectY, -inputExponent);
-    objectZ = scaleCompensatedExponent(objectZ, -inputExponent);
-    const float3 x = make_float3(scaleFloatExponent(rowX.x, -exponentX), scaleFloatExponent(rowX.y, -exponentX),
-                                 scaleFloatExponent(rowX.z, -exponentX));
-    const float3 y = make_float3(scaleFloatExponent(rowY.x, -exponentY), scaleFloatExponent(rowY.y, -exponentY),
-                                 scaleFloatExponent(rowY.z, -exponentY));
-    const float3 z = make_float3(scaleFloatExponent(rowZ.x, -exponentZ), scaleFloatExponent(rowZ.y, -exponentZ),
-                                 scaleFloatExponent(rowZ.z, -exponentZ));
-
-    const CompensatedFloat inputLength =
-        sqrtCompensated(compensatedDot3(objectX, objectY, objectZ, objectX, objectY, objectZ));
-    const float inputLengthValue = compensatedValue(inputLength);
-    const float cofactorX = compensatedValue(compensatedDotCrossExpansion(objectX, objectY, objectZ, y, z));
-    const float cofactorY = compensatedValue(compensatedDotCrossExpansion(objectX, objectY, objectZ, z, x));
-    const float cofactorZ = compensatedValue(compensatedDotCrossExpansion(objectX, objectY, objectZ, x, y));
-    int componentExponentX = 0;
-    int componentExponentY = 0;
-    int componentExponentZ = 0;
-    const float mantissaX = decomposeFloatExponent(cofactorX, componentExponentX);
-    const float mantissaY = decomposeFloatExponent(cofactorY, componentExponentY);
-    const float mantissaZ = decomposeFloatExponent(cofactorZ, componentExponentZ);
-    const int totalExponentX = cofactorX != 0.0f ? exponentY + exponentZ + componentExponentX : -100000;
-    const int totalExponentY = cofactorY != 0.0f ? exponentZ + exponentX + componentExponentY : -100000;
-    const int totalExponentZ = cofactorZ != 0.0f ? exponentX + exponentY + componentExponentZ : -100000;
-    const int commonExponent = totalExponentX > totalExponentY ?
-                                   (totalExponentX > totalExponentZ ? totalExponentX : totalExponentZ) :
-                                   (totalExponentY > totalExponentZ ? totalExponentY : totalExponentZ);
-    if (commonExponent == -100000)
-    {
-        return 0.0f;
-    }
-
-    const float3 scaledCofactor = make_float3(scaleFloatExponent(mantissaX, totalExponentX - commonExponent),
-                                              scaleFloatExponent(mantissaY, totalExponentY - commonExponent),
-                                              scaleFloatExponent(mantissaZ, totalExponentZ - commonExponent));
-    const float scaledLength = finiteVectorLength(scaledCofactor);
-    direction = normalizeFiniteVectorOrZero(scaledCofactor);
-    if (!(scaledLength > 0.0f) || !(dot(direction, direction) > 0.0f) || !(inputLengthValue > 0.0f) ||
-        !(numerator > 0.0f) || !(numerator <= 3.402823466e38f))
-    {
-        return 0.0f;
-    }
-
-    int numeratorExponent = 0;
-    int inputLengthExponent = 0;
-    int lengthExponent = 0;
-    const float numeratorMantissa = decomposeFloatExponent(numerator, numeratorExponent);
-    const float inputLengthMantissa = decomposeFloatExponent(inputLengthValue, inputLengthExponent);
-    const float lengthMantissa = decomposeFloatExponent(scaledLength, lengthExponent);
-    const float reciprocal =
-        scaleFloatExponent(numeratorMantissa * inputLengthMantissa / lengthMantissa,
-                           numeratorExponent + inputLengthExponent - lengthExponent - commonExponent);
-    return reciprocal >= 1.175494351e-38f && reciprocal <= 3.402823466e38f ? reciprocal : 0.0f;
-#endif
-}
-
-DEVICE_FUNC float affineCofactorReciprocalAndDirection(
-    float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal, float numerator, THREAD_REF float3& direction)
-{
-    return affineCofactorReciprocalAndDirection(axisX, axisY, axisZ, compensatedSum(objectNormal.x, 0.0f),
-                                                compensatedSum(objectNormal.y, 0.0f),
-                                                compensatedSum(objectNormal.z, 0.0f), numerator, direction);
+    const float3 areaVector = cross(axisX, axisY);
+    const float area = sqrtf(dot(areaVector, areaVector));
+    return area > 0.0f ? 1.0f / (M_PI_F * area) : 0.0f;
 }
 
 DEVICE_FUNC float affineSphereAreaPdfAndNormal(
     float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal, THREAD_REF float3& normal)
 {
     normal = make_float3(0.0f);
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
     const float3 cofactorX = cross(axisY, axisZ);
     const float3 cofactor =
         objectNormal.x * cofactorX + objectNormal.y * cross(axisZ, axisX) + objectNormal.z * cross(axisX, axisY);
@@ -550,27 +140,10 @@ DEVICE_FUNC float affineSphereAreaPdfAndNormal(
     const float inverseCofactorLength = 1.0f / sqrtf(cofactorLengthSquared);
     normal = copysignf(1.0f, determinant) * cofactor * inverseCofactorLength;
     return inverseCofactorLength * (1.0f / (4.0f * M_PI_F));
-#else
-    const float orientation = analyticAffineOrientation(axisX, axisY, axisZ);
-    float3 cofactorDirection;
-    const float areaPdf = affineCofactorReciprocalAndDirection(
-        axisX, axisY, axisZ, objectNormal, 1.0f / (4.0f * M_PI_F), cofactorDirection);
-    normal = orientation * cofactorDirection;
-    if (orientation == 0.0f || !(dot(normal, normal) > 0.0f) || !(areaPdf > 0.0f))
-    {
-        normal = make_float3(0.0f);
-        return 0.0f;
-    }
-    return areaPdf;
-#endif
 }
 
-// Unit inverse-transpose normal for an affine map whose columns are the three
-// axes. The determinant sign matters for mirrored transforms; its magnitude
-// cancels during normalization.
 DEVICE_FUNC float3 transformAffineNormal(float3 axisX, float3 axisY, float3 axisZ, float3 objectNormal)
 {
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
     const float3 cofactorX = cross(axisY, axisZ);
     const float3 cofactor =
         objectNormal.x * cofactorX + objectNormal.y * cross(axisZ, axisX) + objectNormal.z * cross(axisX, axisY);
@@ -581,119 +154,6 @@ DEVICE_FUNC float3 transformAffineNormal(float3 axisX, float3 axisY, float3 axis
         return make_float3(0.0f);
     }
     return copysignf(1.0f, determinant) * cofactor / sqrtf(lengthSquared);
-#else
-    const float orientation = analyticAffineOrientation(axisX, axisY, axisZ);
-    float3 cofactorDirection;
-    affineCofactorReciprocalAndDirection(axisX, axisY, axisZ, objectNormal, 1.0f, cofactorDirection);
-    if (orientation == 0.0f || !(dot(cofactorDirection, cofactorDirection) > 0.0f))
-    {
-        return make_float3(0.0f);
-    }
-    return orientation * cofactorDirection;
-#endif
-}
-
-DEVICE_FUNC bool solveAffineCoordinates(
-    float3 axisX, float3 axisY, float3 axisZ, float3 worldOffset, THREAD_REF float3& objectCoordinates)
-{
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
-    const float3 cofactorX = cross(axisY, axisZ);
-    const float determinant = dot(axisX, cofactorX);
-    if (!(fabsf(determinant) > 0.0f))
-    {
-        objectCoordinates = make_float3(0.0f);
-        return false;
-    }
-    objectCoordinates = make_float3(dot(worldOffset, cofactorX), dot(worldOffset, cross(axisZ, axisX)),
-                                    dot(worldOffset, cross(axisX, axisY))) /
-                        determinant;
-    return true;
-#else
-    const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
-    if (!basis.valid)
-    {
-        objectCoordinates = make_float3(0.0f);
-        return false;
-    }
-
-    const float3 offset = make_float3(scaleFloatExponent(worldOffset.x, -basis.worldExponentX),
-                                      scaleFloatExponent(worldOffset.y, -basis.worldExponentY),
-                                      scaleFloatExponent(worldOffset.z, -basis.worldExponentZ));
-    if (!affineVectorIsFinite(offset))
-    {
-        objectCoordinates = make_float3(0.0f);
-        return false;
-    }
-    float3 scaledCoordinates = make_float3(
-        compensatedValue(divideCompensated(compensatedDotCrossExpansion(offset, basis.y, basis.z), basis.determinant)),
-        compensatedValue(divideCompensated(compensatedDotCrossExpansion(offset, basis.z, basis.x), basis.determinant)),
-        compensatedValue(divideCompensated(compensatedDotCrossExpansion(offset, basis.x, basis.y), basis.determinant)));
-    if (!affineVectorIsFinite(scaledCoordinates))
-    {
-        objectCoordinates = make_float3(0.0f);
-        return false;
-    }
-    // Cramer's rule supplies a scale-safe initial inverse. Two residual
-    // corrections recover the low bits needed near a grazing intersection of
-    // highly non-orthogonal, but still finite, affine axes.
-    for (unsigned int iteration = 0u; iteration < 2u; ++iteration)
-    {
-        const float3 residual =
-            make_float3(fmaf(-basis.z.x, scaledCoordinates.z,
-                             fmaf(-basis.y.x, scaledCoordinates.y, fmaf(-basis.x.x, scaledCoordinates.x, offset.x))),
-                        fmaf(-basis.z.y, scaledCoordinates.z,
-                             fmaf(-basis.y.y, scaledCoordinates.y, fmaf(-basis.x.y, scaledCoordinates.x, offset.y))),
-                        fmaf(-basis.z.z, scaledCoordinates.z,
-                             fmaf(-basis.y.z, scaledCoordinates.y, fmaf(-basis.x.z, scaledCoordinates.x, offset.z))));
-        const float3 correction = make_float3(
-            compensatedValue(divideCompensated(compensatedDotExpansion(residual, basis.cofactorX), basis.determinant)),
-            compensatedValue(divideCompensated(compensatedDotExpansion(residual, basis.cofactorY), basis.determinant)),
-            compensatedValue(divideCompensated(compensatedDotExpansion(residual, basis.cofactorZ), basis.determinant)));
-        scaledCoordinates += correction;
-    }
-    objectCoordinates = make_float3(scaleFloatExponent(scaledCoordinates.x, -basis.objectExponentX),
-                                    scaleFloatExponent(scaledCoordinates.y, -basis.objectExponentY),
-                                    scaleFloatExponent(scaledCoordinates.z, -basis.objectExponentZ));
-    return affineVectorIsFinite(objectCoordinates);
-#endif
-}
-
-DEVICE_FUNC bool analyticAffineTransformIsNonsingular(float3 axisX, float3 axisY, float3 axisZ)
-{
-    const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
-    if (!affineEllipsoidPointMapIsRepresentable(basis))
-    {
-        return false;
-    }
-    float3 nx;
-    float3 ny;
-    float3 nz;
-    const float px = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(1.0f, 0.0f, 0.0f), nx);
-    const float py = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(0.0f, 1.0f, 0.0f), ny);
-    const float pz = affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, make_float3(0.0f, 0.0f, 1.0f), nz);
-    const float minimumPdf = fminf(px, fminf(py, pz));
-    if (!(minimumPdf > 0.0f))
-    {
-        return false;
-    }
-    // Bound the largest cofactor singular value with the infinity norm of its
-    // normalized Gram matrix. Unlike a sum of column lengths, this is exact
-    // for orthogonal/isotropic axes at the last positive float PDF.
-    const float rx = minimumPdf / px;
-    const float ry = minimumPdf / py;
-    const float rz = minimumPdf / pz;
-    const float xy = rx * ry * fminf(fabsf(dot(nx, ny)), 1.0f);
-    const float xz = rx * rz * fminf(fabsf(dot(nx, nz)), 1.0f);
-    const float yz = ry * rz * fminf(fabsf(dot(ny, nz)), 1.0f);
-    const float gramNorm = fmaxf(rx * rx + xy + xz, fmaxf(ry * ry + xy + yz, rz * rz + xz + yz));
-    const float conservativePdf = minimumPdf / sqrtf(gramNorm);
-    return conservativePdf > 0.0f;
-}
-
-DEVICE_FUNC bool analyticEllipsoidIsRepresentable(float3 center, float3 axisX, float3 axisY, float3 axisZ)
-{
-    return affineSamplePointRangeIsFinite(center, axisX, axisY, axisZ) &&
-           analyticAffineTransformIsNonsingular(axisX, axisY, axisZ);
 }
 
 DEVICE_FUNC float3 affineSphereCoordinates(float3 axisX, float3 axisY, float3 axisZ, float3 worldOffset)
@@ -713,8 +173,7 @@ sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNor
 {
     AnalyticLightSample sample;
     const float areaPdf = analyticDiscAreaPdf(axisX, axisY);
-    if (!affineSamplePointRangeIsFinite(center, axisX, axisY, make_float3(0.0f)) || !(areaPdf > 0.0f) ||
-        !(dot(emissionNormal, emissionNormal) > 0.0f))
+    if (!(areaPdf > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f))
     {
         return sample;
     }
@@ -743,21 +202,9 @@ sampleAnalyticEllipsoidUnchecked(float3 center, float3 axisX, float3 axisY, floa
     return sample;
 }
 
-DEVICE_FUNC AnalyticLightSample
-sampleAnalyticEllipsoid(float3 center, float3 axisX, float3 axisY, float3 axisZ, float u1, float u2)
-{
-    if (!analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
-    {
-        AnalyticLightSample sample;
-        return sample;
-    }
-    return sampleAnalyticEllipsoidUnchecked(center, axisX, axisY, axisZ, u1, u2);
-}
-
 DEVICE_FUNC float analyticEllipsoidAreaPdfUnchecked(
     float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
 {
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
     float3 objectNormal = affineSphereCoordinates(axisX, axisY, axisZ, point - center);
     const float objectLengthSquared = dot(objectNormal, objectNormal);
     if (!(objectLengthSquared > 0.0f))
@@ -767,40 +214,11 @@ DEVICE_FUNC float analyticEllipsoidAreaPdfUnchecked(
     }
     objectNormal *= 1.0f / sqrtf(objectLengthSquared);
     return affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, normal);
-#else
-    float3 objectNormal;
-    if (!solveAffineCoordinates(axisX, axisY, axisZ, point - center, objectNormal))
-    {
-        normal = make_float3(0.0f);
-        return 0.0f;
-    }
-    objectNormal = normalizeFiniteVectorOrZero(objectNormal);
-    if (!(dot(objectNormal, objectNormal) > 0.0f))
-    {
-        normal = make_float3(0.0f);
-        return 0.0f;
-    }
-    return affineSphereAreaPdfAndNormal(axisX, axisY, axisZ, objectNormal, normal);
-#endif
 }
 
-DEVICE_FUNC float analyticEllipsoidAreaPdf(
-    float3 center, float3 axisX, float3 axisY, float3 axisZ, float3 point, THREAD_REF float3& normal)
-{
-    if (!analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
-    {
-        normal = make_float3(0.0f);
-        return 0.0f;
-    }
-    return analyticEllipsoidAreaPdfUnchecked(center, axisX, axisY, axisZ, point, normal);
-}
-
-// Deterministic equal-area quadrature of the smooth ellipsoid's surface area.
-// Sampling/PDF evaluation does not depend on this approximation; it is used
-// only to power-weight the outer light-selection PMF.
 DEVICE_FUNC float analyticEllipsoidSurfaceArea(float3 axisX, float3 axisY, float3 axisZ)
 {
-    if (!analyticAffineTransformIsNonsingular(axisX, axisY, axisZ))
+    if (!(fabsf(dot(axisX, cross(axisY, axisZ))) > 0.0f))
     {
         return 0.0f;
     }
@@ -845,7 +263,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
     result.areaPdf = 0.0f;
     result.hit = false;
 
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
     const float3 plane = cross(axisX, axisY);
     const float area = sqrtf(dot(plane, plane));
     const float denominator = dot(rayDirection, plane);
@@ -877,50 +294,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
     result.areaPdf = 1.0f / (M_PI_F * area);
     result.hit = true;
     return result;
-#else
-    const float3 planeNormal = finiteCrossDirection(axisX, axisY);
-    const float areaPdf = analyticDiscAreaPdf(axisX, axisY);
-    if (!affineSamplePointRangeIsFinite(center, axisX, axisY, make_float3(0.0f)) ||
-        !(dot(planeNormal, planeNormal) > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f) || !(areaPdf > 0.0f))
-    {
-        return result;
-    }
-    const float denominator = accurateDot(rayDirection, planeNormal);
-    if (!(fabsf(denominator) > 0.0f))
-    {
-        return result;
-    }
-    const float numerator = accurateDot(center - rayOrigin, planeNormal);
-    const float distanceHigh = numerator / denominator;
-    const float distanceLow = fmaf(-distanceHigh, denominator, numerator) / denominator;
-    const float distance = distanceHigh + distanceLow;
-    if (!(distance >= minDistance && distance < maxDistance))
-    {
-        return result;
-    }
-
-    // Retain the quotient remainder while reconstructing a far hit. A single
-    // float distance can lose an entire small disc even though the ray and its
-    // local intersection remain representable.
-    const float3 relativeOrigin = rayOrigin - center;
-    const float3 offset = make_float3(fmaf(distanceHigh, rayDirection.x, relativeOrigin.x),
-                                      fmaf(distanceHigh, rayDirection.y, relativeOrigin.y),
-                                      fmaf(distanceHigh, rayDirection.z, relativeOrigin.z)) +
-                          distanceLow * rayDirection;
-    float3 coordinates;
-    if (!solveAffineCoordinates(axisX, axisY, planeNormal, offset, coordinates) ||
-        !(coordinates.x * coordinates.x + coordinates.y * coordinates.y <= 1.0f))
-    {
-        return result;
-    }
-
-    result.distance = distance;
-    result.point = center + coordinates.x * axisX + coordinates.y * axisY;
-    result.normal = emissionNormal;
-    result.areaPdf = areaPdf;
-    result.hit = true;
-    return result;
-#endif
 }
 
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticRectangle(float3 rayOrigin,
@@ -939,7 +312,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticRectangle(float3 rayOrigi
     result.areaPdf = 0.0f;
     result.hit = false;
 
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
     const float3 plane = cross(edgeX, edgeY);
     const float area = sqrtf(dot(plane, plane));
     const float denominator = dot(rayDirection, plane);
@@ -971,111 +343,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticRectangle(float3 rayOrigi
     result.areaPdf = 1.0f / area;
     result.hit = true;
     return result;
-#else
-    const float3 planeNormal = finiteCrossDirection(edgeX, edgeY);
-    const float areaPdf = inverseFiniteCrossLength(edgeX, edgeY);
-    if (!affineSamplePointRangeIsFinite(corner, edgeX, edgeY, make_float3(0.0f)) ||
-        !(dot(planeNormal, planeNormal) > 0.0f) || !(dot(emissionNormal, emissionNormal) > 0.0f) || !(areaPdf > 0.0f))
-    {
-        return result;
-    }
-    const float denominator = accurateDot(rayDirection, planeNormal);
-    if (!(fabsf(denominator) > 0.0f))
-    {
-        return result;
-    }
-    const float numerator = accurateDot(corner - rayOrigin, planeNormal);
-    const float distanceHigh = numerator / denominator;
-    const float distanceLow = fmaf(-distanceHigh, denominator, numerator) / denominator;
-    const float distance = distanceHigh + distanceLow;
-    if (!(distance >= minDistance && distance < maxDistance))
-    {
-        return result;
-    }
-
-    const float3 relativeOrigin = rayOrigin - corner;
-    const float3 offset = make_float3(fmaf(distanceHigh, rayDirection.x, relativeOrigin.x),
-                                      fmaf(distanceHigh, rayDirection.y, relativeOrigin.y),
-                                      fmaf(distanceHigh, rayDirection.z, relativeOrigin.z)) +
-                          distanceLow * rayDirection;
-    float3 coordinates;
-    if (!solveAffineCoordinates(edgeX, edgeY, planeNormal, offset, coordinates) || !(coordinates.x >= 0.0f) ||
-        !(coordinates.x <= 1.0f) || !(coordinates.y >= 0.0f) || !(coordinates.y <= 1.0f))
-    {
-        return result;
-    }
-
-    result.distance = distance;
-    result.point = corner + coordinates.x * edgeX + coordinates.y * edgeY;
-    result.normal = emissionNormal;
-    result.areaPdf = areaPdf;
-    result.hit = true;
-    return result;
-#endif
-}
-
-DEVICE_FUNC bool affineSphereHitCoordinateHasSmallResidual(float center,
-                                                           float axisX,
-                                                           float axisY,
-                                                           float axisZ,
-                                                           float objectX,
-                                                           float objectY,
-                                                           float objectZ,
-                                                           float rayOrigin,
-                                                           float rayDirection,
-                                                           CompensatedFloat distance)
-{
-    const float surfaceX = axisX * objectX;
-    const float surfaceY = axisY * objectY;
-    const float surfaceZ = axisZ * objectZ;
-    const float rayHigh = rayDirection * distance.high;
-    const float rayLow = rayDirection * distance.low;
-    float scale = fmaxf(fabsf(center), fabsf(rayOrigin));
-    scale = fmaxf(scale, fmaxf(fabsf(surfaceX), fmaxf(fabsf(surfaceY), fabsf(surfaceZ))));
-    scale = fmaxf(scale, fmaxf(fabsf(rayHigh), fabsf(rayLow)));
-    if (!(scale <= 3.402823466e38f))
-    {
-        return false;
-    }
-    if (!(scale > 0.0f))
-    {
-        return true;
-    }
-
-    int exponent = 0;
-    decomposeFloatExponent(scale, exponent);
-    const float scaledCenter = scaleFloatExponent(center, -exponent);
-    const float scaledOrigin = scaleFloatExponent(rayOrigin, -exponent);
-    const float scaledSurfaceX = scaleFloatExponent(surfaceX, -exponent);
-    const float scaledSurfaceY = scaleFloatExponent(surfaceY, -exponent);
-    const float scaledSurfaceZ = scaleFloatExponent(surfaceZ, -exponent);
-    const float scaledRayHigh = scaleFloatExponent(rayHigh, -exponent);
-    const float scaledRayLow = scaleFloatExponent(rayLow, -exponent);
-    CompensatedFloat residual = compensatedSum(scaledCenter, scaledSurfaceX);
-    residual = addCompensated(residual, compensatedSum(scaledSurfaceY, scaledSurfaceZ));
-    residual = addCompensated(residual, compensatedSum(-scaledOrigin, -scaledRayHigh));
-    residual = addCompensated(residual, compensatedSum(-scaledRayLow, 0.0f));
-    const float absoluteSum = fabsf(scaledCenter) + fabsf(scaledSurfaceX) + fabsf(scaledSurfaceY) +
-                              fabsf(scaledSurfaceZ) + fabsf(scaledOrigin) + fabsf(scaledRayHigh) + fabsf(scaledRayLow);
-    constexpr float residualTolerance = 1.9073486328125e-6f; // 32 * 2^-24
-    return fabsf(compensatedValue(residual)) <= residualTolerance * absoluteSum;
-}
-
-DEVICE_FUNC bool affineSphereHitHasSmallResidual(float3 center,
-                                                 float3 axisX,
-                                                 float3 axisY,
-                                                 float3 axisZ,
-                                                 float3 objectNormal,
-                                                 float3 rayOrigin,
-                                                 float3 rayDirection,
-                                                 CompensatedFloat distance)
-{
-    return affineSphereHitCoordinateHasSmallResidual(center.x, axisX.x, axisY.x, axisZ.x, objectNormal.x, objectNormal.y,
-                                                     objectNormal.z, rayOrigin.x, rayDirection.x, distance) &&
-           affineSphereHitCoordinateHasSmallResidual(center.y, axisX.y, axisY.y, axisZ.y, objectNormal.x, objectNormal.y,
-                                                     objectNormal.z, rayOrigin.y, rayDirection.y, distance) &&
-           affineSphereHitCoordinateHasSmallResidual(center.z, axisX.z, axisY.z, axisZ.z, objectNormal.x, objectNormal.y,
-                                                     objectNormal.z, rayOrigin.z, rayDirection.z, distance);
 }
 
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3 rayOrigin,
@@ -1094,7 +361,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3
     result.areaPdf = 0.0f;
     result.hit = false;
 
-#if defined(STRELKA_FAST_FINITE_GPU_MATH) && STRELKA_FAST_FINITE_GPU_MATH
     const float3 cofactorX = cross(axisY, axisZ);
     const float3 cofactorY = cross(axisZ, axisX);
     const float3 cofactorZ = cross(axisX, axisY);
@@ -1149,185 +415,8 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3
     result.areaPdf = inverseCofactorLength * (1.0f / (4.0f * M_PI_F));
     result.hit = true;
     return result;
-#else
-    const ScaledAffineBasis basis = scaledAffineBasis(axisX, axisY, axisZ);
-    if (!basis.valid)
-    {
-        return result;
-    }
-    const float3 relativeOrigin = rayOrigin - center;
-    const CompensatedFloat directionLengthSquaredExpansion = compensatedDotExpansion(rayDirection, rayDirection);
-    const float directionLengthSquared = compensatedValue(directionLengthSquaredExpansion);
-    if (!(directionLengthSquared > 0.0f) || !(directionLengthSquared <= 3.402823466e38f))
-    {
-        return result;
-    }
-    const CompensatedFloat shift = divideCompensated(
-        negateCompensated(compensatedDotExpansion(relativeOrigin, rayDirection)), directionLengthSquaredExpansion);
-    const float shiftHigh = shift.high;
-    const float shiftLow = shift.low;
-    const float3 scaledOrigin = make_float3(scaleFloatExponent(relativeOrigin.x, -basis.worldExponentX),
-                                            scaleFloatExponent(relativeOrigin.y, -basis.worldExponentY),
-                                            scaleFloatExponent(relativeOrigin.z, -basis.worldExponentZ));
-    const float3 scaledDirection = make_float3(scaleFloatExponent(rayDirection.x, -basis.worldExponentX),
-                                               scaleFloatExponent(rayDirection.y, -basis.worldExponentY),
-                                               scaleFloatExponent(rayDirection.z, -basis.worldExponentZ));
-    if (!affineVectorIsFinite(scaledOrigin) || !affineVectorIsFinite(scaledDirection))
-    {
-        return result;
-    }
-    CompensatedFloat determinant = basis.determinant;
-    const CompensatedFloat directionX = compensatedDotCrossExpansion(scaledDirection, basis.y, basis.z);
-    const CompensatedFloat directionY = compensatedDotCrossExpansion(scaledDirection, basis.z, basis.x);
-    const CompensatedFloat directionZ = compensatedDotCrossExpansion(scaledDirection, basis.x, basis.y);
-    const CompensatedFloat shiftedWorldX =
-        addCompensated(addCompensated(compensatedSum(scaledOrigin.x, 0.0f),
-                                      scaleCompensated(compensatedSum(scaledDirection.x, 0.0f), shiftHigh)),
-                       scaleCompensated(compensatedSum(scaledDirection.x, 0.0f), shiftLow));
-    const CompensatedFloat shiftedWorldY =
-        addCompensated(addCompensated(compensatedSum(scaledOrigin.y, 0.0f),
-                                      scaleCompensated(compensatedSum(scaledDirection.y, 0.0f), shiftHigh)),
-                       scaleCompensated(compensatedSum(scaledDirection.y, 0.0f), shiftLow));
-    const CompensatedFloat shiftedWorldZ =
-        addCompensated(addCompensated(compensatedSum(scaledOrigin.z, 0.0f),
-                                      scaleCompensated(compensatedSum(scaledDirection.z, 0.0f), shiftHigh)),
-                       scaleCompensated(compensatedSum(scaledDirection.z, 0.0f), shiftLow));
-    const CompensatedFloat originX =
-        compensatedDotCrossExpansion(shiftedWorldX, shiftedWorldY, shiftedWorldZ, basis.y, basis.z);
-    const CompensatedFloat originY =
-        compensatedDotCrossExpansion(shiftedWorldX, shiftedWorldY, shiftedWorldZ, basis.z, basis.x);
-    const CompensatedFloat originZ =
-        compensatedDotCrossExpansion(shiftedWorldX, shiftedWorldY, shiftedWorldZ, basis.x, basis.y);
-    const int originComponentExponentX = compensatedExponent(originX, -basis.objectExponentX);
-    const int originComponentExponentY = compensatedExponent(originY, -basis.objectExponentY);
-    const int originComponentExponentZ = compensatedExponent(originZ, -basis.objectExponentZ);
-    const int determinantExponent = compensatedExponent(determinant, 0);
-    const int directionComponentExponentX = compensatedExponent(directionX, -basis.objectExponentX);
-    const int directionComponentExponentY = compensatedExponent(directionY, -basis.objectExponentY);
-    const int directionComponentExponentZ = compensatedExponent(directionZ, -basis.objectExponentZ);
-    const int originExponent =
-        originComponentExponentX > originComponentExponentY ?
-            (originComponentExponentX > originComponentExponentZ ? originComponentExponentX : originComponentExponentZ) :
-            (originComponentExponentY > originComponentExponentZ ? originComponentExponentY : originComponentExponentZ);
-    const int completeOriginExponent = originExponent > determinantExponent ? originExponent : determinantExponent;
-    const int directionExponent =
-        directionComponentExponentX > directionComponentExponentY ?
-            (directionComponentExponentX > directionComponentExponentZ ? directionComponentExponentX :
-                                                                         directionComponentExponentZ) :
-            (directionComponentExponentY > directionComponentExponentZ ? directionComponentExponentY :
-                                                                         directionComponentExponentZ);
-    if (completeOriginExponent == -100000 || directionExponent == -100000)
-    {
-        return result;
-    }
-    const CompensatedFloat sx = scaleCompensatedExponent(originX, -basis.objectExponentX - completeOriginExponent);
-    const CompensatedFloat sy = scaleCompensatedExponent(originY, -basis.objectExponentY - completeOriginExponent);
-    const CompensatedFloat sz = scaleCompensatedExponent(originZ, -basis.objectExponentZ - completeOriginExponent);
-    const CompensatedFloat dx = scaleCompensatedExponent(directionX, -basis.objectExponentX - directionExponent);
-    const CompensatedFloat dy = scaleCompensatedExponent(directionY, -basis.objectExponentY - directionExponent);
-    const CompensatedFloat dz = scaleCompensatedExponent(directionZ, -basis.objectExponentZ - directionExponent);
-    determinant = scaleCompensatedExponent(determinant, -completeOriginExponent);
-
-    const CompensatedFloat a = compensatedDot3(dx, dy, dz, dx, dy, dz);
-    const CompensatedFloat halfB = compensatedDot3(sx, sy, sz, dx, dy, dz);
-    const CompensatedFloat crossX =
-        addCompensated(multiplyCompensated(sy, dz), negateCompensated(multiplyCompensated(sz, dy)));
-    const CompensatedFloat crossY =
-        addCompensated(multiplyCompensated(sz, dx), negateCompensated(multiplyCompensated(sx, dz)));
-    const CompensatedFloat crossZ =
-        addCompensated(multiplyCompensated(sx, dy), negateCompensated(multiplyCompensated(sy, dx)));
-    const CompensatedFloat perpendicularSquared = compensatedDot3(crossX, crossY, crossZ, crossX, crossY, crossZ);
-    const CompensatedFloat discriminant = addCompensated(
-        multiplyCompensated(multiplyCompensated(determinant, determinant), a), negateCompensated(perpendicularSquared));
-    const float aValue = compensatedValue(a);
-    const float discriminantValue = compensatedValue(discriminant);
-    const float determinantValue = compensatedValue(determinant);
-    if (!(aValue > 0.0f) || !(discriminantValue >= 0.0f) || !(fabsf(determinantValue) > 0.0f))
-    {
-        return result;
-    }
-    const CompensatedFloat closestParameter = divideCompensated(negateCompensated(halfB), a);
-    const CompensatedFloat root = divideCompensated(sqrtCompensated(discriminant), a);
-    const CompensatedFloat perpendicularX = divideCompensated(
-        addCompensated(multiplyCompensated(dy, crossZ), negateCompensated(multiplyCompensated(dz, crossY))), a);
-    const CompensatedFloat perpendicularY = divideCompensated(
-        addCompensated(multiplyCompensated(dz, crossX), negateCompensated(multiplyCompensated(dx, crossZ))), a);
-    const CompensatedFloat perpendicularZ = divideCompensated(
-        addCompensated(multiplyCompensated(dx, crossY), negateCompensated(multiplyCompensated(dy, crossX))), a);
-    CompensatedFloat pointX = addCompensated(perpendicularX, negateCompensated(multiplyCompensated(dx, root)));
-    CompensatedFloat pointY = addCompensated(perpendicularY, negateCompensated(multiplyCompensated(dy, root)));
-    CompensatedFloat pointZ = addCompensated(perpendicularZ, negateCompensated(multiplyCompensated(dz, root)));
-    const CompensatedFloat worldClosest =
-        scaleCompensatedExponent(closestParameter, completeOriginExponent - directionExponent);
-    const CompensatedFloat worldRoot = scaleCompensatedExponent(root, completeOriginExponent - directionExponent);
-    const CompensatedFloat shiftedWorldClosest = addCompensated(compensatedSum(shiftHigh, shiftLow), worldClosest);
-    CompensatedFloat distanceExpansion = addCompensated(shiftedWorldClosest, negateCompensated(worldRoot));
-    float distance = compensatedValue(distanceExpansion);
-    if (!(distance >= minDistance && distance < maxDistance))
-    {
-        pointX = addCompensated(perpendicularX, multiplyCompensated(dx, root));
-        pointY = addCompensated(perpendicularY, multiplyCompensated(dy, root));
-        pointZ = addCompensated(perpendicularZ, multiplyCompensated(dz, root));
-        distanceExpansion = addCompensated(shiftedWorldClosest, worldRoot);
-        distance = compensatedValue(distanceExpansion);
-    }
-    if (!(distance >= minDistance && distance < maxDistance))
-    {
-        return result;
-    }
-
-    const float3 homogeneousPoint =
-        make_float3(compensatedValue(pointX), compensatedValue(pointY), compensatedValue(pointZ));
-    const float3 objectNormal = copysignf(1.0f, determinantValue) * normalizeFiniteVectorOrZero(homogeneousPoint);
-    if (!affineSphereHitHasSmallResidual(
-            center, axisX, axisY, axisZ, objectNormal, rayOrigin, rayDirection, distanceExpansion))
-    {
-        return result;
-    }
-    float3 cofactorDirection;
-    const float areaPdf = affineCofactorReciprocalAndDirection(
-        axisX, axisY, axisZ, pointX, pointY, pointZ, 1.0f / (4.0f * M_PI_F), cofactorDirection);
-    const float normalSign = analyticAffineOrientation(axisX, axisY, axisZ) * copysignf(1.0f, determinantValue);
-    const float3 normal = normalSign * cofactorDirection;
-    if (!(areaPdf > 0.0f) || !(dot(normal, normal) > 0.0f))
-    {
-        return result;
-    }
-    result.distance = distance;
-    result.point = center + objectNormal.x * axisX + objectNormal.y * axisY + objectNormal.z * axisZ;
-    result.normal = normal;
-    result.areaPdf = areaPdf;
-    result.hit = true;
-    return result;
-#endif
 }
 
-DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoid(float3 rayOrigin,
-                                                                 float3 rayDirection,
-                                                                 float minDistance,
-                                                                 float maxDistance,
-                                                                 float3 center,
-                                                                 float3 axisX,
-                                                                 float3 axisY,
-                                                                 float3 axisZ)
-{
-    if (analyticEllipsoidIsRepresentable(center, axisX, axisY, axisZ))
-    {
-        return intersectAnalyticEllipsoidUnchecked(
-            rayOrigin, rayDirection, minDistance, maxDistance, center, axisX, axisY, axisZ);
-    }
-    AnalyticLightIntersection miss;
-    miss.distance = maxDistance;
-    miss.point = make_float3(0.0f);
-    miss.normal = make_float3(0.0f);
-    miss.areaPdf = 0.0f;
-    miss.hit = false;
-    return miss;
-}
-
-/// The hot form: for a light the scene has enabled, and only from a caller that
-/// has already tested analyticLightVisibilityAllowsRay(). See the note above
-/// sampleAnalyticEllipsoidUnchecked() for what that buys and why it is sound.
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurfaceUnchecked(int lightType,
                                                                              float3 point0,
                                                                              float3 point1,
@@ -1366,49 +455,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurfaceUnchecked(int
     return miss;
 }
 
-/// Dispatch one packed light record to the exact finite surface its sampler
-/// uses. The parameter layout is UniformLight's layout, but keeping the
-/// function scalar makes this source compile unchanged on CPU, Metal and CUDA.
-DEVICE_FUNC AnalyticLightIntersection intersectAnalyticLightSurface(int lightType,
-                                                                    float3 point0,
-                                                                    float3 point1,
-                                                                    float3 point2,
-                                                                    float3 point3,
-                                                                    float3 emissionNormal,
-                                                                    float3 rayOrigin,
-                                                                    float3 rayDirection,
-                                                                    float minDistance,
-                                                                    float maxDistance)
-{
-    if (lightType == LIGHT_TYPE_RECT)
-    {
-        return intersectAnalyticRectangle(rayOrigin, rayDirection, minDistance, maxDistance, point0, point1 - point0,
-                                          point3 - point0, emissionNormal);
-    }
-    if (lightType == LIGHT_TYPE_DISC)
-    {
-        return intersectAnalyticDisc(
-            rayOrigin, rayDirection, minDistance, maxDistance, point1, point2, point3, emissionNormal);
-    }
-    if (lightType == LIGHT_TYPE_SPHERE)
-    {
-        return intersectAnalyticEllipsoid(
-            rayOrigin, rayDirection, minDistance, maxDistance, point1, point0, point2, point3);
-    }
-    const float radius = point0.x;
-    if (lightIsPunctual(lightType) && punctualLightIsSoft(radius))
-    {
-        return intersectAnalyticEllipsoid(rayOrigin, rayDirection, minDistance, maxDistance, point1,
-                                          make_float3(radius, 0.0f, 0.0f), make_float3(0.0f, radius, 0.0f),
-                                          make_float3(0.0f, 0.0f, radius));
-    }
-    AnalyticLightIntersection miss;
-    miss.distance = maxDistance;
-    return miss;
-}
-
-/// Whether this enabled analytic surface intersects the open shadow segment.
-/// Sidedness is intentionally absent: a non-emitting back face is still opaque.
 DEVICE_FUNC bool analyticLightSurfaceOccludesSegment(int lightType,
                                                      float3 point0,
                                                      float3 point1,
@@ -1421,8 +467,6 @@ DEVICE_FUNC bool analyticLightSurfaceOccludesSegment(int lightType,
                                                      float minDistance,
                                                      float maxDistance)
 {
-    // The visibility test on the left is the precondition the Unchecked form
-    // wants: a light the scene enabled is a light the scene could represent.
     return analyticLightVisibilityAllowsRay(packedVisibility, true) &&
            intersectAnalyticLightSurfaceUnchecked(lightType, point0, point1, point2, point3, emissionNormal, rayOrigin,
                                                   rayDirection, minDistance, maxDistance)

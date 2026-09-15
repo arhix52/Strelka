@@ -31,8 +31,10 @@ DEVICE_FUNC bool dielectric_finish_continuous_sample(const THREAD_REF SurfaceInt
 // ---------------------------------------------------------------------------
 // Sample
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfSampleResult
-dielectric_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2, unsigned int fresnelWord)
+DEVICE_FUNC BsdfSampleResult dielectric_sample(const THREAD_REF SurfaceInteraction& si,
+                                               float u1,
+                                               float u2,
+                                               unsigned int fresnelWord)
 {
     BsdfSampleResult result;
 
@@ -65,8 +67,7 @@ dielectric_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2, u
         {
             result.wi = -V;
             result.pdf = 1.0f - proposalFresnel;
-            result.bsdf_over_pdf = si.albedo * ((1.0f - fresnel) / result.pdf) *
-                                   (si.thin_walled ? 1.0f : eta * eta);
+            result.bsdf_over_pdf = si.albedo * ((1.0f - fresnel) / result.pdf) * (si.thin_walled ? 1.0f : eta * eta);
             result.event_type = BSDF_EVENT_SPECULAR_TRANSMISSION;
             return result;
         }
@@ -287,17 +288,17 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
 
         // eta_i * V + eta_t * wi, normalised, oriented to Nf's side -- see
         // refraction_half_vector().
-        InterfaceCosine robustVdotH = makeInterfaceCosine(0.0f);
-        const float3 H = refraction_half_vector(V, wi, eta, Nf, robustVdotH);
+        float viewDotHalf = 0.0f;
+        const float3 H = refraction_half_vector(V, wi, eta, Nf, viewDotHalf);
 
         const float NdotH = dot(Nf, H);
-        const float VdotH = saturate(interfaceCosineValue(robustVdotH));
+        const float VdotH = saturate(viewDotHalf);
         const float LdotH = dot(wi, H);
 
         if (!(NdotH >= 0.0f) || VdotH <= 0.0f)
             return result;
 
-        const float F = fresnel_dielectric(robustVdotH, eta);
+        const float F = fresnel_dielectric(viewDotHalf, eta);
         const float proposalFresnel = discreteFloatLatticeProbability(F);
         const float denom = refraction_residual_length(V, wi, eta);
         const float denomSquared = denom * denom;
@@ -315,8 +316,8 @@ DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& 
         // The same pair dielectric_sample() applies; see the note there.
         const float dwh_dwi = refraction_jacobian(V, wi, eta, LdotH);
         const float pdf_h = ggx_vndf_pdf_half(alpha, Nf, H, NdotV_abs, VdotH);
-        result.pdf = saturating_nonnegative_product(
-            saturating_nonnegative_product(1.0f - proposalFresnel, pdf_h), dwh_dwi);
+        result.pdf =
+            saturating_nonnegative_product(saturating_nonnegative_product(1.0f - proposalFresnel, pdf_h), dwh_dwi);
     }
 
     return result;

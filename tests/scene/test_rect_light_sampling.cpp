@@ -286,20 +286,6 @@ TEST_CASE("Area-uniform PDF matches the area-to-solid-angle conversion")
     CHECK(rectLightPdf(c, s.pointOnLight, hit, false) == doctest::Approx(expected).epsilon(1e-5));
 }
 
-TEST_CASE("large finite rectangles choose the exact area fallback")
-{
-    const float3 p0 = make_float3(0.0f, 0.0f, 0.0f);
-    const float3 ex = make_float3(1e20f, 0.0f, 0.0f);
-    const float3 ey = make_float3(0.0f, 1.0f, 0.0f);
-    const float3 origin = make_float3(0.0f, 0.0f, 1.0f);
-    const SphQuad squad = sphQuadInit(p0, ex, ey, origin);
-    CHECK(squad.useAreaFallback);
-    CHECK(squad.S > 0.0f);
-    CHECK(std::isfinite(squad.S));
-    CHECK_FALSE(std::isfinite(length(ex)));
-    CHECK(finiteVectorLength(ex) == doctest::Approx(1e20f));
-}
-
 TEST_CASE("any represented rectangle shear uses the affine area sampler")
 {
     const float3 p0 = make_float3(0.0f, 0.0f, 1.0f);

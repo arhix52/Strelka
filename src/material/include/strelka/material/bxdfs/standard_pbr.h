@@ -48,7 +48,7 @@ DEVICE_FUNC float diffuse_lobe_scale(const THREAD_REF SurfaceInteraction& si)
     return si.diffuse_faces_away ? 0.0f : 1.0f;
 }
 
-DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, InterfaceCosine v_dot_h, float eta)
+DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, float v_dot_h, float eta)
 {
     const float f = fresnel_dielectric(v_dot_h, eta);
     // A thin-film approximation must not reopen the physically forbidden
@@ -61,19 +61,12 @@ DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si,
     {
         return make_float3(f);
     }
-    const float cosine = interfaceCosineValue(v_dot_h);
     const float3 film =
-        iridescence_fresnel(1.0f, si.iridescence_ior, fabsf(cosine), si.iridescence_thickness, make_float3(f));
+        iridescence_fresnel(1.0f, si.iridescence_ior, fabsf(v_dot_h), si.iridescence_thickness, make_float3(f));
     const float3 result = mix(make_float3(f), film, saturate(si.iridescence));
     return make_float3(saturate(result.x), saturate(result.y), saturate(result.z));
 }
 
-#    if !defined(STRELKA_FAST_FINITE_GPU_MATH) || !STRELKA_FAST_FINITE_GPU_MATH
-DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, float v_dot_h, float eta)
-{
-    return transmission_fresnel(si, makeInterfaceCosine(v_dot_h), eta);
-}
-#    endif
 
 DEVICE_FUNC float transmission_fresnel_probability(float3 filmFresnel)
 {
@@ -232,11 +225,8 @@ struct PbrLobeProbabilities
 
 DEVICE_FUNC PbrLobeProbabilities pbr_lobe_probabilities(const THREAD_REF PbrLobeWeights& w, bool exiting)
 {
-    const float weights[5] = { exiting ? 0.0f : w.diffuse,
-                               w.diffuse_transmission,
-                               exiting ? 0.0f : w.specular,
-                               w.transmission,
-                               exiting ? 0.0f : w.clearcoat };
+    const float weights[5] = { exiting ? 0.0f : w.diffuse, w.diffuse_transmission, exiting ? 0.0f : w.specular,
+                               w.transmission, exiting ? 0.0f : w.clearcoat };
     const float total = exiting ? (w.diffuse_transmission + w.transmission) : w.total;
     unsigned int counts[5] = { 0u, 0u, 0u, 0u, 0u };
     unsigned int countSum = 0u;
@@ -473,8 +463,7 @@ DEVICE_FUNC PbrDeltaReflectionTerms pbr_delta_reflection_terms(const THREAD_REF 
     {
         const float eta = (!exiting || si.thin_walled) ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
         const float3 filmFresnel = transmission_fresnel(si, NdotVAbs, eta);
-        out.mass = out.mass + pTransEff *
-                                       pbr_fresnel_proposal(transmission_fresnel_probability(filmFresnel));
+        out.mass = out.mass + pTransEff * pbr_fresnel_proposal(transmission_fresnel_probability(filmFresnel));
         out.numerator = out.numerator + si.albedo * filmFresnel * transmissionWeight;
     }
 
@@ -617,8 +606,9 @@ DEVICE_FUNC PbrPrepared pbr_prepare_for(const THREAD_REF SurfaceInteraction& si)
 }
 
 DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi);
-DEVICE_FUNC BsdfEvalResult
-standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THREAD_REF PbrPrepared& prep);
+DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction& si,
+                                             float3 wi,
+                                             const THREAD_REF PbrPrepared& prep);
 
 DEVICE_FUNC bool pbr_finish_continuous_sample(const THREAD_REF SurfaceInteraction& si,
                                               float absoluteCosine,
@@ -638,13 +628,12 @@ DEVICE_FUNC bool pbr_finish_continuous_sample(const THREAD_REF SurfaceInteractio
     return true;
 }
 
-DEVICE_FUNC BsdfSampleResult
-standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
-                    float u1,
-                    float u2,
-                    unsigned int lobeWord,
-                    unsigned int fresnelWord,
-                    const THREAD_REF PbrPrepared& prep)
+DEVICE_FUNC BsdfSampleResult standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
+                                                 float u1,
+                                                 float u2,
+                                                 unsigned int lobeWord,
+                                                 unsigned int fresnelWord,
+                                                 const THREAD_REF PbrPrepared& prep)
 {
     BsdfSampleResult result;
     result.bsdf_over_pdf = make_float3(0.0f);
@@ -754,8 +743,8 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
             {
                 if (is_smooth)
                 {
-                    pbr_finish_delta_reflection(si, probabilities, p_trans_eff, N, V, baseSpecularDelta, alpha,
-                                                alpha_cc, F0, result);
+                    pbr_finish_delta_reflection(
+                        si, probabilities, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
                     return result;
                 }
 
@@ -843,8 +832,8 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
 
             if (is_smooth)
             {
-                pbr_finish_delta_reflection(si, probabilities, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc,
-                                            F0, result);
+                pbr_finish_delta_reflection(
+                    si, probabilities, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
             }
             else
             {
@@ -876,8 +865,8 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
                 result.wi = reflect_dir(-V, H);
                 if (is_smooth)
                 {
-                    pbr_finish_delta_reflection(si, probabilities, p_trans_eff, N, V, baseSpecularDelta, alpha,
-                                                alpha_cc, F0, result);
+                    pbr_finish_delta_reflection(
+                        si, probabilities, p_trans_eff, N, V, baseSpecularDelta, alpha, alpha_cc, F0, result);
                 }
                 else
                 {
@@ -946,15 +935,15 @@ DEVICE_FUNC BsdfSampleResult standard_pbr_sample(
 DEVICE_FUNC BsdfSampleResult
 standard_pbr_sample(const THREAD_REF SurfaceInteraction& si, float u1, float u2, float uLobe, float uFresnel)
 {
-    return standard_pbr_sample(
-        si, u1, u2, discreteFloatLatticeWord(uLobe), discreteFloatLatticeWord(uFresnel));
+    return standard_pbr_sample(si, u1, u2, discreteFloatLatticeWord(uLobe), discreteFloatLatticeWord(uFresnel));
 }
 
 // ---------------------------------------------------------------------------
 // Evaluate
 // ---------------------------------------------------------------------------
-DEVICE_FUNC BsdfEvalResult
-standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THREAD_REF PbrPrepared& prep)
+DEVICE_FUNC BsdfEvalResult standard_pbr_eval(const THREAD_REF SurfaceInteraction& si,
+                                             float3 wi,
+                                             const THREAD_REF PbrPrepared& prep)
 {
     BsdfEvalResult result;
     result.bsdf = make_float3(0.0f);
@@ -1099,17 +1088,17 @@ standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THRE
             return result;
 
         // eta_i * V + eta_t * wi, normalised -- see refraction_half_vector().
-        InterfaceCosine robustVdotH = makeInterfaceCosine(0.0f);
-        const float3 H = refraction_half_vector(V, wi, eta, Nf, robustVdotH);
+        float viewDotHalf = 0.0f;
+        const float3 H = refraction_half_vector(V, wi, eta, Nf, viewDotHalf);
 
         const float NdotH = dot(Nf, H);
-        const float VdotH = saturate(interfaceCosineValue(robustVdotH));
+        const float VdotH = saturate(viewDotHalf);
         const float LdotH = dot(wi, H);
 
         if (!(NdotH >= 0.0f) || VdotH <= 0.0f)
             return result;
 
-        const float3 F_film = transmission_fresnel(si, robustVdotH, eta);
+        const float3 F_film = transmission_fresnel(si, viewDotHalf, eta);
         const float sampleFresnel = pbr_fresnel_proposal(transmission_fresnel_probability(F_film));
         const float denom = refraction_residual_length(V, wi, eta);
         const float denomSquared = denom * denom;

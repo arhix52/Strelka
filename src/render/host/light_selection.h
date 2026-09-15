@@ -41,6 +41,11 @@ inline double cleanLightPower(double power)
     return std::isfinite(power) ? std::max(power, 0.0) : 0.0;
 }
 
+inline bool finiteVector(const glm::dvec3& value)
+{
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
 inline double addLightPowers(double firstPower, double secondPower)
 {
     const double first = cleanLightPower(firstPower);
@@ -89,8 +94,7 @@ inline double infiniteLightCrossSection(double sceneExtent)
     // A scene with no usable bounds -- none given, unbounded, or absurd -- keeps
     // the unit sphere the environment proxy has always fallen back to. Every
     // infinite light then loses the same factor, so they still compare.
-    const double radius =
-        std::isfinite(sceneExtent) && sceneExtent > 0.0 && sceneExtent < 1e15 ? 0.5 * sceneExtent : 1.0;
+    const double radius = std::isfinite(sceneExtent) && sceneExtent > 0.0 && sceneExtent < 1e15 ? 0.5 * sceneExtent : 1.0;
     return pi * radius * radius;
 }
 
@@ -147,7 +151,7 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
     const glm::dvec3 packedDirection(light.normal);
     const double packedDirectionLengthSquared = glm::dot(packedDirection, packedDirection);
     const bool hasFiniteDirection = packedDirectionLengthSquared > 0.0 && std::isfinite(packedDirectionLengthSquared);
-    const bool hasFinitePosition = affineVectorIsFinite(make_float3(light.points[1].x, light.points[1].y, light.points[1].z));
+    const bool hasFinitePosition = finiteVector(glm::dvec3(light.points[1]));
     const OrthonormalLightFrame profileFrame =
         makeOrthonormalLightFrame(make_float3(light.points[2].x, light.points[2].y, light.points[2].z),
                                   make_float3(light.points[3].x, light.points[3].y, light.points[3].z),
@@ -160,28 +164,22 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
                            light.points[1].z - light.points[0].z);
         const glm::vec3 e2(light.points[3].x - light.points[0].x, light.points[3].y - light.points[0].y,
                            light.points[3].z - light.points[0].z);
-        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
-            affineSamplePointRangeIsFinite(
-                make_float3(light.points[0].x, light.points[0].y, light.points[0].z),
-                make_float3(e1.x, e1.y, e1.z), make_float3(e2.x, e2.y, e2.z), make_float3(0.0f)) &&
-            inverseFiniteCrossLength(make_float3(e1.x, e1.y, e1.z), make_float3(e2.x, e2.y, e2.z)) > 0.0f)
+        const double area = glm::length(glm::cross(glm::dvec3(e1), glm::dvec3(e2)));
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 && area > 0.0 && std::isfinite(area))
         {
-            measure = pi * glm::length(glm::cross(glm::dvec3(e1.x, e1.y, e1.z), glm::dvec3(e2.x, e2.y, e2.z)));
+            measure = pi * area;
         }
         break;
     }
-    case LIGHT_TYPE_DISC:
-        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 &&
-            affineSamplePointRangeIsFinite(make_float3(light.points[1].x, light.points[1].y, light.points[1].z),
-                                          make_float3(light.points[2].x, light.points[2].y, light.points[2].z),
-                                          make_float3(light.points[3].x, light.points[3].y, light.points[3].z),
-                                          make_float3(0.0f)) &&
-            analyticDiscAreaPdf(make_float3(light.points[2].x, light.points[2].y, light.points[2].z),
-                                make_float3(light.points[3].x, light.points[3].y, light.points[3].z)) > 0.0f)
+    case LIGHT_TYPE_DISC: {
+        const double areaScale = glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
+        if (glm::dot(glm::dvec3(light.normal), glm::dvec3(light.normal)) > 0.0 && areaScale > 0.0 &&
+            std::isfinite(areaScale))
         {
-            measure = pi * pi * glm::length(glm::cross(glm::dvec3(light.points[2]), glm::dvec3(light.points[3])));
+            measure = pi * pi * areaScale;
         }
         break;
+    }
     case LIGHT_TYPE_SPHERE: {
         // Same deterministic equal-solid-angle quadrature as
         // analyticEllipsoidSurfaceArea(), evaluated in host double precision.
@@ -190,18 +188,12 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
         const glm::vec3 deviceAxisX(light.points[0].x, light.points[0].y, light.points[0].z);
         const glm::vec3 deviceAxisY(light.points[2].x, light.points[2].y, light.points[2].z);
         const glm::vec3 deviceAxisZ(light.points[3].x, light.points[3].y, light.points[3].z);
-        if (!analyticEllipsoidIsRepresentable(
-                make_float3(light.points[1].x, light.points[1].y, light.points[1].z),
-                make_float3(deviceAxisX.x, deviceAxisX.y, deviceAxisX.z),
-                make_float3(deviceAxisY.x, deviceAxisY.y, deviceAxisY.z),
-                make_float3(deviceAxisZ.x, deviceAxisZ.y, deviceAxisZ.z)))
-        {
-            break;
-        }
         const glm::dvec3 axisX(deviceAxisX.x, deviceAxisX.y, deviceAxisX.z);
         const glm::dvec3 axisY(deviceAxisY.x, deviceAxisY.y, deviceAxisY.z);
         const glm::dvec3 axisZ(deviceAxisZ.x, deviceAxisZ.y, deviceAxisZ.z);
-        if (!(std::abs(glm::dot(axisX, glm::cross(axisY, axisZ))) > 0.0))
+        const double determinant = glm::dot(axisX, glm::cross(axisY, axisZ));
+        if (!hasFinitePosition || !finiteVector(axisX) || !finiteVector(axisY) || !finiteVector(axisZ) ||
+            !std::isfinite(determinant) || determinant == 0.0)
         {
             break;
         }
