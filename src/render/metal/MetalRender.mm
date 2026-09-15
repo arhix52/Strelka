@@ -3421,7 +3421,7 @@ std::string MetalRender::renderWorkAuditJson() const
     for (size_t i = 0; i < mRenderWorkCommandBuffers.size(); ++i)
     {
         const AuditedCommandBuffer& commandBuffer = mRenderWorkCommandBuffers[i];
-        const metal::CommandBufferAuditSample& counts = commandBuffer.counts;
+        const AuditedCommandBuffer::Counts& counts = commandBuffer.counts;
         commandBuffers += fmt::format(
             "{}{{\"debugId\":{},\"label\":\"{}\",\"creation\":{},\"encoderCreation\":{},"
             "\"dispatch\":{},\"endEncoding\":{},\"commit\":{},\"wait\":{},\"readback\":{}}}",

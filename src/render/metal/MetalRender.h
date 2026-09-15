@@ -17,7 +17,6 @@
 #include "MetalPostProcess.h"
 #include "MetalScenePreparation.h"
 #include <host/scene_stream.h>
-#include <host/render_work_audit.h>
 #include "MetalWavefrontIntegrator.h"
 #include <array>
 #include <atomic>
@@ -325,9 +324,20 @@ private:
 #ifndef NDEBUG
     struct AuditedCommandBuffer
     {
+        struct Counts
+        {
+            uint64_t creations = 0;
+            uint64_t encoderCreations = 0;
+            uint64_t dispatches = 0;
+            uint64_t endEncodings = 0;
+            uint64_t commits = 0;
+            uint64_t waits = 0;
+            uint64_t readbacks = 0;
+        };
+
         uint64_t id = 0;
         const char* label = nullptr;
-        metal::CommandBufferAuditSample counts;
+        Counts counts;
     };
     std::vector<AuditedCommandBuffer> mRenderWorkCommandBuffers;
     uint64_t mNextRenderWorkCommandBufferId = 1;
