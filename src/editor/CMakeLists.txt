@@ -39,22 +39,67 @@ target_compile_definitions(strelka_vendor_file_dialog PRIVATE
     $<TARGET_PROPERTY:imgui::imgui,INTERFACE_COMPILE_DEFINITIONS>
 )
 
-add_executable(StrelkaEditor ${EDITOR_SOURCES})
+if(APPLE)
+    add_executable(StrelkaEditor MACOSX_BUNDLE ${EDITOR_SOURCES})
+else()
+    add_executable(StrelkaEditor ${EDITOR_SOURCES})
+endif()
 strelka_apply_warnings(StrelkaEditor)
 
-# Ship the default docking layout next to the binary. On first run the editor
-# copies it to its own imgui.ini, so a fresh checkout starts with the panels
-# already arranged instead of an empty dockspace.
-add_custom_command(
-    OUTPUT ${OUTPUT_DIRECTORY}/default_layout.ini
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+if(APPLE)
+    # CMake copies files carrying MACOSX_PACKAGE_LOCATION into the built bundle
+    # and keeps those copies up to date. The CLI retains the flat runtime trees
+    # produced by src/shaders and the root MaterialX target.
+    set(STRELKA_EDITOR_METAL_RESOURCES
+        ${OUTPUT_DIRECTORY}/metal/shaders/wavefront.metallib
+        ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib
+        ${OUTPUT_DIRECTORY}/metal/shaders/skinning.metallib
+        ${OUTPUT_DIRECTORY}/metal/shaders/fullScreen.metal
+    )
+    set_source_files_properties(${STRELKA_EDITOR_METAL_RESOURCES} PROPERTIES
+        GENERATED TRUE
+        MACOSX_PACKAGE_LOCATION "Resources/metal/shaders"
+    )
+
+    file(GLOB_RECURSE STRELKA_EDITOR_MATERIALX_RESOURCES
+        CONFIGURE_DEPENDS
+        LIST_DIRECTORIES FALSE
+        "${CMAKE_SOURCE_DIR}/third_party/materialx/libraries/*"
+    )
+    foreach(resource IN LISTS STRELKA_EDITOR_MATERIALX_RESOURCES)
+        file(RELATIVE_PATH relative "${CMAKE_SOURCE_DIR}/third_party/materialx/libraries" "${resource}")
+        get_filename_component(relative_directory "${relative}" DIRECTORY)
+        set_source_files_properties("${resource}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/materialx/libraries/${relative_directory}"
+        )
+    endforeach()
+
+    set(STRELKA_EDITOR_ROOT_RESOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
-        ${OUTPUT_DIRECTORY}/default_layout.ini
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
-    COMMENT "Copying default ImGui layout"
-)
-add_custom_target(strelka_editor_layout ALL DEPENDS ${OUTPUT_DIRECTORY}/default_layout.ini)
-add_dependencies(StrelkaEditor strelka_editor_layout)
+        ${CMAKE_SOURCE_DIR}/LICENSE
+    )
+    set_source_files_properties(${STRELKA_EDITOR_ROOT_RESOURCES} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
+    target_sources(StrelkaEditor PRIVATE
+        ${STRELKA_EDITOR_METAL_RESOURCES}
+        ${STRELKA_EDITOR_MATERIALX_RESOURCES}
+        ${STRELKA_EDITOR_ROOT_RESOURCES}
+    )
+else()
+    # Ship the default docking layout next to the binary. On first run the
+    # editor copies it to imgui.ini.
+    add_custom_command(
+        OUTPUT ${OUTPUT_DIRECTORY}/default_layout.ini
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
+            ${OUTPUT_DIRECTORY}/default_layout.ini
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
+        COMMENT "Copying default ImGui layout"
+    )
+    add_custom_target(strelka_editor_layout ALL DEPENDS ${OUTPUT_DIRECTORY}/default_layout.ini)
+    add_dependencies(StrelkaEditor strelka_editor_layout)
+endif()
 
 set_target_properties(StrelkaEditor PROPERTIES
     LINKER_LANGUAGE CXX
@@ -92,10 +137,8 @@ else()
 endif()
 
 if(APPLE)
-    # Prefix root (not bin/): resolveResourcePath("metal/shaders/...") is relative
-    # to the executable directory.
-    install(TARGETS StrelkaEditor RUNTIME DESTINATION .)
-    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini DESTINATION .)
+    set_target_properties(StrelkaEditor PROPERTIES OUTPUT_NAME Strelka)
+    install(TARGETS StrelkaEditor BUNDLE DESTINATION .)
 else()
     # bin/ and share/strelka, which is where a Linux package puts a program and
     # the things that are not one. resolveResourcePath() looks in

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Install a Release build into dist/Strelka and zip it for distribution.
-# Layout matches the build tree so resolveResourcePath keeps working.
+# Install the macOS app and CLI into dist/Strelka and zip them for distribution.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,6 +21,24 @@ rm -rf "${PREFIX}"
 mkdir -p "$(dirname "${PREFIX}")"
 
 cmake --install "${BUILD}" --prefix "${PREFIX}"
+
+APP="${PREFIX}/Strelka.app"
+if [[ ! -x "${APP}/Contents/MacOS/Strelka" ]]; then
+    echo "error: ${APP} was not installed" >&2
+    exit 1
+fi
+for resource in \
+    "metal/shaders/wavefront.metallib" \
+    "metal/shaders/tonemapper.metallib" \
+    "metal/shaders/skinning.metallib" \
+    "metal/shaders/fullScreen.metal" \
+    "materialx/libraries/stdlib/stdlib_defs.mtlx" \
+    "default_layout.ini"; do
+    if [[ ! -f "${APP}/Contents/Resources/${resource}" ]]; then
+        echo "error: bundle resource missing: ${resource}" >&2
+        exit 1
+    fi
+done
 
 # cmake --install may not refresh LICENSE/README if the root install rules ran
 # against a stale tree; ensure they are present.

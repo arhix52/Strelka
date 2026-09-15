@@ -7,7 +7,7 @@ Two apps ship from a default build:
 
 | Binary | Role |
 |--------|------|
-| `StrelkaEditor` | Interactive ImGui editor |
+| `Strelka.app` | Interactive ImGui editor |
 | `StrelkaCLI` | Headless renderer (EXR/PNG, TOML config) |
 
 Windows/Linux still contain an OptiX/CUDA backend; it is **not** the packaged
@@ -33,7 +33,7 @@ Binaries and runtime assets land in `build/Release/` (or `build/Debug/`):
 
 ```text
 build/Release/
-  StrelkaEditor
+  Strelka.app/
   StrelkaCLI
   unit_tests
   metal/shaders/*.metallib
@@ -44,10 +44,9 @@ Launch from that directory (or from anywhere — assets resolve relative to the
 executable):
 
 ```bash
-cd build/Release
-./StrelkaEditor -s ../../scenes/validation/cornell_box/cornell_box.glb
-./StrelkaCLI ../../scenes/validation/cornell_box/cornell_box.glb -o out.exr -w 512 --height 384 --spp 256
-SPDLOG_LEVEL=debug ./StrelkaCLI ...
+build/Release/Strelka.app/Contents/MacOS/Strelka -s scenes/validation/cornell_box/cornell_box.glb
+build/Release/StrelkaCLI scenes/validation/cornell_box/cornell_box.glb -o out.exr -w 512 --height 384 --spp 256
+SPDLOG_LEVEL=debug build/Release/StrelkaCLI ...
 ```
 
 `StrelkaCLI` accepts a TOML config (`-c` / `--config`); every flag overrides the
@@ -69,10 +68,10 @@ Layout inside the zip (prefix root — same as the build tree for asset paths):
 
 ```text
 Strelka/
-  StrelkaEditor
+  Strelka.app/
   StrelkaCLI
   metal/shaders/*.metallib
-  default_layout.ini
+  materialx/libraries/
   LICENSE
   README.md
 ```

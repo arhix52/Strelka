@@ -5,7 +5,7 @@
             "name": "Launch StrelkaEditor (Debug)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/StrelkaEditor",
+            "program": "${workspaceFolder}/build/Debug/Strelka.app/Contents/MacOS/Strelka",
             "args": ["-s", "${input:sceneFile}"],
             "cwd": "${workspaceFolder}/build/Debug",
             "env": {
@@ -17,7 +17,7 @@
             "name": "Launch StrelkaEditor (Release)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Release/StrelkaEditor",
+            "program": "${workspaceFolder}/build/Release/Strelka.app/Contents/MacOS/Strelka",
             "args": ["-s", "${input:sceneFile}"],
             "cwd": "${workspaceFolder}/build/Release",
             "env": {
@@ -29,7 +29,7 @@
             "name": "Launch StrelkaEditor (Debug + Metal validation)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/StrelkaEditor",
+            "program": "${workspaceFolder}/build/Debug/Strelka.app/Contents/MacOS/Strelka",
             "args": ["-s", "${input:sceneFile}"],
             "cwd": "${workspaceFolder}/build/Debug",
             "env": {

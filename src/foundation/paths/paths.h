@@ -58,6 +58,16 @@ inline const std::filesystem::path& getExecutableDir()
 inline std::string resolveResourcePath(const std::string& relative)
 {
     std::error_code ec;
+#if defined(__APPLE__)
+    // <bundle>.app/Contents/MacOS/<executable> -> Contents/Resources.
+    // The same binary may also be run outside a bundle while developing, so
+    // keep the flat lookup below as a fallback.
+    const std::filesystem::path fromBundle = getExecutableDir().parent_path() / "Resources" / relative;
+    if (std::filesystem::exists(fromBundle, ec))
+    {
+        return fromBundle.string();
+    }
+#endif
     const std::filesystem::path fromExe = getExecutableDir() / relative;
     if (std::filesystem::exists(fromExe, ec))
     {
