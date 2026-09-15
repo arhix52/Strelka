@@ -26,7 +26,9 @@ when missing; details are in [docs/local-conan-packages.md](docs/local-conan-pac
 ## Build
 
 ```bash
-./build.sh Release   # or: ./build.sh Debug
+./build.sh Release   # source-free distribution build
+./build.sh Debug
+./build.sh Profile   # optimized build with private Metal profiling symbols
 ```
 
 The macOS build targets Apple silicon and macOS 26 because the renderer requires
@@ -43,6 +45,11 @@ build/Release/
   metal/shaders/*.metallib
   default_layout.ini
 ```
+
+`Profile` uses Release optimization but writes to `build/Profile/`. The app's
+metallibs contain line information while shader sources and symbols are kept in
+`build/Profile/metal/profiling/*.metallib.dSYM`; that directory is never
+installed. Import those companions in Xcode when correlating a capture.
 
 Launch from that directory (or from anywhere — assets resolve relative to the
 executable):
@@ -67,6 +74,12 @@ After a Release build:
 ./scripts/package_macos.sh
 # -> dist/Strelka-macos-<arch>.zip
 ```
+
+Packaging refuses non-Release and `Profile` builds. It audits the Strelka shader
+directories for embedded source, debug/reflection sections, local source-tree
+paths, and stray `.metal`, `.air`, `.metallibsym`, `.dSYM`, or `.gputrace`
+artifacts. MaterialX's upstream source implementations remain runtime data under
+`materialx/libraries/` and are outside this Strelka-shader check.
 
 Layout inside the zip (prefix root — same as the build tree for asset paths):
 

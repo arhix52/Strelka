@@ -58,12 +58,8 @@ jobs:
       - name: Build Release
         run: ./build.sh Release
 
-      - name: Verify metallibs
-        working-directory: build/Release
-        run: |
-          for lib in wavefront tonemapper skinning; do
-            test -s "metal/shaders/${lib}.metallib"
-          done
+      - name: Audit distribution shaders
+        run: ./scripts/audit_macos_package.sh build/Release/Strelka.app "$GITHUB_WORKSPACE"
 
       - name: Unit tests
         working-directory: build/Release

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 1 ] && [ "$#" -ne 2 ]; then
-    echo "Usage: $0 <build_type> [clean]"
+    echo "Usage: $0 <Debug|Release|Profile> [clean]"
     exit 1
 fi
 
@@ -19,6 +19,27 @@ ucfirst() {
 
 build_type=$(ucfirst "$build_type")
 
+case "$build_type" in
+    Debug)
+        conan_build_type="Debug"
+        metal_profile_sources="OFF"
+        ;;
+    Release)
+        conan_build_type="Release"
+        metal_profile_sources="OFF"
+        ;;
+    Profile)
+        # Keep profiling metadata out of build/Release, which is the only tree
+        # package_macos.sh accepts for distribution.
+        conan_build_type="Release"
+        metal_profile_sources="ON"
+        ;;
+    *)
+        echo "error: build type must be Debug, Release, or Profile" >&2
+        exit 1
+        ;;
+esac
+
 git submodule update --init --recursive
 
 # Pins that conan-center does not publish yet (GLFW, ImGui Metal 4, ImGuizmo).
@@ -27,20 +48,24 @@ git submodule update --init --recursive
 conan install . -c tools.cmake.cmaketoolchain:generator=Ninja \
     -c tools.system.package_manager:mode=install \
     -c tools.system.package_manager:sudo=True \
-    --build=missing --settings=build_type="$build_type"
+    --build=missing --settings=build_type="$conan_build_type"
 
-cd build/"$build_type"
+build_dir="$ROOT/build/$build_type"
+generator_dir="$ROOT/build/$conan_build_type/generators"
+mkdir -p "$build_dir"
+cd "$build_dir"
 
 if [ "$clean_option" == "clean" ]; then
     cmake --build . --target clean
 fi
 
 # shellcheck disable=SC1091
-source ./generators/conanbuild.sh
+source "$generator_dir/conanbuild.sh"
 
 cmake ../.. -G Ninja \
-    -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake \
-    -DCMAKE_BUILD_TYPE="$build_type"
+    -DCMAKE_TOOLCHAIN_FILE="$generator_dir/conan_toolchain.cmake" \
+    -DCMAKE_BUILD_TYPE="$conan_build_type" \
+    -DSTRELKA_METAL_PROFILE_SOURCES="$metal_profile_sources"
 
 cmake --build .
 

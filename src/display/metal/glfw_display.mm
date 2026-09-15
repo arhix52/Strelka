@@ -20,7 +20,6 @@
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <log.h>
 #include <paths.h>
 
@@ -28,20 +27,6 @@ using namespace oka;
 
 namespace
 {
-bool readSourceFile(std::string& str, const std::string& filename)
-{
-    // Try to open file
-    std::ifstream file(filename.c_str(), std::ios::binary);
-    if (file.good())
-    {
-        // Found usable source file
-        std::vector<unsigned char> buffer = std::vector<unsigned char>(std::istreambuf_iterator<char>(file), {});
-        str.assign(buffer.begin(), buffer.end());
-        return true;
-    }
-    return false;
-}
-
 constexpr uint64_t kCapabilityPollFrames = 15;
 
 const char* outputModeName(oka::display_output::OutputMode mode)
@@ -425,22 +410,14 @@ void GlfwDisplay::buildShaders()
 {
     using NS::StringEncoding::UTF8StringEncoding;
 
-    const std::string shaderPath = oka::resolveResourcePath("metal/shaders/fullScreen.metal");
-    std::string shaderSrc;
-    if (!readSourceFile(shaderSrc, shaderPath))
-    {
-        STRELKA_FATAL("Failed to read {} (looked next to the executable and in the working directory)", shaderPath);
-        assert(false);
-        return;
-    }
-
+    const std::string shaderPath = oka::resolveResourcePath("metal/shaders/fullScreen.metallib");
     NS::Error* pError = nullptr;
-    MTL::Library* pLibrary =
-        _pDevice->newLibrary(NS::String::string(shaderSrc.c_str(), UTF8StringEncoding), nullptr, &pError);
+    MTL::Library* pLibrary = _pDevice->newLibrary(NS::String::string(shaderPath.c_str(), UTF8StringEncoding), &pError);
     if (!pLibrary)
     {
-        STRELKA_FATAL("{}", pError->localizedDescription()->utf8String());
+        STRELKA_FATAL("Failed to load {}: {}", shaderPath, pError->localizedDescription()->utf8String());
         assert(false);
+        return;
     }
 
     MTL::Function* pVertexFn = pLibrary->newFunction(NS::String::string("copyVertex", UTF8StringEncoding));

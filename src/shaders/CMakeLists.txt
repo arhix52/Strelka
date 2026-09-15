@@ -175,8 +175,6 @@ if(APPLE)
         -I ${CMAKE_CURRENT_SOURCE_DIR}/metal
     )
 
-    # -gline-tables-only/-frecord-sources keep Metal frame captures usable.
-    #
     # metal3.1 rather than 3.0 for one feature: curve intersection. `curve_data`,
     # `geometry_type::curve` and `intersection_result::curve_parameter` do not
     # exist before it, and hair is the one thing in these scenes that must not be
@@ -195,28 +193,29 @@ if(APPLE)
         list(APPEND METAL_BUILD_FLAGS -ffp-contract=off)
     endif()
     option(STRELKA_METAL_PROFILE_SOURCES
-        "Embed Metal line tables and sources for Shader Profiler captures" OFF)
+        "Generate private Metal symbols and sources for Shader Profiler captures" OFF)
+    set(STRELKA_METAL_PROFILE_BUILD OFF)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR STRELKA_METAL_PROFILE_SOURCES)
-        list(APPEND METAL_BUILD_FLAGS -gline-tables-only -frecord-sources)
+        set(STRELKA_METAL_PROFILE_BUILD ON)
+        # metal-dsymutil moves the recorded source into a private companion below.
+        # Remapping keeps developer-specific roots out of the library that the app loads.
+        list(APPEND METAL_BUILD_FLAGS
+            -gline-tables-only
+            -frecord-sources
+            -fdebug-prefix-map=${CMAKE_SOURCE_DIR}=.
+            -ffile-prefix-map=${CMAKE_SOURCE_DIR}=.
+            -fdebug-prefix-map=${CMAKE_BINARY_DIR}=.
+            -ffile-prefix-map=${CMAKE_BINARY_DIR}=.
+        )
     endif()
 
     set(SHADER_OUTPUT_DIR ${OUTPUT_DIRECTORY}/metal/shaders)
     set(SHADER_AIR_DIR ${CMAKE_CURRENT_BINARY_DIR}/air)
+    set(SHADER_PROFILE_DIR ${OUTPUT_DIRECTORY}/metal/profiling)
     # Keep Clang's Metal module cache inside the build tree. A global cache under
     # the developer's home directory makes hermetic/sandboxed builds fail and
     # lets two unrelated Xcode toolchains poison each other's precompiled modules.
     list(APPEND METAL_BUILD_FLAGS -fmodules-cache-path=${SHADER_AIR_DIR}/module-cache)
-
-    # Copy fullScreen.metal (no compilation needed, loaded at runtime)
-    add_custom_command(
-        OUTPUT ${SHADER_OUTPUT_DIR}/fullScreen.metal
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/metal/fullScreen.metal
-            ${SHADER_OUTPUT_DIR}/fullScreen.metal
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/metal/fullScreen.metal
-        COMMENT "Copying fullScreen.metal"
-    )
 
     # Compile Metal shaders.
     #
@@ -226,42 +225,63 @@ if(APPLE)
     # without it the metallibs silently go stale after a header change or a
     # `git checkout`, and the app runs against shaders that no longer match the
     # host-side struct layouts.
-    foreach(shader wavefront tonemapper skinning)
+    set(STRELKA_METALLIBS)
+    set(STRELKA_METAL_PROFILE_ARTIFACTS)
+    foreach(shader wavefront tonemapper skinning fullScreen)
+        set(metallib ${SHADER_OUTPUT_DIR}/${shader}.metallib)
+        set(shader_source ${CMAKE_CURRENT_SOURCE_DIR}/metal/${shader}.metal)
+        set(shader_outputs ${metallib})
+        set(profile_commands)
+
+        if(STRELKA_METAL_PROFILE_BUILD)
+            set(profile_dsym ${SHADER_PROFILE_DIR}/${shader}.metallib.dSYM)
+            set(profile_symbols ${profile_dsym}/Contents/Resources/DWARF/${shader}.metallib)
+            list(APPEND shader_outputs ${profile_symbols})
+            list(APPEND STRELKA_METAL_PROFILE_ARTIFACTS ${profile_symbols})
+            list(APPEND profile_commands
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_PROFILE_DIR}
+                COMMAND ${CMAKE_COMMAND} -E remove_directory ${profile_dsym}
+                COMMAND xcrun metal-dsymutil --remove-source -o ${profile_dsym} ${metallib}
+            )
+        endif()
+
         add_custom_command(
-            OUTPUT ${SHADER_OUTPUT_DIR}/${shader}.metallib
+            OUTPUT ${shader_outputs}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_AIR_DIR}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_AIR_DIR}/module-cache
             COMMAND xcrun -sdk macosx metal ${METAL_BUILD_FLAGS}
                 ${METAL_INCLUDE_FLAGS}
                 -MD -MF ${SHADER_AIR_DIR}/${shader}.d
-                -MT ${SHADER_OUTPUT_DIR}/${shader}.metallib
-                -c ${CMAKE_CURRENT_SOURCE_DIR}/metal/${shader}.metal
+                -MT ${metallib}
+                -c ${shader_source}
                 -o ${SHADER_AIR_DIR}/${shader}.air
             COMMAND xcrun -sdk macosx metallib
                 ${SHADER_AIR_DIR}/${shader}.air
-                -o ${SHADER_OUTPUT_DIR}/${shader}.metallib
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/metal/${shader}.metal
+                -o ${metallib}
+            ${profile_commands}
+            DEPENDS ${shader_source}
             DEPFILE ${SHADER_AIR_DIR}/${shader}.d
             COMMENT "Compiling ${shader}.metal"
+            COMMAND_EXPAND_LISTS
             VERBATIM
         )
+        list(APPEND STRELKA_METALLIBS ${metallib})
     endforeach()
 
-    add_custom_target(strelka_shaders ALL
-        DEPENDS
-            ${SHADER_OUTPUT_DIR}/wavefront.metallib
-            ${SHADER_OUTPUT_DIR}/tonemapper.metallib
-            ${SHADER_OUTPUT_DIR}/skinning.metallib
-            ${SHADER_OUTPUT_DIR}/fullScreen.metal
-    )
+    if(STRELKA_METAL_PROFILE_BUILD)
+        add_custom_target(strelka_shaders ALL
+            COMMAND ${CMAKE_COMMAND} -E rm -f ${SHADER_OUTPUT_DIR}/fullScreen.metal
+            DEPENDS ${STRELKA_METALLIBS} ${STRELKA_METAL_PROFILE_ARTIFACTS}
+        )
+    else()
+        add_custom_target(strelka_shaders ALL
+            COMMAND ${CMAKE_COMMAND} -E rm -f ${SHADER_OUTPUT_DIR}/fullScreen.metal
+            COMMAND ${CMAKE_COMMAND} -E remove_directory ${SHADER_PROFILE_DIR}
+            DEPENDS ${STRELKA_METALLIBS}
+        )
+    endif()
 
     # Same layout as the build tree: metal/shaders next to the installed binaries.
-    install(FILES
-        ${SHADER_OUTPUT_DIR}/wavefront.metallib
-        ${SHADER_OUTPUT_DIR}/tonemapper.metallib
-        ${SHADER_OUTPUT_DIR}/skinning.metallib
-        ${SHADER_OUTPUT_DIR}/fullScreen.metal
-        DESTINATION metal/shaders
-    )
+    install(FILES ${STRELKA_METALLIBS} DESTINATION metal/shaders)
 endif()

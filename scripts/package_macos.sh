@@ -16,6 +16,18 @@ if [[ ! -d "${BUILD}/metal/shaders" ]]; then
     echo "error: ${BUILD}/metal/shaders missing — Metal shaders were not built" >&2
     exit 1
 fi
+if [[ ! -f "${BUILD}/CMakeCache.txt" ]]; then
+    echo "error: ${BUILD}/CMakeCache.txt missing — configure a Release build first" >&2
+    exit 1
+fi
+if ! grep -q '^CMAKE_BUILD_TYPE:STRING=Release$' "${BUILD}/CMakeCache.txt"; then
+    echo "error: refusing to package a non-Release build; run ./build.sh Release" >&2
+    exit 1
+fi
+if grep -q '^STRELKA_METAL_PROFILE_SOURCES:BOOL=ON$' "${BUILD}/CMakeCache.txt"; then
+    echo "error: refusing to package a Metal profiling build; run ./build.sh Release" >&2
+    exit 1
+fi
 
 rm -rf "${PREFIX}"
 mkdir -p "$(dirname "${PREFIX}")"
@@ -35,7 +47,7 @@ for resource in \
     "metal/shaders/wavefront.metallib" \
     "metal/shaders/tonemapper.metallib" \
     "metal/shaders/skinning.metallib" \
-    "metal/shaders/fullScreen.metal" \
+    "metal/shaders/fullScreen.metallib" \
     "materialx/libraries/stdlib/stdlib_defs.mtlx" \
     "Strelka.icns" \
     "default_layout.ini"; do
@@ -44,6 +56,8 @@ for resource in \
         exit 1
     fi
 done
+
+"${ROOT}/scripts/audit_macos_package.sh" "${PREFIX}" "${ROOT}"
 
 # cmake --install may not refresh LICENSE/README if the root install rules ran
 # against a stale tree; ensure they are present.

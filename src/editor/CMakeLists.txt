@@ -54,7 +54,7 @@ if(APPLE)
         ${OUTPUT_DIRECTORY}/metal/shaders/wavefront.metallib
         ${OUTPUT_DIRECTORY}/metal/shaders/tonemapper.metallib
         ${OUTPUT_DIRECTORY}/metal/shaders/skinning.metallib
-        ${OUTPUT_DIRECTORY}/metal/shaders/fullScreen.metal
+        ${OUTPUT_DIRECTORY}/metal/shaders/fullScreen.metallib
     )
     set_source_files_properties(${STRELKA_EDITOR_METAL_RESOURCES} PROPERTIES
         GENERATED TRUE
@@ -86,6 +86,12 @@ if(APPLE)
         ${STRELKA_EDITOR_METAL_RESOURCES}
         ${STRELKA_EDITOR_MATERIALX_RESOURCES}
         ${STRELKA_EDITOR_ROOT_RESOURCES}
+    )
+    # Remove the resource left by builds from before fullScreen became a metallib.
+    add_custom_command(TARGET StrelkaEditor POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -f
+            $<TARGET_BUNDLE_CONTENT_DIR:StrelkaEditor>/Resources/metal/shaders/fullScreen.metal
+        VERBATIM
     )
 else()
     # Ship the default docking layout next to the binary. On first run the
