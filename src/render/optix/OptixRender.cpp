@@ -3374,12 +3374,7 @@ void OptiXRender::render(Buffer* output)
     params.materialRayTmin = settings.getAs<float>("render/pt/dev/materialRayTmin");
     params.misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
     params.volumeModel = settings.getAs<uint32_t>("render/material/volumeModel");
-    // A kill switch on top of the capability: reordering cannot change an
-    // image, so the only reason to turn it off on hardware that has it is to
-    // measure what it is worth.
-    params.enableShaderReorder =
-        mShaderReorderSupported &&
-        (!settings.contains("render/pt/shaderReorder") || settings.getAs<bool>("render/pt/shaderReorder"));
+    params.enableShaderReorder = mShaderReorderSupported;
 
     const uint32_t risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
     const uint32_t estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
