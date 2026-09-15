@@ -13,9 +13,16 @@ set(FOUNDATION_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/settings/settings.h
     ${CMAKE_CURRENT_SOURCE_DIR}/env/env.h
     ${CMAKE_CURRENT_SOURCE_DIR}/paths/paths.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/paths/application_paths.h
     ${CMAKE_CURRENT_SOURCE_DIR}/progress/loadprogress.h
     ${CMAKE_CURRENT_SOURCE_DIR}/memory/hugepages.h
 )
+
+if(APPLE)
+    list(APPEND FOUNDATION_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/paths/application_paths_apple.mm)
+else()
+    list(APPEND FOUNDATION_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/paths/application_paths.cpp)
+endif()
 
 add_library(strelka_foundation STATIC ${FOUNDATION_SOURCES})
 strelka_apply_warnings(strelka_foundation)
@@ -35,3 +42,7 @@ target_link_libraries(strelka_foundation
         spdlog::spdlog
         glm::glm
 )
+
+if(APPLE)
+    target_link_libraries(strelka_foundation PRIVATE "-framework Foundation")
+endif()

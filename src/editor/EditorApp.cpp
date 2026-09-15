@@ -1,5 +1,7 @@
 #include "EditorApp.h"
 
+#include <application_paths.h>
+
 #include "editor_camera_exposure.h"
 #include "editor_denoiser_ui.h"
 #include "editor_frame_budget.h"
@@ -83,9 +85,7 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_cameraController = std::make_unique<CameraController>(m_scene->getCamera(m_selectedCamera), true);
     m_display->setInputHandler(m_cameraController.get());
 
-    // Same directory as imgui.ini: next to the binary, so the working set
-    // survives a rebuild and does not depend on which directory launched us.
-    m_recentScenes = editor_document::loadRecentScenes(getExecutableDir() / "recent_scenes.txt");
+    m_recentScenes = editor_document::loadRecentScenes(applicationSupportDirectory() / "recent_scenes.txt");
 
     if (sceneFile.empty())
     {
@@ -290,7 +290,10 @@ void EditorApp::rememberRecentScene(const std::string& sceneFile)
 
 void EditorApp::persistRecentScenes()
 {
-    if (!editor_document::saveRecentScenes(getExecutableDir() / "recent_scenes.txt", m_recentScenes))
+    const std::filesystem::path supportDirectory = applicationSupportDirectory();
+    std::error_code ec;
+    std::filesystem::create_directories(supportDirectory, ec);
+    if (ec || !editor_document::saveRecentScenes(supportDirectory / "recent_scenes.txt", m_recentScenes))
     {
         STRELKA_WARNING("Could not write recent scenes list");
     }

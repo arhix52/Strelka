@@ -1,6 +1,7 @@
 #pragma once
 
 #include <log.h>
+#include <application_paths.h>
 #include <spdlog/fmt/fmt.h>
 #include <filesystem>
 #include <functional>
@@ -118,8 +119,7 @@ inline void seedCommonRenderSettings(SettingsManager& settings)
     settings.setAs<bool>("render/pt/sharcReportOccupancy", false);
     // Cache the finished downscaled, mipped, compressed textures between runs.
     settings.setAs<bool>("render/texture/compress", true);
-    settings.setAs<std::string>(
-        "render/texture/cachePath", (std::filesystem::temp_directory_path() / "strelka_texcache").string());
+    settings.setAs<std::string>("render/texture/cachePath", (applicationCacheDirectory() / "textures").string());
     settings.setAs<bool>("render/validate/analyticLights", true);
     settings.setAs<uint32_t>("render/pt/misHeuristic", 0);
     settings.setAs<bool>("render/pt/restirDIEnabled", false);

@@ -9,6 +9,7 @@ find_package(glfw3 REQUIRED)
 add_executable(unit_tests
     ${CMAKE_SOURCE_DIR}/src/display/src/output_probe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/foundation/test_env.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/foundation/test_paths.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_bsdf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_energy_conservation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_anisotropy.cpp

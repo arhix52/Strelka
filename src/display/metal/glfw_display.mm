@@ -16,6 +16,7 @@
 #import <CoreGraphics/CGColorSpace.h>
 
 #include <algorithm>
+#include <application_paths.h>
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
@@ -109,8 +110,10 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     // would otherwise slide across the screen as the user works in it.
     io.ConfigWindowsMoveFromTitleBarOnly = true;
 
-    mIniPath = (oka::getExecutableDir() / "imgui.ini").string();
     std::error_code ec;
+    const std::filesystem::path supportDirectory = oka::applicationSupportDirectory();
+    std::filesystem::create_directories(supportDirectory, ec);
+    mIniPath = (supportDirectory / "imgui.ini").string();
     if (!std::filesystem::exists(mIniPath, ec))
     {
         const std::string defaultLayout = oka::resolveResourcePath("default_layout.ini");

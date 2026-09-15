@@ -1,37 +1,14 @@
 #include "logmanager.h"
 
+#include <application_paths.h>
+
 #include <spdlog/spdlog.h>
 #include <spdlog/cfg/env.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
-#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <vector>
-
-namespace
-{
-
-/// Where strelka.log may go, best first.
-std::vector<std::filesystem::path> logFileCandidates()
-{
-    std::vector<std::filesystem::path> candidates;
-    candidates.emplace_back("strelka.log");
-
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    if (const char* stateHome = std::getenv("XDG_STATE_HOME"); stateHome != nullptr && *stateHome != '\0')
-    {
-        candidates.emplace_back(std::filesystem::path(stateHome) / "strelka" / "strelka.log");
-    }
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    else if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
-    {
-        candidates.emplace_back(std::filesystem::path(home) / ".local" / "state" / "strelka" / "strelka.log");
-    }
-    return candidates;
-}
-
-} // namespace
 
 oka::Logmanager::Logmanager()
 {
@@ -52,23 +29,15 @@ void oka::Logmanager::initialize()
         auto consolesink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         std::vector<spdlog::sink_ptr> sinks = { consolesink };
 
-        for (const std::filesystem::path& candidate : logFileCandidates())
+        try
         {
-            try
-            {
-                std::error_code ec;
-                if (candidate.has_parent_path())
-                {
-                    std::filesystem::create_directories(candidate.parent_path(), ec);
-                }
-                sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(candidate.string()));
-                break;
-            }
-            // NOLINTNEXTLINE(bugprone-empty-catch)
-            catch (const spdlog::spdlog_ex&)
-            {
-                // Next candidate; the console sink already holds the session.
-            }
+            const std::filesystem::path logDirectory = applicationLogDirectory();
+            std::filesystem::create_directories(logDirectory);
+            sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>((logDirectory / "strelka.log").string()));
+        }
+        // NOLINTNEXTLINE(bugprone-empty-catch)
+        catch (const std::exception&)
+        {
         }
 
         logger = std::make_shared<spdlog::logger>("Strelka", sinks.begin(), sinks.end());
