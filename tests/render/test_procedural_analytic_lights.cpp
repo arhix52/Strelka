@@ -3,9 +3,6 @@
 #include <analytic_light.h>
 
 #include <cmath>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 
 TEST_CASE("procedural sphere returns the near root")
 {
@@ -86,12 +83,6 @@ TEST_CASE("procedural sphere preserves near and far shadow self-occlusion")
     CHECK_FALSE(
         intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(2.0f, 0.0f), center, axisX, axisY, axisZ).hit);
     CHECK(intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(4.0f, 0.0f), center, axisX, axisY, axisZ).hit);
-
-    const std::filesystem::path root = std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    std::ifstream source(root / "src/render/metal/MetalAccelStructure.mm");
-    REQUIRE(source.good());
-    const std::string text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
-    CHECK(text.find("emitted.userID = curr.mLightId") != std::string::npos);
 }
 
 

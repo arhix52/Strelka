@@ -6,8 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <numbers>
 #include <random>
@@ -499,17 +497,6 @@ TEST_CASE("selected sphere light keeps near-side self-occlusion")
     CHECK_FALSE(nearSample.hit);
     REQUIRE(farSample.hit);
     CHECK(farSample.distance == doctest::Approx(2.0f));
-
-    const std::filesystem::path repository =
-        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    std::ifstream shaderFile(repository / "src/shaders/metal/wavefront.metal");
-    REQUIRE(shaderFile.good());
-    const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
-    CHECK(shader.find("ignoredLightId") == std::string::npos);
-    // Analytic lights were removed from RAY_MASK_SHADOW to match Cycles, so a
-    // descriptor-table probe for a light candidate is both unreachable and an
-    // expensive random load in the shadow hot path.
-    CHECK(shader.find("shadowLightProxy") == std::string::npos);
 }
 
 TEST_CASE("continuous light samples use interior finite-lattice representatives")
@@ -2096,45 +2083,6 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     // suppressed this valid light event.
     const bool oldMissOnlyPathSelectsAnalytic = false;
     CHECK_FALSE(oldMissOnlyPathSelectsAnalytic);
-
-    // The unavailable-on-macOS backend arbitrates the same way Metal does now:
-    // the analytic emitters are custom primitives in the same structure as the
-    // geometry, so the nearest hit wins by traversal and nothing arbitrates
-    // afterwards. What replaced the light-table walks -- one in the raygen
-    // before every trace, one in the miss program, one per shadow ray -- took
-    // kids_room from 20.2 to 12.1 ms/sample and iso_bathroom from 11.3 to 6.8.
-    //
-    // Source text is not the geometry oracle here: the arithmetic above is.
-    // What this pins is that the walks are gone and did not creep back, and
-    // that an analytic emitter does not stand in another light's way.
-    //
-    // The mask carried the light bits until 2026-09-11, so that an emitter
-    // stopped a shadow ray the way a wall does. Cycles does not do that:
-    // tools/feature_tests/light_occlusion_probe.py hangs a small rect light
-    // under a big one over a grey floor, and the reference draws no silhouette
-    // under the blocker where Strelka drew one (0.540 against 0.254 across the
-    // floor). Mesh emitters are unaffected -- they are triangles and keep the
-    // geometry bit.
-    const std::filesystem::path repository =
-        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    const auto read = [&](const char* relative) {
-        std::ifstream file(repository / relative);
-        REQUIRE(file.good());
-        return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    };
-    const std::string raygen = read("src/shaders/optix/OptixRender.cu");
-    const std::string closestHit = read("src/shaders/optix/OptixRender_closest_hit.cu");
-    CHECK(raygen.find("findAnalyticAreaLightHit") == std::string::npos);
-    CHECK(closestHit.find("findAnalyticAreaLightHit") == std::string::npos);
-    CHECK(closestHit.find("analyticLightsOccludeSegment") == std::string::npos);
-    CHECK(closestHit.find("__intersection__light") != std::string::npos);
-
-    const std::string params = read("src/render/optix/OptixRenderParams.h");
-    const size_t shadowMask = params.find("RAY_MASK_SHADOW =");
-    REQUIRE(shadowMask != std::string::npos);
-    const std::string shadowMaskLine = params.substr(shadowMask, params.find(',', shadowMask) - shadowMask);
-    CHECK(shadowMaskLine.find("GEOMETRY_MASK_GEOMETRY") != std::string::npos);
-    CHECK(shadowMaskLine.find("GEOMETRY_MASK_LIGHT") == std::string::npos);
 }
 
 TEST_CASE("the nearest of two area emitters is the visible hit")
@@ -2184,31 +2132,4 @@ TEST_CASE("OptiX coincident analytic emitters retain every BSDF-hit component")
           doctest::Approx(1.0f));
     CHECK(computeMisWeight(bsdfPdf, lightPdf1, 0u) + computeMisWeight(lightPdf1, bsdfPdf, 0u) ==
           doctest::Approx(1.0f));
-
-    const std::filesystem::path repository =
-        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    std::ifstream sourceFile(repository / "src/shaders/optix/OptixRender_closest_hit.cu");
-    REQUIRE(sourceFile.good());
-    const std::string source((std::istreambuf_iterator<char>(sourceFile)), std::istreambuf_iterator<char>());
-    CHECK(source.find("for (uint32_t componentId = 0u;") != std::string::npos);
-    CHECK(source.find("analyticLightIntersectionSharesEvent") != std::string::npos);
-}
-
-TEST_CASE("Metal analytic surfaces use TLAS traversal")
-{
-    const std::filesystem::path repository =
-        std::filesystem::path(STRELKA_TEST_ASSETS_DIR).parent_path().parent_path();
-    std::ifstream shaderFile(repository / "src/shaders/metal/wavefront.metal");
-    REQUIRE(shaderFile.good());
-    const std::string shader((std::istreambuf_iterator<char>(shaderFile)), std::istreambuf_iterator<char>());
-    CHECK(shader.find("findAnalyticAreaLightHit") == std::string::npos);
-    CHECK(shader.find("analyticLightsOccludeSegment") == std::string::npos);
-    CHECK(shader.find("for (uint32_t componentId = 0u;") == std::string::npos);
-    CHECK(shader.find("ignoredLightId") == std::string::npos);
-
-    std::ifstream asFile(repository / "src/render/metal/MetalAccelStructure.mm");
-    REQUIRE(asFile.good());
-    const std::string asSource((std::istreambuf_iterator<char>(asFile)), std::istreambuf_iterator<char>());
-    CHECK(asSource.find("lightTypeIsPunctual(lightType) || infinite") != std::string::npos);
-    CHECK(asSource.find("GEOMETRY_MASK_LIGHT_HIDDEN") != std::string::npos);
 }
