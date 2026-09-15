@@ -564,7 +564,6 @@ void EditorApp::loadSettings()
     {
         m_settingsManager->setAs<bool>("render/pt/denoise", envBool("STRELKA_DENOISE", false));
     }
-    m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/guidePrimaryHit", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", envUint("STRELKA_UPSCALE_MODE", 0) != 0 ? 1u : 0u);

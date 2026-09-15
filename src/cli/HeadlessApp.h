@@ -54,9 +54,6 @@ struct RenderConfig
     std::string capturePath; // --capture: one steady-state frame to a .gputrace
     bool upscale = false;
     float upscaleFactor = 0.5f;
-    // Retained for config compatibility. No backend currently consumes it; the
-    // CLI warns instead of silently claiming that ray sorting is enabled.
-    bool sortRays = false;
     bool textureLod = false;
     // Take the denoiser's material guides at the primary hit instead of walking
     // to the first rough surface. See Uniforms::guidePrimaryHit.
