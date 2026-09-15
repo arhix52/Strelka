@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
-# Everything CI would run on Linux, if Linux had CI.
-#
-# It does not, and that is not an oversight to be fixed with a workflow file: the
-# unit suite links strelka_display, which only exists when the editor is built,
-# which on Linux pulls in the OptiX backend -- so a hosted runner cannot run any
-# of this without the OptiX SDK headers, and NVIDIA does not permit
-# redistributing them. Rendering needs a GPU on top of that.
-#
-# The cost of having no such gate is on record: the OptiX device code did not
-# compile for months over a single undeclared identifier, and nothing said so.
-# Until a self-hosted runner exists, this script is the gate -- run it before
-# pushing anything that touches src/render/optix, src/shaders/optix, or a header
-# shared with them.
+# Self-hosted Linux gate for OptiX device code and GPU rendering. Run it before
+# pushing changes to the OptiX backend or shared shader headers.
 #
 #   tools/ci/linux_check.sh              # build + unit tests + smokes
 #   tools/ci/linux_check.sh --ladder     # and the full parity ladder
