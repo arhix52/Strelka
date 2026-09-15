@@ -4,8 +4,10 @@ find_package(doctest REQUIRED)
 find_package(glm REQUIRED)
 find_package(imgui REQUIRED)
 find_package(imguizmo REQUIRED)
+find_package(glfw3 REQUIRED)
 
 add_executable(unit_tests
+    ${CMAKE_SOURCE_DIR}/src/display/src/output_probe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/foundation/test_env.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_bsdf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_energy_conservation.cpp
@@ -137,6 +139,9 @@ target_compile_options(unit_tests PRIVATE
 
 target_include_directories(unit_tests
     PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/display/include
+        ${CMAKE_SOURCE_DIR}/src/render
+        ${CMAKE_SOURCE_DIR}/src/render/include
         ${CMAKE_SOURCE_DIR}/src/render/metal
         # Deliberately CUDA-free headers only, so the logic they hold can be
         # tested on a machine without a GPU: optix_denoise_plan.h (the denoiser's
@@ -150,15 +155,19 @@ target_include_directories(unit_tests
         ${CMAKE_SOURCE_DIR}/src/shaders/optix
 )
 
-# strelka_sceneloader PUBLIC-links strelka_scene and strelka_display PUBLIC-links
-# imgui and imguizmo, so naming any of them again here only put the archive on
-# the link line twice.
+target_include_directories(unit_tests
+    SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/shaders/common
+)
+
 target_link_libraries(unit_tests
     PRIVATE
         doctest::doctest
         strelka_material
         strelka_sceneloader
-        strelka_display
+        imgui::imgui
+        imguizmo::imguizmo
+        glfw
         glm::glm
 )
 
@@ -174,6 +183,20 @@ target_compile_definitions(unit_tests
 )
 
 add_test(NAME unit_tests COMMAND unit_tests)
+
+if(APPLE AND TARGET strelka_render)
+    add_executable(metal_projector_integration
+        ${CMAKE_CURRENT_SOURCE_DIR}/render/test_projector_metal.cpp
+    )
+    strelka_apply_warnings(metal_projector_integration)
+    target_include_directories(metal_projector_integration
+        SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/third_party/metal_cpp
+    )
+    target_link_libraries(metal_projector_integration
+        PRIVATE doctest::doctest strelka_render
+    )
+    add_test(NAME metal_projector_integration COMMAND metal_projector_integration)
+endif()
 
 if(LINUX AND TARGET strelka_display)
     add_executable(vulkan_cuda_interop_smoke

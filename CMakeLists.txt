@@ -126,7 +126,7 @@ add_subdirectory(src/material)
 add_subdirectory(src/sceneloader)
 
 # Render + Shaders require CUDA/OptiX on Linux/Win, Metal on macOS
-if(STRELKA_BUILD_EDITOR OR STRELKA_BUILD_CLI OR STRELKA_BUILD_TESTS)
+if(STRELKA_BUILD_EDITOR OR STRELKA_BUILD_CLI)
     add_subdirectory(src/render)
     add_subdirectory(src/shaders)
 endif()
