@@ -77,6 +77,7 @@ if(APPLE)
     set(STRELKA_EDITOR_ROOT_RESOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/default_layout.ini
         ${CMAKE_SOURCE_DIR}/LICENSE
+        ${CMAKE_SOURCE_DIR}/resources/macos/Strelka.icns
     )
     set_source_files_properties(${STRELKA_EDITOR_ROOT_RESOURCES} PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources"
@@ -137,7 +138,16 @@ else()
 endif()
 
 if(APPLE)
-    set_target_properties(StrelkaEditor PROPERTIES OUTPUT_NAME Strelka)
+    set_target_properties(StrelkaEditor PROPERTIES
+        OUTPUT_NAME Strelka
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/resources/macos/Info.plist.in
+        MACOSX_BUNDLE_BUNDLE_NAME Strelka
+        MACOSX_BUNDLE_GUI_IDENTIFIER ${STRELKA_BUNDLE_IDENTIFIER}
+        MACOSX_BUNDLE_ICON_FILE Strelka.icns
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${STRELKA_MARKETING_VERSION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${STRELKA_BUILD_NUMBER}
+        MACOSX_BUNDLE_COPYRIGHT "Copyright © 2024-2026 Strelka contributors"
+    )
     install(TARGETS StrelkaEditor BUNDLE DESTINATION .)
 else()
     # bin/ and share/strelka, which is where a Linux package puts a program and

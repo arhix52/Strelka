@@ -29,6 +29,10 @@ when missing; details are in [docs/local-conan-packages.md](docs/local-conan-pac
 ./build.sh Release   # or: ./build.sh Debug
 ```
 
+The macOS build targets Apple silicon and macOS 26 because the renderer requires
+Metal 4. Release identity can be overridden with `STRELKA_MARKETING_VERSION`,
+`STRELKA_BUILD_NUMBER`, and `STRELKA_BUNDLE_IDENTIFIER` CMake cache variables.
+
 Binaries and runtime assets land in `build/Release/` (or `build/Debug/`):
 
 ```text

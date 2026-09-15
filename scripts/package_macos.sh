@@ -27,12 +27,17 @@ if [[ ! -x "${APP}/Contents/MacOS/Strelka" ]]; then
     echo "error: ${APP} was not installed" >&2
     exit 1
 fi
+if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist")" == "" ]]; then
+    echo "error: bundle identifier missing" >&2
+    exit 1
+fi
 for resource in \
     "metal/shaders/wavefront.metallib" \
     "metal/shaders/tonemapper.metallib" \
     "metal/shaders/skinning.metallib" \
     "metal/shaders/fullScreen.metal" \
     "materialx/libraries/stdlib/stdlib_defs.mtlx" \
+    "Strelka.icns" \
     "default_layout.ini"; do
     if [[ ! -f "${APP}/Contents/Resources/${resource}" ]]; then
         echo "error: bundle resource missing: ${resource}" >&2

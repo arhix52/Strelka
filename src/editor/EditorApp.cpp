@@ -151,7 +151,8 @@ void EditorApp::drawAboutModal()
         ImGui::Text("Strelka");
         ImGui::TextDisabled("GPU path tracer for macOS (Metal)");
         ImGui::Spacing();
-        ImGui::Text("Version %s", STRELKA_VERSION);
+        ImGui::Text("Version %s (%s)", STRELKA_MARKETING_VERSION, STRELKA_BUILD_NUMBER);
+        ImGui::TextDisabled("Revision %s", STRELKA_VERSION);
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
@@ -159,7 +160,8 @@ void EditorApp::drawAboutModal()
         // this rather than the user retyping a version string by hand.
         if (ImGui::Button("Copy Version Info", ImVec2(160, 0)))
         {
-            const std::string info = fmt::format("Strelka {} (macOS)", STRELKA_VERSION);
+            const std::string info = fmt::format("Strelka {} ({}, revision {}; macOS)", STRELKA_MARKETING_VERSION,
+                                                 STRELKA_BUILD_NUMBER, STRELKA_VERSION);
             ImGui::SetClipboardText(info.c_str());
         }
         ImGui::SameLine();

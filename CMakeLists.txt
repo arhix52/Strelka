@@ -1,5 +1,20 @@
 cmake_minimum_required(VERSION 3.22)
-project(Strelka LANGUAGES CXX)
+
+set(STRELKA_MARKETING_VERSION "0.1.0" CACHE STRING "User-visible Strelka version")
+set(STRELKA_BUILD_NUMBER "" CACHE STRING "App Store build number; defaults to the Git commit count")
+set(STRELKA_BUNDLE_IDENTIFIER "io.github.arhix52.Strelka" CACHE STRING "macOS bundle identifier")
+
+project(Strelka VERSION ${STRELKA_MARKETING_VERSION} LANGUAGES CXX)
+
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    # Metal 4 is the renderer's submission API, so macOS 26 is a real runtime
+    # requirement rather than an SDK-default accident.
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum supported macOS version" FORCE)
+endif()
+
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Supported macOS architectures" FORCE)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
