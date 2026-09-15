@@ -21,13 +21,6 @@ Camera makeYawedCamera(float yawDegrees)
 
 } // namespace
 
-// The shaders reconstruct the camera basis from viewToWorld to place the lens
-// sample and to measure the focus distance (see generateCameraRay in
-// shading_common.h). glm and Metal both store columns, so the basis is the matrix
-// *columns*; reading the rows instead transposes the rotation, and the depth of
-// field that comes out of it is not merely skewed -- past 45 degrees of yaw the
-// forward axis it derives is orthogonal to the ray, the focus distance divides by
-// zero, and the aperture stops doing anything at all.
 TEST_CASE("Camera basis lives in the columns of viewToWorld")
 {
     for (const float yaw : { 0.0f, 30.0f, 45.0f, 90.0f, 145.0f })
@@ -47,10 +40,6 @@ TEST_CASE("Camera basis lives in the columns of viewToWorld")
     }
 }
 
-// What the transposed read produced, stated as a fact rather than a warning: a
-// rotated camera's rows are a different basis, and a ray down the view axis is
-// perpendicular to the forward axis they yield at 45 degrees. That zero is what
-// silently switched depth of field off.
 TEST_CASE("Rows of viewToWorld are not the camera basis for a rotated camera")
 {
     const Camera cam = makeYawedCamera(45.0f);

@@ -33,10 +33,6 @@ std::string humanBytes(size_t bytes)
     return fmt::format("{:.0f} KB", b / 1024.0);
 }
 
-// Drawn here rather than pulled in with ImPlot. ImPlot has PlotPieChart and is
-// the usual answer, but its released recipes target ImGui 1.90 and this project
-// is on 1.92 with the new texture API -- a dependency that may or may not build,
-// for something the draw list does in twenty lines.
 void drawPie(const std::vector<Render::MemoryReport::Entry>& entries, size_t total, float radius)
 {
     ImDrawList* draw = ImGui::GetWindowDrawList();

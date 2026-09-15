@@ -12,11 +12,6 @@ constexpr Geometry kAll[] = { Geometry::StaticMesh, Geometry::SkinnedMesh, Geome
 
 TEST_CASE("an update uses the flags its build used")
 {
-    // The defect this table exists to prevent: the instance structure was built
-    // with PREFER_FAST_TRACE | ALLOW_COMPACTION | ALLOW_UPDATE and then refit
-    // with PREFER_FAST_BUILD | ALLOW_UPDATE, and a skinned mesh did the same.
-    // optixAccelBuild reads an update's output buffer as the result of a full
-    // build with the flags it is handed.
     for (const Geometry g : kAll)
     {
         CHECK(updateFlags(g) == buildFlags(g));

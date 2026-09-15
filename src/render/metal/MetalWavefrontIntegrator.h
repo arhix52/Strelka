@@ -86,11 +86,6 @@ struct IntegratorSceneBindings
     MTL::Buffer* indexBuffer = nullptr;
     MTL::Buffer* prevFrameVertexBuffer = nullptr;
     MTL::Buffer* prevFrameInstanceBuffer = nullptr;
-    /// Stands in for an absent optional buffer. Argument tables persist across
-    /// dispatches, so an unbound index keeps whatever the previous encoder left
-    /// there, and setAddress(0) is a null pointer the debug layer rejects
-    /// outright. Every optional binding points here instead, so a stage that
-    /// never reads it still holds an address that is real and resident.
     MTL::Buffer* placeholderBuffer = nullptr;
     MTL::Buffer* curvePointBuffer = nullptr;
     MTL::Buffer* curveSegmentBuffer = nullptr;

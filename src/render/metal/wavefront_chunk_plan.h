@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <vector>
 
-
 namespace oka::metal
 {
 
@@ -89,26 +88,11 @@ inline std::vector<WavefrontChunkGroup> makeWavefrontChunkGroups(const std::vect
     groups.reserve(chunks.size());
     for (size_t i = 0; i < chunks.size(); ++i)
     {
-        // A Metal 4 commit of several command buffers is one scheduler workload.
-        // Grouping the four cheap-looking SSS tail buffers back together undid
-        // the watchdog protection provided by chunking: their combined GPU
-        // interval reached 120--150 ms and the device killed whichever tiny
-        // dispatch happened to be current. Keep the submission boundary aligned
-        // with the command-buffer boundary.
         groups.push_back({ i, i + 1 });
     }
     return groups;
 }
 
-// Turn the throughput-oriented bounce plan into watchdog-sized Metal 4
-// scheduler workloads. At high resolutions even one curve extend can run long
-// enough to be killed, despite being made of several indirect dispatches: a
-// dispatch boundary is not a command-buffer retirement boundary.
-//
-// Early bounces are isolated for every geometry type. Curve traversal is split
-// further, before the hit queues are consumed, so each Extend chunk appends a
-// bounded range of the same queue and Finish performs miss/shade/shadow once all
-// of those ranges have completed.
 inline std::vector<WavefrontChunk> makeMetal4WavefrontChunkPlan(const std::vector<WavefrontChunk>& chunks,
                                                                 uint32_t traversalBatchCount,
                                                                 uint32_t maxTraversalBatchesPerChunk,

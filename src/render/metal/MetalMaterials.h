@@ -23,7 +23,6 @@ struct OpenPBRParams;
 /// The bindless map table for one OpenPBR material (ShaderTypes.h).
 struct OpenPBRTextures;
 
-
 namespace oka::metal
 {
 
@@ -78,10 +77,6 @@ public:
     {
         return mAlphaMaterialBuffer;
     }
-    /// The parallel OpenPBR parameter table, or null when no material uses it.
-    /// Reached from the shader through Uniforms::openpbrParams rather than a
-    /// binding, because the shade stage has no slot left -- but it still has to
-    /// be made resident, so the caller needs the buffer itself.
     MTL::Buffer* openpbrBuffer() const
     {
         return mOpenPBRBuffer;

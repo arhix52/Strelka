@@ -1,21 +1,6 @@
 #ifndef STRELKA_OPTIX_SHADING_MEDIUM_H
 #define STRELKA_OPTIX_SHADING_MEDIUM_H
 
-// ============================================================================
-// medium.h -- participating media on the OptiX backend
-//
-// Two features, one machine. A subsurface random walk and a bounded fog volume
-// differ in where light enters, not in what happens once it is inside: both
-// sample a free flight against a spectral extinction, scatter off a
-// Henyey-Greenstein phase function, and leave through a boundary. This is the
-// CUDA counterpart of src/shaders/metal/subsurface.h plus the medium half of
-// wavefront.metal, ported behaviour-for-behaviour.
-//
-// The arithmetic proper lives in src/render/optix/medium_walk.h, which compiles
-// on the host and is covered by tests/render/test_medium_walk.cpp. What is here
-// is the part that needs float3 and a ray.
-// ============================================================================
-
 #include <optix.h>
 
 #include <OptixRenderParams.h>
@@ -86,11 +71,6 @@ static __forceinline__ __device__ float hgPhaseFunction(float cosTheta, float g)
     return oka::medium::hgPhase(cosTheta, g);
 }
 
-/// Sample Henyey-Greenstein about the direction of travel. pdf == phase, so the
-/// two cancel and the throughput carries only the albedo.
-///
-/// `wo` points back the way the ray came, matching the surface convention, so
-/// the forward lobe is built around -wo.
 static __forceinline__ __device__ float3 hgSampleDirection(
     float3 wo, float g, float u1, float u2, float& pdf)
 {
@@ -108,13 +88,6 @@ static __forceinline__ __device__ float3 hgSampleDirection(
     return normalize(sinTheta * cosf(phi) * u + sinTheta * sinf(phi) * v + cosTheta * w);
 }
 
-/// Cosine-distributed direction about `n`, for leaving the medium at the
-/// boundary.
-///
-/// The interface is treated as rough on the way out for the same reason it is
-/// on the way in: a specular exit would need the walk to track which side of a
-/// refracting interface it is on, and the materials this serves are not
-/// polished glass.
 static __forceinline__ __device__ float3 mediumCosineDirection(float3 n, float u1, float u2)
 {
     const float r = sqrtf(u1);
@@ -125,12 +98,6 @@ static __forceinline__ __device__ float3 mediumCosineDirection(float3 n, float u
     return normalize(t * (r * cosf(phi)) + b * (r * sinf(phi)) + n * sqrtf(fmaxf(1.0f - u1, 0.0f)));
 }
 
-/// A sampler decorrelated from the path's own sequence by the walk step.
-///
-/// A walk step deliberately does not spend a bounce, so the raygen loop does not
-/// advance `sampler.depth` across it and every step of a walk would otherwise
-/// draw the same numbers. Metal reaches the same place from the other side --
-/// `samplerFor(..., depth + step)`.
 static __forceinline__ __device__ SamplerState mediumSampler(const SamplerState& base,
                                                              uint32_t step)
 {

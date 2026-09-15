@@ -58,14 +58,6 @@ public:
     virtual void setCommandQueue(void* queue) = 0;
 #endif
 
-    /// The renderer whose output this display samples. Needed only so the
-    /// display can wait on the frame event when the two are on different queues;
-    /// a backend that shares a queue can ignore it.
-    ///
-    /// Not inside the __APPLE__ guard above: `mRender` is declared
-    /// unconditionally and EditorApp calls this unconditionally, so guarding it
-    /// only meant the editor did not compile off Apple. The Metal-specific part
-    /// is the device/queue interop, not the pointer.
     void setRender(Render* render)
     {
         mRender = render;
@@ -107,19 +99,9 @@ public:
     void pollEvents()
     {
         glfwPollEvents();
-        // Here rather than in either backend: both windowing paths are GLFW and
-        // the joystick API is per-process, so a copy in each would be two
-        // answers to one question. Also here rather than in the editor's main
-        // loop, because the editor has half a dozen other loops -- scene load,
-        // benchmarks, convergence runs -- that pump events without going through
-        // it, and a pad plugged in during one of those has to be noticed too.
         glfw_gamepad::poll(mGamepad);
     }
 
-    /// The gamepad as of the last pollEvents(), or a disconnected state.
-    ///
-    /// Detection is automatic and continuous: nothing has to be enabled, and a
-    /// pad plugged in or pulled mid-session is picked up on the next frame.
     const GamepadState& getGamepadState() const
     {
         return mGamepad;

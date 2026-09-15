@@ -137,13 +137,6 @@ void MetalFxContext::encodeSpatial(void* commandBuffer,
     }
     if (metal4)
     {
-        // The Metal 4 protocol is a different type taking a different command
-        // buffer, so it cannot share the encode call with the Metal 3 one -- and,
-        // less obviously, it is also a different *object*. Setting the textures on
-        // the Metal 3 scaler and then encoding the Metal 4 one ran the scaler with
-        // no input and no output attached, which is not an error: it simply never
-        // wrote the display texture, and the viewport went black the moment
-        // upscaling was switched on.
         const id<MTL4FXSpatialScaler> scaler4 = (__bridge id<MTL4FXSpatialScaler>)mSpatialScaler4;
         if (scaler4)
         {
@@ -165,7 +158,6 @@ void MetalFxContext::encodeSpatial(void* commandBuffer,
     scaler.inputContentHeight = inputContentHeight;
     [scaler encodeToCommandBuffer:(__bridge id<MTLCommandBuffer>)commandBuffer];
 }
-
 
 // Formats the guide textures are allocated with. Kept next to the descriptor so
 // the two cannot drift: MetalFX validates them against the textures at encode
@@ -190,7 +182,6 @@ bool MetalFxContext::denoiserSupportsMetal4(MTL::Device* device)
 {
     return [MTLFXTemporalDenoisedScalerDescriptor supportsMetal4FX:(__bridge id<MTLDevice>)device];
 }
-
 
 bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
                                           MTL::PixelFormat colorFormat,
@@ -230,21 +221,6 @@ bool MetalFxContext::ensureTemporalScaler(MTL::Device* device,
         desc.inputHeight = inputHeight;
         desc.outputWidth = outputWidth;
         desc.outputHeight = outputHeight;
-        // Off, and it matters.
-        //
-        // The colour handed over is linear radiance and the tone curve runs after
-        // the scaler, so with auto exposure on there are two normalisations in the
-        // loop: MetalFX rescales luminance from its own per-frame estimate, and
-        // the tonemapper rescales again by the scene's exposure. The scaler's
-        // estimate moves whenever the frame's content does, so the history it
-        // blends against was normalised differently from the frame being added --
-        // which is the one state a temporal filter cannot converge out of, and it
-        // reads as noise that never settles.
-        //
-        // This is what RRS does, where the same MetalFX denoiser converges well:
-        // it turns auto exposure off precisely so the scaler's normalisation does
-        // not fight the application's own exposure. STRELKA_MFX_AUTOEXPOSURE=1
-        // puts it back for comparison.
         desc.autoExposureEnabled = envFlag("STRELKA_MFX_AUTOEXPOSURE") ? YES : NO;
         desc.requiresSynchronousInitialization = YES;
 
@@ -401,21 +377,6 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         desc.inputHeight = inputHeight;
         desc.outputWidth = outputWidth;
         desc.outputHeight = outputHeight;
-        // Off, and it matters.
-        //
-        // The colour handed over is linear radiance and the tone curve runs after
-        // the scaler, so with auto exposure on there are two normalisations in the
-        // loop: MetalFX rescales luminance from its own per-frame estimate, and
-        // the tonemapper rescales again by the scene's exposure. The scaler's
-        // estimate moves whenever the frame's content does, so the history it
-        // blends against was normalised differently from the frame being added --
-        // which is the one state a temporal filter cannot converge out of, and it
-        // reads as noise that never settles.
-        //
-        // This is what RRS does, where the same MetalFX denoiser converges well:
-        // it turns auto exposure off precisely so the scaler's normalisation does
-        // not fight the application's own exposure. STRELKA_MFX_AUTOEXPOSURE=1
-        // puts it back for comparison.
         desc.autoExposureEnabled = envFlag("STRELKA_MFX_AUTOEXPOSURE") ? YES : NO;
         // Block until the graph is built. Asynchronous initialisation returns a
         // scaler whose network is still being assembled, and encoding into it
@@ -431,12 +392,6 @@ bool MetalFxContext::ensureDenoiser(MTL::Device* device,
         }
         mDenoiser = (void*)denoiser;
 
-        // Fixed application exposure in a 1x1 R16Float. This is a filtering
-        // hint: MetalFX evaluates input * exposure to decide which features will
-        // be visible after tone mapping, but does not change output brightness.
-        // The renderer therefore still applies exposure exactly once after the
-        // denoiser. preExposure remains one because the input itself is not
-        // pre-multiplied.
         MTLTextureDescriptor* const exposureDesc =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float
                                                                width:1

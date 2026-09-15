@@ -1,32 +1,8 @@
 #ifndef STRELKA_ENV_MAP_MATH_H
 #define STRELKA_ENV_MAP_MATH_H
 
-// ============================================================================
-// env_map_math.h -- the equirectangular parametrisation and the density built
-// on it, shared by both backends and by the host tests.
-//
-// Small functions, and the reason they are here rather than in each
-// backend is the same reason light_pdf.h exists: every one of them is used
-// twice per environment sample, once to *draw* a direction and once to state
-// its density for the MIS weight. Two hand-maintained copies of that pair is
-// two chances for the halves to describe different maps.
-//
-// They were exactly that -- src/shaders/common/env_light.h and
-// src/shaders/metal/env_light_metal.h held line-for-line duplicates, with a
-// comment on each saying the two must stay identical. Nothing enforced it, and
-// nothing tested either: the test suite could not compile a CUDA header or a
-// Metal one. It can compile this.
-//
-// Deliberately free of CUDA, Metal and any texture type: directions and
-// luminances in, uv and density out. Fetching the texel is the backend's job.
-// ============================================================================
-
 #include <strelka/material/material_math.h>
 
-/// World-space direction to equirectangular uv.
-///
-/// `rotation` is a Y-axis rotation of the map, applied inverted here and
-/// forwards in envUVToDir() so the two remain inverses of each other.
 DEVICE_FUNC float2 dirToEnvUV(float3 dir, float rotation)
 {
     const float cosR = cosf(-rotation);
@@ -111,11 +87,6 @@ DEVICE_FUNC float envSolidAngleRowV(int y, int height, float t)
     return theta / M_PI_F;
 }
 
-/// Sample v within lat-long row `y` uniformly in solid angle.
-///
-/// Uniform v would make theta uniform and induce a 1/sin(theta) directional
-/// density. Interpolating cos(theta) instead makes the conditional density
-/// constant over the row's exact solid angle.
 DEVICE_FUNC float envSampleSolidAngleV(int y, int height, float xi)
 {
     return envSolidAngleRowV(y, height, envOpenUnitInterval(xi));
@@ -150,10 +121,6 @@ DEVICE_FUNC float envWordJitter(uint32_t word)
     return (float)(word >> 9u) * 0x1p-23f;
 }
 
-/// Sample a direction whose finite-precision inverse mapping still belongs to
-/// the selected texel. A mismatch is a numerical rejection, not a new event:
-/// retry from independent random dimensions rather than concentrating all such
-/// samples at one midpoint.
 DEVICE_FUNC float3 envSampleTexelDirection(
     int x, int y, int width, int height, float xiU, float xiV, uint32_t retryU, uint32_t retryV, float rotation)
 {

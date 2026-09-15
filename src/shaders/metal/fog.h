@@ -1,13 +1,5 @@
 #pragma once
 
-// Homogeneous atmospheric scattering.
-//
-// Atmospheric haze is a slab below a height, avoiding volume-boundary traversal for the global-medium case.
-//
-// What it cannot do: a medium that is not the atmosphere. Smoke in a corner, a
-// beam through a doorway, fog that ends at a wall. Those need the bounded kind,
-// and this is not a step toward it so much as the common case taken on its own.
-
 #include <metal_stdlib>
 
 using namespace metal;
@@ -61,13 +53,6 @@ static inline float fogOpticalDepth(float3 origin, float3 direction, float tMax,
     return sigmaT * (t1 - t0);
 }
 
-// Free-flight distance sampling, analog: the probability of reaching the far end
-// is exactly exp(-sigma_t * L), so the throughput needs no correction on the
-// surface branch and only the single-scattering albedo on the scatter branch.
-// Getting this wrong is invisible in a thin medium and doubles the haze in a
-// thick one.
-//
-// Returns true when the ray scatters before tMax, with `distance` set.
 static inline bool fogSampleDistance(float3 origin, float3 direction, float tMax,
                                      float height, float sigmaT, float u,
                                      thread float& distance)
@@ -108,16 +93,6 @@ static inline float3 hgSample(float3 wo, float g, float u1, float u2, thread flo
     else
     {
         const float s = (1.0f - g * g) / (1.0f + g - 2.0f * g * u1);
-        // The standard inversion returns the cosine against `wo`, which points
-        // back the way the ray came. Everything here works in directions of
-        // *travel*, where that cosine is the other sign -- and at g = 0.8 the
-        // median draw is -0.944, so taken at face value a forward-scattering
-        // medium scatters backwards.
-        //
-        // It does not show up in single scattering, where the outgoing direction
-        // is fixed by the camera: only once a path continues does the lobe point
-        // the wrong way, and then the second scattering event is worth sixty
-        // times the first instead of a fraction of it.
         cosTheta = (1.0f + g * g - s * s) / (2.0f * g);
     }
     cosTheta = clamp(cosTheta, -1.0f, 1.0f);

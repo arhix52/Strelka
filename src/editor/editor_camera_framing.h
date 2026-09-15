@@ -6,14 +6,9 @@
 #include <cmath>
 #include <limits>
 
-
 namespace oka::editor_camera_framing
 {
 
-/// World AABB of an oriented box: transform the eight local corners and take the
-/// axis-aligned envelope. The selection overlay stores the same local box +
-/// transform; framing needs the world envelope so the film can be sized against
-/// the camera axes rather than against the object's.
 inline void worldAabbFromLocalBox(const glm::float3& localMin,
                                   const glm::float3& localMax,
                                   const glm::mat4& localToWorld,
@@ -92,10 +87,6 @@ inline float perspectiveFitDistance(float halfWidth,
     return std::max(dist, halfDepth * padding + kMinHalf);
 }
 
-/// Orthographic half-extents that cover the projected box after magForAspect has
-/// adapted them to `aspect`. Setting raw xmag/ymag to the projected halves is not
-/// enough: a viewport wider than the object would then shrink the vertical film
-/// and crop the top and bottom.
 inline void orthographicFitExtents(float halfWidth,
                                    float halfHeight,
                                    float aspect,
@@ -122,12 +113,6 @@ inline void orthographicFitExtents(float halfWidth,
     }
 }
 
-/// Place `cam` so the world AABB fills the frame. Orientation is kept: framing
-/// is a move (and, for orthographic, a film resize), not an orbit.
-///
-/// Perspective: dolly along the current view axis to the fit distance.
-/// Orthographic: set xmag/ymag to the fit extents and put the film just in front
-/// of the box -- sliding along the view axis alone would not change the image.
 inline void frameCamera(Camera& cam,
                         const glm::float3& worldMin,
                         const glm::float3& worldMax,

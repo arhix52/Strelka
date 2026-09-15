@@ -8,10 +8,6 @@
 #    endif
 #endif
 
-// OpenPBRParams, for the pointer Uniforms carries. Deliberately the parameter
-// header and not the BSDF: this one pulls in nothing, while openpbr.h would put
-// ~264 KB of lookup tables into every translation unit that wants a vertex
-// layout.
 #include <strelka/material/openpbr/openpbr_params.h>
 #include <emissive_mesh_light.h>
 #include <restir_reservoir.h>
@@ -19,28 +15,16 @@
 #define GEOMETRY_MASK_TRIANGLE 1
 #define GEOMETRY_MASK_CURVE 2
 #define GEOMETRY_MASK_LIGHT 4
-// A light the camera must not see directly but that still lights the scene and
-// still appears in reflections. V-Ray calls it "invisible"; it is how a softbox
-// stays out of frame while doing its job. Its own bit rather than a per-light
-// test in the shader, because the distinction is exactly what a ray mask is for.
 #define GEOMETRY_MASK_LIGHT_HIDDEN 8
 // The boundary of a participating medium. Its own bit because a shadow ray must
 // not be stopped by it -- RAY_MASK_SHADOW is the geometry bits alone, so a fog
 // gizmo left on the triangle mask would black out everything it encloses.
 #define GEOMETRY_MASK_MEDIUM 16
-// Metadata carried in the otherwise unused high mask bit. Ray masks never
-// include it; the low geometry bits still decide visibility. Shaders use it to
-// replace an inverse-transpose normal transform with the linear transform when
-// the host proved that its three axes are orthogonal and have one common scale.
 #define GEOMETRY_MASK_UNIFORM_ORTHOGONAL_TRANSFORM 128
 
 #define GEOMETRY_MASK_GEOMETRY (GEOMETRY_MASK_TRIANGLE | GEOMETRY_MASK_CURVE)
 
 #define RAY_MASK_PRIMARY (GEOMETRY_MASK_GEOMETRY | GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_MEDIUM)
-// Same change, and the same reason, as OptixRenderParams.h: an analytic light
-// does not stop a shadow ray, because Cycles does not have it stop one. See the
-// note there and tools/feature_tests/light_occlusion_probe.py. The value is the
-// contract between the two backends, so it has to move on both.
 #define RAY_MASK_SHADOW (GEOMETRY_MASK_GEOMETRY)
 #define RAY_MASK_SECONDARY (RAY_MASK_PRIMARY | GEOMETRY_MASK_LIGHT_HIDDEN)
 
@@ -65,17 +49,6 @@ struct packed_float3
 };
 #endif
 
-/// Bindless textures for one OpenPBR material, one per OpenPBRTextureSlot.
-///
-/// A struct of its own rather than fields inside OpenPBRParams, because that
-/// struct is read verbatim by four compilers and a texture handle has a
-/// different type in each. Keeping the handles out is what lets OpenPBRParams
-/// have no per-backend mirror at all (see openpbr/openpbr_params.h) -- so the
-/// split follows the same rule the rest of the file does: portable data in the
-/// shared header, handles in the backend's own.
-///
-/// A null handle means the parameter is a constant. Indexed by material id, in
-/// step with Uniforms::openpbrParams.
 struct OpenPBRTextures
 {
 #ifdef __METAL_VERSION__
@@ -102,13 +75,6 @@ enum class DebugMode : uint32_t
     // Guides whose visualization enables their production.
     eAovReactive,
     eAovSpecularHitDistance,
-    // Radiance-cache views. Carried here, and in this order, so that the two
-    // backends keep one numbering and the editor keeps one menu: a debug value
-    // has to mean the same thing on both, and the panel builds its list from
-    // this enum for both.
-    //
-    // eSharcGrid is NVIDIA's HashGridDebugColoredHash -- the compact spatial key
-    // at the primary world-space intersection, which needs no cache allocated.
     eSharcGrid,
     eSharcRadiance,
     eSharcOccupancy,
@@ -137,11 +103,6 @@ struct Vertex
 };
 static_assert(sizeof(Vertex) == 32, "Vertex must match Scene::Vertex");
 
-// Geometry reconstructed by extend and streamed once to shade. The two normals
-// retain octahedral snorm16 precision and the tangent uses snorm15, well above
-// the source vertex format's precision. UV uses 13 bits/channel; the remaining
-// six bits hold a quarter-mip LOD. Non-white vertex colour is rare and uses the
-// exact Tail fallback rather than making every hit stream another word.
 struct SurfaceGeometryPayload
 {
     uint32_t shadingNormal;
@@ -151,10 +112,6 @@ struct SurfaceGeometryPayload
 };
 static_assert(sizeof(SurfaceGeometryPayload) == 16, "Surface geometry payload must stay compact");
 
-// Light proposal produced before Base material shading. The proposal contains
-// no BSDF state and no ReSTIR sample: this path is compiled only for plain
-// one-candidate NEE. Keeping it to 60 bytes is cheaper than retaining surface
-// reconstruction and light-sampling temporaries across OpenPBR prepare/eval.
 struct BaseLightConnectionPayload
 {
     packed_float3 radiance;
@@ -174,10 +131,6 @@ static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection p
 #define SURFACE_GEOMETRY_VALID (1u << 31)
 #define SURFACE_GEOMETRY_TANGENT_NEGATIVE (1u << 30)
 
-// Instance-independent triangle attributes copied into the acceleration
-// structure. Positions stay in Metal's native triangle payload; this record
-// contains only what surface reconstruction would otherwise gather through
-// three unrelated vertex-buffer cache lines after traversal.
 struct PrimitiveSurfaceData
 {
     uint32_t normal[3];
@@ -185,11 +138,6 @@ struct PrimitiveSurfaceData
 };
 static_assert(sizeof(PrimitiveSurfaceData) == 16, "Primitive surface data ABI changed");
 
-// UVs needed by an alpha candidate. Each word stores one component for all
-// three vertices as RGB10. A small decode record shared by a 256-triangle block
-// maps those integers back to Vertex::uv's 14-bit lattice. Most foliage blocks
-// fit without any additional quantisation; the block layout cuts the hot random
-// record from 12 to 8 bytes without assuming UVs stay in [0, 1].
 #define PRIMITIVE_ALPHA_BLOCK_SHIFT 8u
 #define PRIMITIVE_ALPHA_BLOCK_SIZE (1u << PRIMITIVE_ALPHA_BLOCK_SHIFT)
 struct PrimitiveAlphaData
@@ -264,13 +212,6 @@ struct Uniforms
     float shiftX;
     float shiftY;
 
-    // Projection: 0 = perspective, 1 = orthographic. An orthographic camera is
-    // not expressible as a clipToView matrix the perspective path can share --
-    // it has no centre of projection, so the ray origin varies across the film
-    // and the direction does not -- hence a flag and the film half-extents
-    // rather than a different matrix.
-    // Values are Camera::ProjectionType; PROJECTION_* below names them for the
-    // shaders, which cannot see the host enum.
     uint32_t projectionType;
     float orthoHalfWidth;
     float orthoHalfHeight;
@@ -280,10 +221,6 @@ struct Uniforms
     // Atmospheric scattering, homogeneous below fogHeight. See fog.h for why a
     // slab and not a bounded volume.
     uint32_t hasFog;
-    /// Whether any material in the scene bounds a medium. Gates the extra
-    /// traversal the shadow stage needs to attenuate through one, so a scene with
-    /// only subsurface media -- whose boundaries a shadow ray never crosses --
-    /// pays nothing for it.
     uint32_t hasBoundedMedium;
     // Scene-bounds diagonal caps subsurface free flights; longer draws leave the bounded medium.
     float sceneExtent;
@@ -305,11 +242,6 @@ struct Uniforms
     uint32_t sharcUpdatePathCount;
     uint32_t sharcFrameIndex;
     int32_t sharcLevelBias;
-    /// Camera position the grid was addressed from last frame. Resolve needs it
-    /// to tell whether a cell moved nearer or further, and therefore which
-    /// adjacent LOD holds its history. Its own field rather than
-    /// `prevViewToWorld`, which is the shutter-open matrix for camera motion
-    /// blur and only advances while an animation is playing.
     vector_float3 sharcCameraPrev;
     float fogSigmaT;
     float fogAnisotropy;
@@ -322,10 +254,6 @@ struct Uniforms
     uint32_t envMapHeight;
     float envMapIntensity;
     float envMapRotation;
-    // Validation switches. estimatorMode: 0 = NEE + MIS (normal), 1 = BSDF
-    // sampling only. The two are independent unbiased estimators of the same
-    // integral, so at convergence they must produce the same image; the
-    // difference between them measures estimator inconsistency directly.
     uint32_t estimatorMode;
     // Ray mask for camera/secondary hardware traversal. `numLights` separately
     // gates smooth analytic-light intersections performed in the extend kernel.
@@ -351,11 +279,6 @@ struct Uniforms
     /// Luminance ceiling, in exposed units, for the colour handed to the
     /// denoiser. Zero disables it.
     float denoiseFireflyClamp;
-    /// Upper bound on what one indirect path may contribute; 0 disables it.
-    ///
-    /// Separate from denoiseFireflyClamp, which only conditions the denoiser's
-    /// input and leaves the rendered image and the EXR alone. This one changes
-    /// the image, so it is off by default -- see clampIndirectContribution.
     float clampIndirect;
     // Sub-pixel offset applied to every pixel of this frame, in pixels. Temporal
     // upscaling needs the whole image shifted by a known amount it can undo; the
@@ -373,15 +296,6 @@ struct Uniforms
     /// level of detail. A switch rather than a constant because the whole point
     /// of it is a memory-pressure trade that has to be measured per scene.
     uint32_t textureLodMode;
-    /// Where the denoiser's material guides come from. 0 = walk to the first
-    /// surface rough enough to describe, so that a mirror hands over the world
-    /// it reflects rather than its own featureless albedo. 1 = the primary hit,
-    /// always.
-    ///
-    /// A switch because the two are right for different things and neither is
-    /// right for both: the walk is what makes a reflection denoisable, and it is
-    /// also what makes a glossy floor's guides flicker between the floor and
-    /// whatever it reflects, one pixel to the next.
     uint32_t guidePrimaryHit;
 
     uint32_t restirDIEnabled;
@@ -403,19 +317,6 @@ struct Uniforms
     float restirProposalCollision;
     float restirProposalEntropy;
 
-    /// The OpenPBR parameter block for material i, or null when no material in
-    /// the scene is MATERIAL_TYPE_OPENPBR.
-    ///
-    /// A pointer in the uniforms rather than a binding of its own, and that is
-    /// forced rather than chosen: `wavefrontShade` binds buffers 0 through 30 and
-    /// Metal allows 31 (kMetal4BufferBindCount, Metal4Context.h). The same wall
-    /// is why UniformLight carries its projector texture inline. The host writes
-    /// MTL::Buffer::gpuAddress() here -- what Metal 3 introduced buffer pointers
-    /// for -- and the buffer still has to be made resident by hand, exactly like
-    /// the bindless material textures.
-    ///
-    /// Indexed by the same material id as `materials`, so the two are published
-    /// and patched together.
 #ifdef __METAL_VERSION__
     device const OpenPBRParams* openpbrParams;
 #else
@@ -686,17 +587,6 @@ struct RestirCandidateAuditRecord
 };
 static_assert(sizeof(RestirCandidateAuditRecord) == 108, "ReSTIR candidate audit ABI changed");
 
-
-// How the depth guide is encoded.
-//
-// MetalFX does not document which it wants. Two things point at device depth: the
-// scaler takes a viewToClipMatrix, which is only useful for undoing a projection,
-// and depthReversed defaults to YES, which is a statement about NDC. Against that,
-// the texture is R32Float and a linear distance would fit it. So the renderer can
-// write any of the three and the choice is settled by measurement rather than by
-// reading the header harder.
-// Uniforms::projectionType. Mirrors oka::Camera::ProjectionType, which the
-// shaders cannot include.
 #define PROJECTION_PERSPECTIVE 0u
 #define PROJECTION_ORTHOGRAPHIC 1u
 
@@ -704,10 +594,6 @@ static_assert(sizeof(RestirCandidateAuditRecord) == 108, "ReSTIR candidate audit
 #define kDenoiseDepthViewZ 1u ///< distance along the camera's forward axis
 #define kDenoiseDepthRadial 2u ///< distance to the eye
 
-// Camera::perspective currently maps near to zero and far to one, while the
-// orthographic matrix uses reverse Z. MetalFX defines depthReversed as "zero is
-// farthest", so both the host property and the background sentinel must follow
-// the active projection instead of assuming all device depth is reverse Z.
 static inline bool denoiseDepthReversed(uint32_t depthMode, uint32_t projectionType)
 {
     return depthMode == kDenoiseDepthDevice && projectionType == PROJECTION_ORTHOGRAPHIC;
@@ -722,14 +608,6 @@ static inline float denoiseBackgroundDepth(uint32_t depthMode, uint32_t projecti
     return denoiseDepthReversed(depthMode, projectionType) ? 0.0f : 1.0f;
 }
 
-// What a denoiser needs to know about the primary hit, written once per pixel by
-// the stage that shades it (or by the miss stage for background).
-//
-// One packed record in a buffer rather than six render targets: `shade` is the
-// most register-pressured kernel in the tracer and a single buffer write costs it
-// far less than binding and writing six textures. A resolve pass afterwards
-// spreads it into the texture formats MetalFX wants, which keeps every format
-// decision in one place.
 struct AovSample
 {
     packed_float3 diffuseAlbedo;
@@ -747,12 +625,6 @@ struct AovSample
     /// is known to be a lie: mirrors, glass, and anything whose previous position
     /// could not be established.
     float reactive;
-    /// Dual-purpose cold word. During guide rendering, a negative value marks a
-    /// noise-free primary (background or directly visible emission), and 1 + the
-    /// Fresnel weight marks a transmissive primary whose replacement attributes
-    /// need blending. In `DebugMode::eSharcBounces`,
-    /// where denoising is disabled, it stores the path depth instead. Sharing it
-    /// keeps this per-pixel record at 64 bytes.
     float guideStateOrBounceDepth;
 };
 
@@ -766,30 +638,17 @@ struct UniformsTonemap
     uint32_t outWidth;
     uint32_t outHeight;
 
-
     uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
     float gamma; // 0 - off
     float maxEDR;
     vector_float3 exposureValue;
 };
 
-// Per-geometry data, indexed by (instance userID + intersection.geometry_id).
-//
-// One acceleration structure now holds many geometries — a glTF mesh's
-// primitives are split by material, and merging them into a single BLAS is what
-// keeps the top-level structure small. The material therefore can no longer
-// travel in the instance's userID; userID holds the instance's base offset into
-// this table instead, and the geometry index within the BLAS selects the entry.
 struct GeometryEntry
 {
     uint32_t vbOffset; // mesh vertex buffer offset, or first control point of a curve set
     uint32_t indexOffset; // mesh index buffer offset, or first segment of a curve set
     uint32_t materialId;
-    // Zero for a triangle mesh. For a curve set: GEOM_FLAG_CURVE, plus the
-    // segments per strand in the low bits, which is what lets the shader recover
-    // root-to-tip position from the segment index alone -- a strand's own
-    // parameter, for no memory at all. Zero there means the set has strands of
-    // differing lengths and the gradient is not available.
     uint32_t flags;
 };
 
@@ -834,47 +693,12 @@ struct PathState
     packed_float3 throughput;
     uint32_t depthAndFlags; // depth in bits 0..7, flags above
     float lastBsdfPdf;
-    // How far the ray has travelled since the vertex `lastBsdfPdf` was measured
-    // at. Zero for every path that has not passed through anything.
-    //
-    // Passing through a cutout resets the ray's origin to the surface it slipped
-    // past, and the multiple-importance weight at an area light needs the
-    // distance from the vertex that *scattered*, not from wherever the ray was
-    // last restarted. The direction does not change across a pass-through, so
-    // one number recovers that vertex: origin - direction * this.
     float misDistance;
 };
 
-// Participating-medium bookkeeping is cold for the common surface-only path.
-// Keeping it beside PathState made generate, extend, miss and shade address a
-// 32-byte-stride record even after their medium branches had been compiled out.
-// A separate table leaves the hot record at 24 bytes; SSS/volume specialisations
-// load these exact eight bytes in addition, so no precision or material-index
-// range is traded away.
 struct MediumPathState
 {
-    /// Which participating medium the path is inside, and how many scattering
-    /// events it has had there: material index + 1 in the low 16 bits, step count
-    /// in the high 16. Zero means the path is outside every medium.
-    ///
-    /// One slot, so media do not nest: a path inside a fog volume that enters a
-    /// block of wax takes the wax and forgets the fog until it leaves. Nesting
-    /// needs a stack like the one the dielectrics keep, and nothing in the scenes
-    /// this serves overlaps two media.
-    ///
-    /// One packed word rather than the medium's parameters, because this is per
-    /// pixel and the parameters are per material: at 1024x1024 carrying sigma_t,
-    /// albedo and g would cost 28 MB to avoid a load from a table that fits in
-    /// cache.
     uint32_t medium;
-    /// The medium's single-scattering albedo at the point the path entered it,
-    /// packed RGBA8.
-    ///
-    /// Carried rather than read from the material at each scattering event,
-    /// because inside a medium there is no surface left to sample a texture on:
-    /// the only place the marble's veining exists is the boundary the walk came
-    /// through. Packed to one word -- a scattering albedo has nothing like eight
-    /// bits of meaningful precision, and this is per pixel.
     uint32_t mediumAlbedo;
 };
 
@@ -935,11 +759,6 @@ struct SharcUpdateState
 #define SHARC_ACCUMULATION_ENTRY_STRIDE 32u
 #define SHARC_RESOLVED_ENTRY_STRIDE 32u
 
-// Metal-only cache internals, alongside -- not overlapping -- the four
-// cross-backend `DebugMode` cache views. The grid, the resolved radiance, the
-// table occupancy and the bounce heatmap live in DebugMode because both
-// backends answer them; what is below exists because the Metal hash map is the
-// thing being debugged.
 #define SHARC_DEBUG_OFF 0u
 #define SHARC_DEBUG_CACHED_KEY 1u
 #define SHARC_DEBUG_QUERY_RESULT 2u
@@ -953,29 +772,14 @@ struct SharcUpdateState
 #define SHARC_DEBUG_IS_SURFACE_VIEW(d)                                                                                 \
     ((d) != SHARC_DEBUG_OFF && (d) != SHARC_DEBUG_COUNTERS && (d) <= SHARC_DEBUG_LAST_VISUALIZATION)
 
-// Shared counters expose nested-dielectric stack overflow and unmatched exits; see ior_stack.h.
-//
-// Its own tiny buffer rather than a slot in the wavefront control block, because
-// that one is device-private and reading it back needs a blit the Metal 4 path
-// does not encode. Two words of shared memory cost nothing and both submission
-// paths write them the same way.
 #define IOR_STAT_OVERFLOW 0
 #define IOR_STAT_UNMATCHED 1
-/// A path that reached the environment with a non-empty stack. The other half of
-/// the same failure: a pop that matches nothing is a ray that *left* something it
-/// never entered, and this is a ray that entered something it never left --
-/// which is what a hole in a refracting mesh produces, and the case no exit
-/// event exists to catch.
 #define IOR_STAT_ESCAPED_INSIDE 2
 #define IOR_STAT_COUNT 3
 
 #define PATH_FLAG_ALIVE (1u << 8)
 #define PATH_FLAG_SPECULAR (1u << 9)
 #define PATH_FLAG_NEE_DONE (1u << 10)
-// The denoiser guides for this pixel have been written. A mirror or a glass
-// surface has no albedo to demodulate against and a roughness of nothing, so the
-// guides are deferred to the first surface that does -- and then must not be
-// overwritten by the bounce after it.
 #define PATH_FLAG_AOV_DONE (1u << 11)
 #define PATH_DEPTH_MASK 0xFFu
 // Transparent hits are counted apart from bounces: passing through a cutout is
@@ -995,10 +799,6 @@ static_assert((PATH_PASSTHROUGH_MASK & PATH_SHARC_ROUGHNESS_MASK) == 0u,
 static_assert((PATH_FLAG_IOR_STACK_ACTIVE & (PATH_PASSTHROUGH_MASK | PATH_SHARC_ROUGHNESS_MASK)) == 0u,
               "path IOR flag overlaps packed path data");
 
-// What `extend` hands to `shade`. Deliberately small: `intersection.primitive_data`
-// is only valid inside the kernel that ran the intersect, so instead of copying
-// vertex attributes across, `shade` refetches them from the vertex buffer using
-// the geometry entry — the same lookup the motion-blur path already performs.
 struct HitRecord
 {
     // Triangle barycentrics (or curve t in x) as unorm16x2. The 1/65535 step is
@@ -1104,12 +904,6 @@ struct ShadowRay
     // Uniform random threshold for stochastic alpha visibility, drawn where
     // the ray was created because that is where the sampler knows the path's depth.
     float alphaThreshold;
-    /// Which bounded medium the ray starts inside, material index + 1, or 0.
-    ///
-    /// Carried rather than re-derived: the shadow stage can find where the ray
-    /// *leaves* a medium by tracing its boundary, but nothing in the ray itself
-    /// says whether it began within one. A vertex inside a fog volume and a
-    /// vertex just outside it produce the same origin and direction.
     uint32_t medium;
     // Local (pre-path-throughput) direct-light estimate. The sparse update pass
     // propagates this only after visibility has been established by shadow.
@@ -1148,18 +942,6 @@ struct SkinningParams
 };
 static_assert(sizeof(SkinningParams) == 16, "SkinningParams host/Metal ABI changed");
 
-// pad0: spot inner cone (rad), projector edge softness, or point soft radius.
-// pad1: KHR attenuation range (0 = infinite).
-// points[0] for point/spot/projector: (soft radius, IES profile, projector image
-// slot, projector frame aspect); an unused slot carries -1, not a stale value.
-// points[0..3] for a sphere: affine axis X, centre, affine axis Y, affine axis Z.
-// points[1..3] for a disc: centre, affine axis X, affine axis Y.
-// Metal upload repurposes points[2].xyz for a rectangle as its inverse Gram
-// coefficients (inv00, inv01, inv11); the shared Scene::Light still holds the
-// redundant fourth corner there.
-// normal.w: analytic intersection visibility bits (camera, secondary).
-// halfAngle: distant cone, spot outer cone, or half the projector's horizontal
-// field of view.
 struct UniformLight
 {
     vector_float4 points[4];
@@ -1169,14 +951,6 @@ struct UniformLight
     float halfAngle;
     float pad0;
     float pad1;
-    // The image a projector throws: 8 bytes, a resource ID on the CPU and a
-    // texture handle on the GPU, exactly like the maps in Material below.
-    //
-    // In the light struct rather than in a table of its own because the shade
-    // kernel has no room for one: it binds buffers 0 through 30 and Metal allows
-    // 31. MetalLights::upload resolves the slot in Scene::Light::points[0].z
-    // into this handle while it copies the lights across, which is also why this
-    // field has no counterpart in the host's backend-neutral Scene::Light.
 #ifdef __METAL_VERSION__
     texture2d<float> projectorTexture;
 #else
@@ -1190,12 +964,6 @@ struct UniformLight
 };
 static_assert(sizeof(UniformLight) == 128, "UniformLight host/Metal ABI changed");
 
-// Packed IES candela tables for the GPU. MetalLights lays the buffer out as:
-//   IesGpuBufferHeader
-//   IesGpuProfileHeader[profileCount]
-//   float blob (angles then candela, offsets relative to the blob start)
-// Sampled by lights_metal.h::sampleIesCandela; intensity on the light is a
-// multiplier on top of the table, matching the editor's Load IES path.
 struct IesGpuBufferHeader
 {
     uint32_t profileCount;
@@ -1216,10 +984,6 @@ struct IesGpuProfileHeader
     float pad2;
 };
 
-// Presence and cold-lobe bits for Material. Texture presence is authored data,
-// not inferred from a bindless handle: that lets the shader skip descriptor
-// loads while textures stream in and still fall back safely if a named file
-// failed to decode.
 #define MATERIAL_TEX_BASE_COLOR (1u << 0)
 #define MATERIAL_TEX_METALLIC_ROUGHNESS (1u << 1)
 #define MATERIAL_TEX_NORMAL (1u << 2)
@@ -1271,10 +1035,6 @@ struct Material
     packed_float3 attenuation_color; // 12 bytes (KHR_materials_volume)
     float attenuation_distance; //  4 bytes -- 112
 
-    // KHR_texture_transform, one per material; see material_params.h. The CPU
-    // folds scale and rotation into two rows so every texture lookup avoids
-    // recomputing sin/cos. Together with the offset this keeps the old 24-byte
-    // layout and the Material ABI unchanged.
     vector_float2 uv_offset; //  8 bytes
     vector_float2 uv_transform_x; //  8 bytes
     vector_float2 uv_transform_y; //  8 bytes -- 136
@@ -1326,10 +1086,6 @@ struct Material
 };
 static_assert(sizeof(Material) == 296, "Material host/Metal ABI changed");
 
-// Dense view of the fields needed while an alpha shadow query is suspended on
-// a triangle candidate. Material is deliberately shading-oriented and spreads
-// these fields over several cache lines; walking foliage should not fetch the
-// other 248 bytes merely to decide whether traversal may continue.
 struct AlphaMaterialData
 {
 #ifdef __METAL_VERSION__

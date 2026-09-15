@@ -59,10 +59,6 @@ TEST_CASE("SHARC receiver roughness follows the narrowest active layer")
 
 TEST_CASE("a voxel subtends the same angle wherever it is")
 {
-    // The whole reason the size follows the distance: one setting has to mean
-    // the same thing in a room and in a forest. baseSize is the world size of a
-    // pixel at unit distance times the pixels a voxel should span, so
-    // size/distance is that product to within the power-of-two quantisation.
     const float baseSize = 4.0f * (2.0f * std::tan(0.3926991f) / 512.0f); // 45 deg, 512 px, 4 px voxels
     // Integer induction: a float loop counter both drifts and trips
     // cert-flp30-c / clang-analyzer-security.FloatLoopCounter.
@@ -153,10 +149,6 @@ TEST_CASE("the normal bucket separates the six faces and nothing else")
 
 TEST_CASE("a key round-trips every field it carries")
 {
-    // The key stopped being a checksum so that two things could read it back:
-    // reprojection, which needs the voxel's position and level, and responsive
-    // lighting, which needs the flag. Both are silent if a field does not
-    // survive the packing -- reprojection simply finds nothing.
     for (int32_t level : { -255, -20, -1, 0, 1, 7, 255 })
         for (uint32_t bucket = 0; bucket < 6u; ++bucket)
             for (bool responsive : { false, true })
@@ -173,10 +165,6 @@ TEST_CASE("a key round-trips every field it carries")
 
 TEST_CASE("neighbouring voxels do not collide, and the hash spreads")
 {
-    // A key that repeats across a small neighbourhood is a wall bleeding into
-    // the room behind it. 8x8x8 of them, all six normal buckets. Exact now
-    // rather than probable: the key carries the coordinates instead of a mix
-    // of them, so two different voxels cannot agree by accident.
     std::set<uint64_t> keys;
     std::set<uint32_t> slots;
     size_t total = 0;
@@ -206,10 +194,6 @@ TEST_CASE("the same voxel at two levels is two voxels")
 
 TEST_CASE("the responsive half of a voxel is a different voxel to the table")
 {
-    // Same place, same normal, same level -- and it has to land in its own slot,
-    // because the two hold different halves of the signal and a reader adds
-    // them. If they collided, one would overwrite the other and the sum would be
-    // whichever won.
     const uint64_t key = voxelKey(11, -3, 40, 2, 4, false);
     const uint64_t responsive = responsiveKey(key);
     CHECK(responsive != key);
@@ -245,10 +229,6 @@ TEST_CASE("a key is never zero, because zero means empty")
 
 TEST_CASE("reprojection looks coarser when the eye came closer, finer when it went away")
 {
-    // The level follows distance to the eye, so moving the eye re-quantises a
-    // world that has not moved. This is the lookup that finds where the data
-    // went. Which direction it looks is the whole of its correctness: looking
-    // the wrong way finds an unrelated voxel and blends it in.
     const uint64_t key = voxelKey(8, 8, 8, 3, 2, false);
 
     // Eye now near the voxel, previously far: this entry is the finer one, and
@@ -277,10 +257,6 @@ TEST_CASE("reprojection compares large camera distances without integer overflow
 
 TEST_CASE("reprojection keeps the surface it is about")
 {
-    // The normal bucket and the responsive flag are properties of the surface
-    // and the signal, not of the resolution it is stored at. Dropping either
-    // would blend a floor into the ceiling below it, or the steady half of a
-    // voxel into the responsive half.
     for (uint32_t bucket = 0; bucket < 6u; ++bucket)
         for (bool responsive : { false, true })
         {
@@ -293,10 +269,6 @@ TEST_CASE("reprojection keeps the surface it is about")
 
 TEST_CASE("reprojection halves a negative coordinate downwards")
 {
-    // floor, not truncation, and the reason is the same one that made
-    // voxelCoordinate use floor: truncating folds the two cells either side of
-    // the origin into one, which puts a seam through the middle of every scene
-    // -- and here it would put it there only while the camera is moving.
     const uint64_t key = voxelKey(-3, -1, -7, 3, 0, false);
     const uint64_t coarser = adjacentLevelKey(key, 0.0f, 0.0f, 0.0f, 5000.0f, 5000.0f, 5000.0f);
     CHECK(unpackLevel(coarser) == 4);
@@ -307,12 +279,6 @@ TEST_CASE("reprojection halves a negative coordinate downwards")
 
 TEST_CASE("reprojection cannot walk off the end of the level field")
 {
-    // A wrapped level is a key pointing at an unrelated region of the world,
-    // which is the one outcome worse than not reprojecting at all. The bound is
-    // a rail rather than a working limit -- voxelForDistance floors the
-    // footprint at 1e-4, so real levels run about [-14, 14] against a field that
-    // holds [-255, 255] -- and the point of the sweep is that nothing gets
-    // anywhere near it whatever the two cameras are.
     for (const int32_t level : { kLevelMin, kLevelMin + 1, -14, 0, 14, kLevelMax - 1, kLevelMax })
         for (const float near : { 0.0f, 1.0f, 1e4f })
             for (const float far : { 0.0f, 2.0f, 1e5f })
@@ -385,12 +351,6 @@ TEST_CASE("the fixed point round trips within half its own quantum")
 
 TEST_CASE("the quantisation error is zero-mean, because a one-sided one is a bias")
 {
-    // The whole reason encode() rounds rather than truncates. Truncation loses
-    // half a quantum on every deposit in the same direction; a quantum is
-    // 1/kScale, so against an outgoing radiance of a couple of units that is a
-    // quarter of a percent off the converged image, every time. Measured on
-    // 00_calibration and 02_basecolor, which both read 0.997 against the same
-    // render with the cache off until this was rounding.
     double error = 0.0;
     int samples = 0;
     for (int i = 0; i < 20000; ++i)
@@ -510,16 +470,6 @@ TEST_CASE("the capacity floor keeps a mistyped setting from becoming one slot")
     CHECK((kMinCapacity & (kMinCapacity - 1u)) == 0u);
 }
 
-// ---------------------------------------------------------------------------
-// Resolve: what a voxel keeps between frames
-// ---------------------------------------------------------------------------
-//
-// These cover the half of the cache that decides whether it is a cache at all.
-// Every rule here fails silently on a GPU and looks like something else in the
-// image: a window that does not normalise reads as a cache that ignores the
-// lights, a staleness rule that never fires reads as a table that is full, and
-// one that fires too eagerly reads as a cache that is simply slow.
-
 TEST_CASE("binary16 round-trips the values a voxel actually holds")
 {
     // Radiance, and sample counts up to a few thousand. Relative error of
@@ -552,11 +502,6 @@ TEST_CASE("binary16 encoding admits nothing that would poison a voxel")
 
 TEST_CASE("rounding to binary16 is unbiased")
 {
-    // The same argument that made `encode` round rather than truncate: a bias of
-    // half a quantum, applied to every voxel every frame in the same direction,
-    // is a bias in the image and not noise in it.
-    // Integer induction, because accumulating the step in a float both drifts
-    // and trips cert-flp30-c.
     const int steps = 5000;
     double sum = 0.0;
     for (int step = 0; step < steps; ++step)
@@ -684,11 +629,6 @@ TEST_CASE("the window bounds the weight of the history")
         state = resolveEntry(depositFrame(state, 1.0f, perFrame), window, 64u);
     }
     const Resolved resolved = unpackResolved(state.resolvedLo, state.resolvedHi);
-    // The fixed point of n -> n * window / (window + 1) + perFrame, which is
-    // perFrame * (window + 1) and not perFrame * window -- the frame being
-    // folded in is one the window has not yet charged for. Worth pinning: the
-    // difference is one window's worth of weight, which is exactly how much a
-    // step change in the lighting lags.
     CHECK(resolved.sampleNum == doctest::Approx((float)(perFrame * (window + 1u))).epsilon(0.05));
 
     uint32_t accumFrames = 0u, staleFrames = 0u;
@@ -738,11 +678,6 @@ TEST_CASE("a larger window is slower to follow than a smaller one")
 
 TEST_CASE("an unvisited voxel keeps its answer, then gives back its slot")
 {
-    // Both halves matter. A voxel that is off screen for a moment must still be
-    // the answer when a path reaches it again -- that is what survives a camera
-    // movement, and what the host used to throw away by clearing the table. But
-    // it cannot be kept for ever, or the table fills with places the camera has
-    // left and never frees a slot.
     const uint32_t staleMax = 16u;
     ResolveOutput state = resolveEntry(depositFrame(ResolveOutput{}, 4.0f, 32u), 32u, staleMax);
     REQUIRE(!state.evict);
@@ -761,10 +696,6 @@ TEST_CASE("an unvisited voxel keeps its answer, then gives back its slot")
 
 TEST_CASE("eviction cannot be made hair-trigger from a setting")
 {
-    // The SDK's own warning: evicting too eagerly costs more in re-insertion
-    // than the slots are worth, so the threshold is clamped no matter what the
-    // caller asks for. A config that says 0 must not turn the table over every
-    // frame.
     ResolveOutput state = resolveEntry(depositFrame(ResolveOutput{}, 1.0f, 4u), 32u, 0u);
     REQUIRE(!state.evict);
     for (uint32_t frame = 1; frame < kStaleFrameNumMin; ++frame)
@@ -776,10 +707,6 @@ TEST_CASE("eviction cannot be made hair-trigger from a setting")
 
 TEST_CASE("a voxel nobody has ever deposited into is still evicted")
 {
-    // Insertion and deposit are separate: a path may take a slot and then fail
-    // the throughput test, or be a reading path that never records. Those slots
-    // have to come back, or a moving camera leaks the table one probe run at a
-    // time.
     ResolveOutput state;
     bool evicted = false;
     for (uint32_t frame = 0; frame < kStaleFrameNumMin + 1u; ++frame)

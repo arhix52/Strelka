@@ -21,14 +21,6 @@ namespace oka::mtlx
 namespace
 {
 
-/// The UV placement an image asks for, already in the form the shader applies:
-///
-///     tuv = rotate_ccw(uv * scale, rotation) + offset
-///
-/// which is one transform per *material*, not per slot -- OpenPBRParams carries
-/// a single uv_scale/uv_rotation/uv_offset that every map of that material is
-/// sampled through. Two maps placed differently cannot both be honoured, so the
-/// second one is reported rather than quietly overwriting the first.
 struct UvPlacement
 {
     float scaleX = 1.0f;
@@ -57,13 +49,6 @@ struct Resolved
     std::string unsupportedCategory;
 };
 
-/// A value folded out of a node graph: up to four components, and how many of
-/// them mean anything.
-///
-/// Kept as bare floats rather than as mx::Value all the way down because every
-/// operator below has to broadcast a scalar against a colour, and doing that
-/// through the variant would mean a type switch per operand per node. The mx
-/// type is put back on at the end, where the shader inputs are read.
 struct Folded
 {
     float v[4]{ 0.0f, 0.0f, 0.0f, 0.0f };
@@ -229,15 +214,6 @@ Folded foldBinary(const mx::NodePtr& node, int depth, const char* aName, const c
     return r;
 }
 
-/// Fold a subgraph whose leaves are all constants.
-///
-/// Everything here is arithmetic on values the document states outright, which
-/// is the whole difference between this and a shader generator: no texture may
-/// appear anywhere in the subgraph, because a texture's value is not known until
-/// the pixel is shaded and this result becomes a single number in OpenPBRParams.
-/// An operand that does not fold makes the whole node not fold, and the input
-/// ends up in `unsupported` with the category named -- silently substituting a
-/// default for half an expression would be worse than saying so.
 Folded foldNode(const mx::NodePtr& node, int depth)
 {
     Folded bad;
@@ -598,16 +574,6 @@ mx::ValuePtr foldedToValue(const Folded& f)
     }
 }
 
-/// Read the placement of an image node: <tiledimage>'s own tiling, and whatever
-/// <place2d> feeds its texcoord.
-///
-/// Both are transcribed from the stdlib nodegraphs rather than from the field
-/// names, because the names mislead in both nodes. place2d *divides* by scale
-/// and *subtracts* offset, around a pivot; tiledimage subtracts its offset
-/// after multiplying. And MaterialX's rotate2d is (ca*x + sa*y, -sa*x + ca*y),
-/// which is a clockwise rotation, while the shader's is counter-clockwise --
-/// hence the negated angle. Getting any of these backwards produces a texture
-/// that is placed *almost* right, which is the hardest kind of wrong to see.
 UvPlacement readPlacement(const mx::NodePtr& node, std::string& gap)
 {
     UvPlacement out;
@@ -715,12 +681,6 @@ UvPlacement readPlacement(const mx::NodePtr& node, std::string& gap)
     return fromPlacer;
 }
 
-/// Follows an input to a constant, to a single image, or to nothing this loader
-/// can express.
-///
-/// The normalmap step is why this is a walk rather than a lookup: a normal input
-/// is conventionally <normalmap in="<image>">, and the image is one hop further
-/// than every other slot.
 Resolved resolveInput(const mx::InputPtr& input, const mx::FilePath& docDir)
 {
     Resolved out;
@@ -769,19 +729,8 @@ Resolved resolveInput(const mx::InputPtr& input, const mx::FilePath& docDir)
             const std::string name = file->getValueString();
             if (!name.empty())
             {
-                // MaterialX resolves a filename input against the document it
-                // came from, so a path is only meaningful next to its .mtlx.
-                // Made absolute here because the renderer joins texture paths
-                // with the *scene's* search path, and the two directories are
-                // not the same one for a shared material library.
                 out.texture = (docDir / mx::FilePath(name)).asString();
             }
-            // Only what this element states, never what it inherits. A document
-            // declares its *working* space on the root element, and reading
-            // that as the file's would relabel every untagged map -- the chess
-            // set tags its base colours srgb_texture and leaves metalness,
-            // roughness and normals bare, which is exactly the arrangement the
-            // renderer's own slot defaults already assume.
             out.colorSpace = file->getAttribute("colorspace");
         }
         if (out.colorSpace.empty())
@@ -797,12 +746,6 @@ Resolved resolveInput(const mx::InputPtr& input, const mx::FilePath& docDir)
         return out;
     }
 
-    // Not an image, so the last chance is that the graph behind it is
-    // arithmetic on constants -- a tint scaled, two colours mixed, a roughness
-    // remapped. Those are what a real library is made of, and until this fold
-    // existed every one of them landed in `unsupported` and left the parameter
-    // at its specification default: a material that quietly ignored what the
-    // document said, while reporting success.
     if (const Folded folded = foldNode(node, 0); folded.ok)
     {
         out.isConstant = true;
@@ -851,16 +794,6 @@ OpenPBRColor asColor(const mx::ValuePtr& v, OpenPBRColor fallback)
     return fallback;
 }
 
-/// The document's colorspace name, reduced to the one question the renderer can
-/// answer: is this file gamma-encoded or is it linear?
-///
-/// Matched on the naming convention rather than a table of every name, because
-/// the set is open -- a studio config adds its own -- and the convention is what
-/// the names are built from: `lin_` and the ACES spaces are linear, `srgb`,
-/// `g22`, `g18` and the display spaces carry a curve. What is *not* answered is
-/// the gamut: acescg and lin_rec709 both come back Linear even though their
-/// primaries differ, because there is no colour management here to convert them
-/// with. A name that fits neither pattern is reported and left to the slot.
 TexColorSpace colorSpaceFromName(const std::string& raw, const std::string& forInput)
 {
     if (raw.empty())
@@ -899,17 +832,6 @@ bool asBool(const mx::ValuePtr& v, bool fallback)
     return fallback;
 }
 
-/// Where a shader input's value goes, and where its texture goes.
-///
-/// Pointers to members rather than byte offsets: the table is data, and the
-/// alternative -- offsetof plus a reinterpret_cast at every write -- puts the
-/// field's type in one place and its address in another, so a mistyped entry
-/// compiles and corrupts the neighbouring parameter instead of failing.
-///
-/// One table per shading model rather than one merged table, because the two
-/// disagree about names in both directions (standard_surface's `sheen` is
-/// OpenPBR's `fuzz`, its `specular_IOR` is `specular_ior`) and a merged table
-/// would silently accept a name from the wrong model.
 struct Binding
 {
     float OpenPBRParams::* asFloatMember = nullptr;
@@ -1083,7 +1005,6 @@ const std::unordered_map<std::string, Binding>& standardSurfaceBindings()
     return kTable;
 }
 
-
 } // namespace
 
 MaterialXDocumentData loadMaterialXDocument(const std::string& path)
@@ -1092,11 +1013,6 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
 
     const mx::DocumentPtr doc = mx::createDocument();
 
-    // This is a data extractor, not MaterialX shader generation: it folds the
-    // explicit graph itself and seeds omitted surface inputs from Strelka's
-    // OpenPBR/Standard Surface defaults. Importing the complete standard library
-    // here only attached nodedef metadata this code never queried and cost about
-    // 0.3 seconds for every sidecar, even from a warm filesystem cache.
     const mx::FilePath docPath(path);
     try
     {
@@ -1110,10 +1026,6 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
         return result;
     }
 
-    // Absolute, because a texture path is later joined with the *scene's*
-    // directory: a relative docDir would prefix it a second time and every map
-    // would fail to open. The scene path arrives from the CLI, so it is
-    // routinely relative.
     const mx::FilePath docDir(std::filesystem::absolute(path).parent_path().string());
 
     for (const mx::NodePtr& materialNode : doc->getMaterialNodes())
@@ -1147,10 +1059,6 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
         out.name = materialNode->getName();
         out.params = openpbr_make_default_params();
 
-        // standard_surface splits the subsurface mean free path into a colour
-        // and a scale; OpenPBR keeps a length and a normalised tint. Collected
-        // here because the two inputs have to be combined, which no per-input
-        // binding can do.
         OpenPBRColor ssRadius{ 1.0f, 1.0f, 1.0f };
         float ssScale = 1.0f;
         bool sawRadius = false;
@@ -1237,15 +1145,6 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
             out.params.uv_offset_y = placement.offsetY;
         }
 
-        // A mapped subsurface weight leaves the constant at zero, and the
-        // constant is not only a default: the wavefront tracer's `extend` stage
-        // has a medium id and no UV, so it derives the interior volume from this
-        // block alone. At weight zero that volume is *no medium* -- zero
-        // extinction -- and the random walk then crosses the object in one
-        // straight line and leaves at full throughput, which is what rendered
-        // the Open Chess Set's kings white instead of dark marble. Where the map
-        // reads zero no walk starts in the first place, so saying "there is a
-        // medium here" costs nothing and is what the document means.
         if (!out.texPaths[OPENPBR_TEX_SUBSURFACE_WEIGHT].empty() && out.params.subsurface_weight <= 0.0f)
         {
             out.params.subsurface_weight = 1.0f;
@@ -1314,10 +1213,6 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
     int applied = 0;
     for (const MaterialXMaterial& m : materials)
     {
-        // `M_Bishop_B` should find a glTF material called `Bishop_B`. The Open
-        // Chess Set names its materials that way and its geometry the other, and
-        // an exact-match-only rule would bind nothing while looking like it had
-        // read the file.
         std::string alias = m.name;
         if (alias.starts_with("M_"))
         {
@@ -1340,12 +1235,6 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
         }
         if (!matched)
         {
-            // Only worth saying when nothing else will bind this material. A
-            // document that assigns through a <look> -- which is the normal way
-            // to build a MaterialX scene -- has no reason to name its materials
-            // after the glTF ones, and warning there made the Open Chess Set
-            // print fifteen complaints about a file it went on to load
-            // correctly.
             const bool boundByLook =
                 std::ranges::any_of(doc.assignments, [&](const MaterialXAssignment& a) { return a.material == m.name; });
             if (!boundByLook)
@@ -1364,10 +1253,6 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
             STRELKA_WARNING("MaterialX {}: '{}' has inputs this loader cannot express: {}", path, m.name, joined);
         }
     }
-    // Then the look. A material bound this way gets its own scene material and
-    // is pointed at from the instances of the named node, because the geometry a
-    // look assigns to usually shares one placeholder material with everything
-    // else -- rewriting that in place would repaint the whole board.
     for (const MaterialXAssignment& assign : doc.assignments)
     {
         const auto found =

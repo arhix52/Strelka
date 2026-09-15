@@ -13,36 +13,6 @@
 #include <cmath>
 #include <cstdint>
 
-// ---------------------------------------------------------------------------
-// White furnace test for the GGX lobes.
-//
-// Put a perfectly white conductor (F0 = 1, so every Fresnel evaluation returns
-// 1) under a uniform white environment and the surface must return exactly the
-// light it receives: no more -- that would be energy created out of nothing --
-// and no less, since nothing absorbs. The quantity being measured is the
-// directional albedo
-//
-//     E(wo) = integral over the hemisphere of f(wo, wi) * |cos(theta_i)| dwi
-//
-// which the sampling routines hand over directly: the Monte Carlo mean of
-// bsdf_over_pdf IS that integral, because bsdf_over_pdf = f * cos / pdf and the
-// directions are drawn from pdf. Samples that come back BSDF_EVENT_ABSORB (a
-// VNDF half-vector that reflects below the horizon) count as zero, which is
-// what makes the test bite -- that is precisely the energy single-scattering
-// GGX throws away.
-//
-// This is the test that would have caught the defect fixed in
-// ggx_energy_term(): before multiple-scattering compensation a white metal
-// viewed at NdotV = 0.5 returned 0.451 of its incident energy at roughness 1.0
-// and 0.999 at roughness 0.1 -- a loss that is invisible where these lobes are
-// usually eyeballed and dominant where they are not. Stubbing the compensation
-// back out turns 93 of the assertions below red.
-//
-// The sampler is a fixed-seed jittered stratified grid, never rand(): the same
-// numbers every run, so a threshold that passes today cannot start flickering
-// tomorrow.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 
@@ -166,13 +136,6 @@ const float kViewCosines[] = { 0.1f, 0.25f, 0.5f, 0.75f, 0.95f, 1.0f };
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// The upper bound: a white furnace may never brighten.
-//
-// The compensation factor is a fit, so it overshoots slightly in places; the
-// tolerance is the fit's own worst-case error (~2.4% at grazing incidence),
-// not licence for the lobe to invent energy. Anything past this is a real leak.
-// ---------------------------------------------------------------------------
 TEST_CASE("white furnace: GGX directional albedo never exceeds one")
 {
     const double kUpperBound = 1.03;
@@ -193,17 +156,6 @@ TEST_CASE("white furnace: GGX directional albedo never exceeds one")
     }
 }
 
-// ---------------------------------------------------------------------------
-// The lower bound: this is the regression guard.
-//
-// Without ggx_energy_compensation() the single-scattering lobe returns only E
-// of the light it should. Measured at NdotV = 0.5: 0.971 at roughness 0.3,
-// 0.857 at 0.5, 0.704 at 0.7, 0.451 at 1.0 -- so this assertion fails at every
-// roughness from 0.4 up the moment the compensation is removed.
-//
-// The compensated lobe clears the bound with room to spare: the worst case
-// over the whole grid is 0.977, at grazing incidence where the fit is weakest.
-// ---------------------------------------------------------------------------
 TEST_CASE("white furnace: GGX keeps at least 94% of its energy at every roughness")
 {
     const double kLowerBound = 0.94;
@@ -224,12 +176,6 @@ TEST_CASE("white furnace: GGX keeps at least 94% of its energy at every roughnes
     }
 }
 
-// ---------------------------------------------------------------------------
-// The two entry points must agree. standard_pbr_sample() with metallic = 1
-// reduces to exactly the conductor lobe, and a divergence here means the
-// compensation was applied at one call site and forgotten at another -- the
-// failure mode the four-call-site comment in standard_pbr.h warns about.
-// ---------------------------------------------------------------------------
 TEST_CASE("white furnace: standard_pbr at metallic=1 matches the conductor lobe")
 {
     for (float NdotV : kViewCosines)
@@ -280,10 +226,6 @@ TEST_CASE("ggx_energy_compensation leaves a black lobe alone")
 
 TEST_CASE("ggx_energy_term is non-decreasing in roughness")
 {
-    // Rougher microsurfaces scatter more times before escaping, so the energy
-    // to put back can only grow. The tolerance absorbs a ~1e-4 wobble the
-    // polynomial fit has near roughness 0.56 at grazing incidence; it is two
-    // orders of magnitude below the term's own value there.
     const float kWobble = 1e-3f;
 
     for (float NdotV : kViewCosines)
@@ -305,15 +247,6 @@ TEST_CASE("ggx_energy_term is non-decreasing in roughness")
     }
 }
 
-// ---------------------------------------------------------------------------
-// The fit against its reference.
-//
-// Reference values come from a VNDF-sampled computation of the single-
-// scattering directional albedo E = mean of G2/G1, quoted as the compensation
-// factor 1/E at NdotV = 0.5. ggx_energy_term() is (1/E - 1), so the factor the
-// shader applies at F0 = 1 is 1 + ggx_energy_term(). Re-fitting the polynomial
-// is fine; drifting away from the reference it was fitted to is not.
-// ---------------------------------------------------------------------------
 TEST_CASE("ggx_energy_term reproduces the VNDF reference at NdotV = 0.5")
 {
     struct Ref

@@ -339,16 +339,6 @@ TEST_CASE("diffuse bsdf_over_pdf bounded")
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sample / eval consistency
-//
-// Multiple importance sampling weighs two strategies by each other's density,
-// so bsdf_eval() has to report exactly the density bsdf_sample() draws from, and
-// exactly the same f(wo, wi). If they disagree the weights no longer sum to one
-// and the estimator is biased — invisibly, because each strategy on its own
-// still looks plausible. This is checked pointwise at the sampled direction,
-// which is far sharper than any histogram test.
-// ---------------------------------------------------------------------------
 namespace
 {
 struct Lcg
@@ -414,11 +404,6 @@ TEST_CASE("bsdf_eval reports the density bsdf_sample draws from")
                         ++compared;
                         worstPdf = std::max(worstPdf, (double)std::fabs(e.pdf - s.pdf) / s.pdf);
 
-                        // And the throughput each route produces for that
-                        // direction must agree, once both are in the same cosine
-                        // convention -- see the note on the result structs in
-                        // bsdf_types.h. This is precisely the quantity multiple
-                        // importance sampling assumes is the same on both paths.
                         const float cosWi = std::fabs(dot(si.shading_normal, s.wi));
                         const float3 fromSample = s.bsdf_over_pdf;
                         const float3 fromEval = e.bsdf * (cosWi / e.pdf);

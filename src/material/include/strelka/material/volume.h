@@ -1,29 +1,6 @@
 #ifndef STRELKA_VOLUME_H
 #define STRELKA_VOLUME_H
 
-// ============================================================================
-// volume.h -- Beer-Lambert absorption for transmissive media
-// ============================================================================
-//
-// KHR_materials_volume gives a medium as (attenuationColor C, attenuationDistance d):
-// the colour a white beam is left with after travelling d through it. Turning
-// that into an extinction coefficient has two incompatible readings, and they
-// disagree by a lot -- at C = 0.5 the glTF form gives sigma_t = 0.69/d and the
-// Cycles form 0.5/d, so the same asset renders visibly different densities.
-//
-//   VOLUME_MODEL_GLTF   sigma_t = -ln(C) / d
-//       The spec's own definition, and what any conformant glTF viewer does:
-//       exp(-sigma_t * d) == C exactly, so the parameter means what it says.
-//
-//   VOLUME_MODEL_CYCLES sigma_t = (1 - C) / d
-//       What Blender's Volume Absorption node produces, and therefore what a
-//       Cycles reference render shows. Not equal to C after distance d.
-//
-// Neither is "wrong"; they answer to different authorities. The choice is a
-// render setting rather than a constant so an asset can be matched to whichever
-// pipeline it was authored against.
-// ============================================================================
-
 #include "material_math.h"
 
 #define VOLUME_MODEL_GLTF   0u

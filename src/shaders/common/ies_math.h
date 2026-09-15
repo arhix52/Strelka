@@ -1,34 +1,6 @@
 #ifndef STRELKA_IES_MATH_H
 #define STRELKA_IES_MATH_H
 
-// ============================================================================
-// ies_math.h -- evaluating an IES photometric table.
-//
-// One implementation for the CPU loader and both device backends. It used to be
-// three transcriptions, and all three carried the same mistakes -- which is what
-// three copies of a convention buys.
-//
-// The interpolation is Catmull-Rom over four samples per axis, not bilinear,
-// and that is a deliberate match to Cycles (intern/cycles/kernel/util/ies.h).
-// The reason is measurable rather than aesthetic: on the ladder's Philips
-// CDM-R111 reflector, whose table steps 5 degrees while the beam falls by a
-// factor of 2.4 between 20 and 25 degrees, straight lines between the samples
-// read 12.7% high at the midpoint of that interval. Against the Cycles
-// reference the row sat at ratio 1.050 with rel 0.057; the whole of that gap
-// was the two renderers drawing different curves through the same numbers.
-//
-// A table is also the *whole* of what the luminaire emits: outside its
-// tabulated range the answer is zero, not the edge value extrapolated onwards
-// (which reached -1800 cd at 180 degrees on a downlight, and +2800 on a table
-// that rises to its last entry). Cycles returns zero there too.
-//
-// The angles are expected already unfolded to the full turn -- see
-// unfoldIesAzimuth() in the loader, which mirrors a quadrant or half table the
-// way LM-63 says to and appends the 360 degree duplicate. Doing it once at load
-// time is what lets the cubic have real neighbours at the seam instead of
-// reflected guesses.
-// ============================================================================
-
 #include <strelka/material/material_math.h>
 
 // Which address space the table lives in. Metal needs it spelled out on the
@@ -83,11 +55,6 @@ DEVICE_FUNC int iesLowerIndex(STRELKA_IES_PTR const float* a, int n, float x)
     return (idx < 0) ? 0 : ((idx > n - 2) ? (n - 2) : idx);
 }
 
-/// One column of the table, interpolated across the vertical axis.
-///
-/// The fallbacks at the ends are Cycles': a missing first neighbour repeats the
-/// second, unless the table starts at the pole, where the value across the pole
-/// at this azimuth is a better guess than a flat repeat. Same at the far end.
 DEVICE_FUNC float iesInterpVertical(
     STRELKA_IES_PTR const float* candela, int nV, int h, int v, float vFrac, bool wrapLow, bool wrapHigh)
 {
@@ -117,11 +84,6 @@ DEVICE_FUNC float iesInterpVertical(
     return iesCubicInterp(a, b, c, d, vFrac);
 }
 
-/// Candela in the direction (vertDeg from the photometric axis, azimuthDeg
-/// around it), for a table already unfolded to the full azimuth range.
-///
-/// Returns zero outside the tabulated range: the file describes everything the
-/// luminaire emits, so a direction it does not cover receives nothing.
 DEVICE_FUNC float iesEvaluate(STRELKA_IES_PTR const float* vAngles,
                               int nV,
                               STRELKA_IES_PTR const float* hAngles,

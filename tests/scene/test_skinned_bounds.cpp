@@ -196,10 +196,6 @@ TEST_CASE("Skinning is composed with the instance transform")
     CHECK_FALSE(scene.pick(glm::float3(5, 0, 5), glm::float3(0, 0, -1)).hit);
 }
 
-// Same quad, but the joint hangs off a parent and carries a real inverse bind
-// matrix, which is what an exported character looks like. Both are places where a
-// wrong convention or a stale world-transform cache shows up as a box that drifts
-// away from the geometry.
 namespace
 {
 

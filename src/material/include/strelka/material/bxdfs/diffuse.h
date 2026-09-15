@@ -37,10 +37,6 @@ DEVICE_FUNC BsdfSampleResult diffuse_sample(const THREAD_REF SurfaceInteraction&
         return result;
     }
 
-    // Lambert: f = albedo / pi
-    // bsdf_over_pdf = (albedo / pi) * cos_theta / pdf
-    //               = (albedo / pi) * cos_theta / (cos_theta / pi)
-    //               = albedo
     result.bsdf_over_pdf = si.albedo;
     result.event_type    = BSDF_EVENT_DIFFUSE_REFLECTION;
 

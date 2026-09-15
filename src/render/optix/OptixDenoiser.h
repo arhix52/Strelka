@@ -11,17 +11,6 @@
 namespace oka
 {
 
-/// The OptiX AI denoiser, standing in for MetalFX on this backend.
-///
-/// It owns its own layers -- colour, albedo, normal, flow, and the internal
-/// guide layers a temporal model keeps between frames -- so that the renderer
-/// hands it four device pointers and gets one back. Which model runs is decided
-/// by `DenoisePlan`, not here: this class is the plumbing and the plan is the
-/// policy, which is what makes the policy testable without a GPU.
-///
-/// The layer buffers are reallocated only when the plan's resolution or model
-/// changes, because `optixDenoiserSetup` is not cheap and a render loop calls
-/// this every frame.
 class OptixDenoiserContext
 {
 public:
@@ -31,10 +20,6 @@ public:
     OptixDenoiserContext(const OptixDenoiserContext&) = delete;
     OptixDenoiserContext& operator=(const OptixDenoiserContext&) = delete;
 
-    /// Build (or rebuild) for this plan. Returns false and leaves the object
-    /// inactive if the denoiser could not be created -- the caller then shows the
-    /// un-denoised image rather than nothing, which is the failure mode worth
-    /// having.
     bool configure(OptixDeviceContext context, CUstream stream, const DenoisePlan& plan);
 
     /// Throw away the temporal history. The next frame is treated as the first

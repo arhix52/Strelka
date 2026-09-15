@@ -9,11 +9,6 @@
 
 using oka::test::unorm8;
 
-// What this guards is the choice of BC5 for normal maps over the BC1 the colour
-// textures use. The number that matters is not per-channel error but the angle
-// between the decoded normal and the original one, since that is what lands in
-// the shading: a degree of error is invisible, and ten degrees is a facet.
-
 namespace
 {
 
@@ -203,10 +198,6 @@ TEST_CASE("BC5 keeps a normal map within a degree of the source")
     const int height = 64;
     const std::vector<uint8_t> rgba = makeNormalMap(width, height);
 
-    // The field below is harsher than a photographed normal map: a block can
-    // straddle the steep side of a bump and the flat between two of them. On
-    // fir_bark_nor_gl from the pine scene the same encoder gives 0.3 degrees
-    // mean and 5 degrees max. The bounds here leave room for the synthetic case.
     const Error bc5 = measure(rgba, width, height, oka::bc::Format::BC5);
     CHECK(bc5.mean < 2.0f);
     CHECK(bc5.max < 8.0f);
@@ -221,10 +212,6 @@ TEST_CASE("BC1 is what normal maps are compressed with instead of")
     const Error bc1 = measure(rgba, width, height, oka::bc::Format::BC1);
     const Error bc5 = measure(rgba, width, height, oka::bc::Format::BC5);
 
-    // Same 8 bits per pixel -- BC1 spends them on three channels sharing one
-    // line, BC5 on two channels with an endpoint pair each. On this field that
-    // is 11 degrees of mean error against 1.4; on the pine scene's bark and
-    // rock it is 4 to 13 degrees against 0.8 to 2.6.
     CHECK(bc1.mean > 2.0f * bc5.mean);
 }
 
@@ -259,11 +246,6 @@ TEST_CASE("normalizeNormalMap makes Z reconstruction exact")
 
 TEST_CASE("normalizeNormalMap keeps the direction of a non-unit texel")
 {
-    // A glTF that points normalTexture at a displacement map: three equal
-    // channels, nothing near unit length. The direction is still the one the
-    // shader used to read out of rgb, and that is what has to survive -- both
-    // for a bright texel and for the mid-grey that carries almost no direction
-    // at all.
     for (const uint8_t grey : { (uint8_t)200, (uint8_t)128 })
     {
         std::vector<uint8_t> rgba = { grey, grey, grey, 255 };

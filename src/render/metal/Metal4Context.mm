@@ -132,22 +132,8 @@ bool Metal4Context::init(MTL::Device* device, uint32_t frameCount, size_t consta
     mDevice = device;
 
     NS::Error* error = nullptr;
-    // The queue has to be created with a descriptor naming a feedback queue.
-    // Without one, commit feedback handlers are never delivered -- and this
-    // renderer's asynchronous loop clears its in-flight flag from exactly that
-    // handler, so the editor rendered one frame, never learned it had finished,
-    // and showed a black viewport forever. The headless path did not notice
-    // because it waits on the queue's shared event instead.
     MTL4::CommandQueueDescriptor* queueDesc = MTL4::CommandQueueDescriptor::alloc()->init();
     mFeedbackQueue = dispatch_queue_create("com.strelka.mtl4.feedback", DISPATCH_QUEUE_SERIAL);
-    // A reference of our own, because the descriptor's ownership of this is
-    // one-sided. Measured, since the header says nothing: setFeedbackQueue does
-    // not retain and neither does newMTL4CommandQueue, but releasing the
-    // descriptor *does* release the queue. So the create's +1 is consumed by
-    // queueDesc->release() below, leaving the command queue -- which is still
-    // running -- pointed at a deallocated dispatch queue, and leaving our own
-    // dispatch_release in release() to trap as an over-release. It did: every
-    // teardown of a Metal 4 renderer aborted in libdispatch.
     dispatch_retain(mFeedbackQueue);
     queueDesc->setFeedbackQueue(mFeedbackQueue);
     mQueue = device->newMTL4CommandQueue(queueDesc, &error);
@@ -286,10 +272,6 @@ void Metal4Context::afterFeedback(std::function<void()> work)
         return;
     }
 
-    // The queue is serial and is also where Metal invokes commit feedback. A
-    // block enqueued from a handler cannot run until that handler returns,
-    // giving the driver a chance to retire the completed scheduler workload
-    // before the next command buffer is committed.
     auto deferred = std::make_shared<std::function<void()>>(std::move(work));
     dispatch_async(mFeedbackQueue, ^{
       (*deferred)();
@@ -680,11 +662,6 @@ MTL::ComputePipelineState* Metal4Context::newComputePipelineStateLinked(MTL::Lib
     };
 
     MTL4::FunctionDescriptor* compute = describe(functionName, true);
-    // The analytic wrappers do not read function constants. Specialising each
-    // one makes Xcode's replayer emit the same AIR module twice and reject the
-    // pipeline with a duplicate-symbol error. The optional triangle function
-    // is the alpha IFT and does use scene-level alpha constants, so it must be
-    // specialised together with the compute entry point.
     MTL4::FunctionDescriptor* linked0 = describe(linkedFunctionName0, false);
     MTL4::FunctionDescriptor* linked1 = describe(linkedFunctionName1, false);
     MTL4::FunctionDescriptor* linked2 = linkedFunctionName2 ? describe(linkedFunctionName2, true) : nullptr;

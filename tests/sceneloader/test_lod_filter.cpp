@@ -4,12 +4,6 @@
 
 using oka::isProxyOrLowerLod;
 
-// The rule decides whether a node's geometry is drawn at all, so a false
-// positive silently deletes an object from the scene and a false negative puts
-// a flat untextured hull back on top of the detailed mesh. Both failures are
-// invisible in aggregate metrics, which is why the cases below are spelled out
-// one at a time rather than sampled.
-
 TEST_CASE("LOD filter keeps level zero and drops the alternatives")
 {
     // The names that actually occur in the pine forest export.

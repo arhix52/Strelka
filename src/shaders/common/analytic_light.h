@@ -1,11 +1,6 @@
 #ifndef STRELKA_ANALYTIC_LIGHT_H
 #define STRELKA_ANALYTIC_LIGHT_H
 
-// Shared analytic disc/ellipsoid measure and intersection math. The axes are
-// the columns of the authored object-to-world linear transform, including the
-// light radius. Sampling and intersection therefore describe the same smooth
-// geometry even under shear, non-uniform scale, or a mirrored transform.
-
 #include <strelka/material/material_math.h>
 #include <light_types.h>
 #include <light_pdf.h>
@@ -247,11 +242,6 @@ DEVICE_FUNC bool affineComponentwiseInverseRowIsStable(float3 inverseNumeratorRo
     const float determinantMantissa = decomposeFloatExponent(fabsf(determinant), determinantExponent);
     const float condition =
         scaleFloatExponent(numeratorMantissa / determinantMantissa, numeratorExponent - determinantExponent);
-    // A three-term float matrix-vector product has componentwise backward
-    // error gamma_3 < 3 * 2^-24 / (1 - 3 * 2^-24). Keeping the Skeel
-    // condition at 2^12 therefore bounds the recovered object-space endpoint
-    // drift below 7.33e-4. General affine solves (including transformed
-    // discs) do not map a unit sphere through A and do not inherit this gate.
     constexpr float maximumComponentwiseCondition = 4096.0f;
     return condition <= maximumComponentwiseCondition;
 }
@@ -274,10 +264,6 @@ DEVICE_FUNC bool affineEllipsoidPointMapIsRepresentable(const THREAD_REF ScaledA
                                                  determinant);
 }
 
-// Factor A=R*B*C using positive powers of two. C removes each authored
-// axis's independent magnitude before R equilibrates the world rows. The
-// resulting B retains the axis directions instead of rounding a small column
-// away merely because another column is large.
 DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, float3 axisZ)
 {
     ScaledAffineBasis result;
@@ -305,16 +291,6 @@ DEVICE_FUNC ScaledAffineBasis scaledAffineBasis(float3 axisX, float3 axisY, floa
         return result;
     }
 
-    // The equilibration below exists to keep the determinant and the adjugate
-    // representable when the authored axes differ by many orders of magnitude:
-    // the determinant is cubic in the axis scale, so a light with axes of 1e13
-    // overflows a float outright. It costs twelve frexp and twelve ldexp, and
-    // it buys nothing at all for a light authored in the range a scene in
-    // metres uses. Inside this window the products cannot overflow and cannot
-    // fall into the denormals, so the axes are used as they are and the same
-    // conditioning test decides. Everything outside it falls through to the
-    // exact path below, which is what tests/render/test_light_pdf.cpp's 1e13
-    // and 2e18 lights exercise.
     const float widest = fmaxf(scaleX, fmaxf(scaleY, scaleZ));
     const float narrowest = fminf(scaleX, fminf(scaleY, scaleZ));
     if (widest < 1.0e10f && narrowest > 1.0e-10f)
@@ -446,10 +422,6 @@ DEVICE_FUNC int compensatedExponent(CompensatedFloat value, int externalExponent
     return exponent + externalExponent;
 }
 
-// Returns numerator / |cofactor(A) n| and its unit direction. Scaling each
-// world row independently keeps every determinant term representable; keeping
-// each component as a two-float expansion avoids the precision loss from
-// materializing two nearly parallel transformed tangents before their cross.
 DEVICE_FUNC float affineCofactorReciprocalAndDirection(float3 axisX,
                                                        float3 axisY,
                                                        float3 axisZ,
@@ -693,10 +665,6 @@ DEVICE_FUNC bool analyticAffineTransformIsNonsingular(float3 axisX, float3 axisY
     {
         return false;
     }
-    // For a unit object normal n, J_A(n)=|cofactor(A)n|. Its maximum is at
-    // most the sum of the three column norms. Express the reciprocal bound in
-    // terms of representable basis densities, so no overflowing Jacobian is
-    // formed and every point on an accepted ellipsoid has positive p_A.
     float3 nx;
     float3 ny;
     float3 nz;
@@ -757,22 +725,6 @@ sampleAnalyticDisc(float3 center, float3 axisX, float3 axisY, float3 emissionNor
     return sample;
 }
 
-
-/// The `Unchecked` variants below take the representability decision as already
-/// made, and the checked ones make it.
-///
-/// analyticEllipsoidIsRepresentable() is a property of the light's transform:
-/// nothing about a ray changes it, and it is not cheap -- it builds a scaled
-/// affine basis and probes the area density along three object axes. Deciding
-/// it per ray, per light, cost more than everything else in the frame put
-/// together: on kids_room at 1280x720 depth 4, three of its ten lights being
-/// spheres or spots, 46.6 ms of 86.7 ms/sample. One sphere light was 17-25 ms.
-///
-/// Scene::setLight already makes the same decision with the same function and
-/// refuses to enable a light that fails it, so a light that reaches traversal
-/// or sampling has passed -- tests/scene/test_light_units.cpp pins that. The
-/// checked entry points remain for callers holding geometry no scene has
-/// vetted, which is every direct caller in tests.
 DEVICE_FUNC AnalyticLightSample
 sampleAnalyticEllipsoidUnchecked(float3 center, float3 axisX, float3 axisY, float3 axisZ, float u1, float u2)
 {
@@ -971,12 +923,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticDisc(float3 rayOrigin,
 #endif
 }
 
-/// Intersect the exact affine parallelogram sampled by a rectangle light.
-///
-/// `corner + u*edgeX + v*edgeY`, `u,v in [0,1]`, is the surface used by both
-/// rectangle proposal paths. Keeping the solve here also lets visibility use
-/// the same closed surface without depending on a two-triangle proxy's edge
-/// rules or instance mask.
 DEVICE_FUNC AnalyticLightIntersection intersectAnalyticRectangle(float3 rayOrigin,
                                                                  float3 rayDirection,
                                                                  float minDistance,
@@ -1284,11 +1230,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3
 
     const CompensatedFloat a = compensatedDot3(dx, dy, dz, dx, dy, dz);
     const CompensatedFloat halfB = compensatedDot3(sx, sy, sz, dx, dy, dz);
-    // The usual b^2-a*c form subtracts two values set by the distance to the
-    // origin; for a small affine light far away it can need more significand
-    // bits than even a two-float expansion contains. The equivalent geometric
-    // discriminant det(B)^2 |D|^2 - |O cross D|^2 depends only on the line's
-    // perpendicular distance and retains the scale of the light itself.
     const CompensatedFloat crossX =
         addCompensated(multiplyCompensated(sy, dz), negateCompensated(multiplyCompensated(sz, dy)));
     const CompensatedFloat crossY =
@@ -1307,10 +1248,6 @@ DEVICE_FUNC AnalyticLightIntersection intersectAnalyticEllipsoidUnchecked(float3
     }
     const CompensatedFloat closestParameter = divideCompensated(negateCompensated(halfB), a);
     const CompensatedFloat root = divideCompensated(sqrtCompensated(discriminant), a);
-    // Reconstruct the surface point from the line's perpendicular component
-    // and chord length. Evaluating s+d*(closest+-root) loses the chord when a
-    // very thin ellipsoid is far from the ray origin, even though both roots
-    // remain representable as a two-float world distance.
     const CompensatedFloat perpendicularX = divideCompensated(
         addCompensated(multiplyCompensated(dy, crossZ), negateCompensated(multiplyCompensated(dz, crossY))), a);
     const CompensatedFloat perpendicularY = divideCompensated(

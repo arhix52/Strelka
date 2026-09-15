@@ -4,7 +4,6 @@
 #include <cmath>
 #include <string_view>
 
-
 namespace oka::editor_screenshot
 {
 
@@ -15,17 +14,6 @@ enum class Source
     DisplayReferredHdr,
 };
 
-/// What a screenshot should contain, given where it is going.
-///
-/// PNG has nowhere to put a value above white, so it is always the display
-/// transform taken back down to SDR -- clipping the EDR range into it instead
-/// would throw away exactly the highlights the headroom was spent on.
-///
-/// EXR can hold either, so it takes the caller's choice. Scene-linear radiance
-/// is the default because that is what a screenshot is usually wanted for -- a
-/// reference, a comparison against another renderer, an image to grade. The
-/// display-referred form is for the other question: what the screen actually
-/// showed, with the EDR range intact.
 inline Source sourceForExtension(std::string_view extension, bool displayReferred = false)
 {
     if (extension == ".png")

@@ -5,20 +5,7 @@
 // material_math.h -- Cross-platform math primitives for CUDA, Metal, and CPU
 // ============================================================================
 
-// STRELKA_MATERIAL_CUDA_HOST selects this branch for the OptiX backend's plain
-// g++ translation units. They are host code, but they interoperate with device
-// structs and already include CUDA's vector types and sutil, so they need the
-// same spellings the device gets -- not the GLM ones the CPU branch installs.
-// Taking the CPU branch there redefined make_float3/clamp/saturate on top of
-// CUDA's and sutil's, which is what broke the Linux build.
 #if defined(__CUDA_ARCH__) || defined(__CUDACC__) || defined(STRELKA_MATERIAL_CUDA_HOST)
-// ---- CUDA (device code, nvcc host pass, and OptiX host code) ---------------
-// saturate() below is sutil's, not a builtin -- pull it in here so every TU
-// that reaches this branch gets it, instead of relying on each .cu/.cpp file
-// to have included sutil/vec_math_adv.h before this header. <math.h> (the C
-// header, not <cmath>) first: sutil's isnan(float3) calls unqualified
-// isnan(float) expecting it in the global namespace, which nvcc TUs get for
-// free but a plain host g++/clang TU does not from <cmath> alone.
 #    include <math.h>
 #    include <sutil/vec_math_adv.h>
 #    ifdef __CUDA_ARCH__
@@ -26,16 +13,6 @@
 #    else
 #        define DEVICE_FUNC inline
 #    endif
-// Storage class for a module-scope constant table; see sheen_albedo_lut.h.
-//
-// Under nvcc the table has to carry __device__ or it lands in host memory and
-// every device function referencing it fails to resolve -- which is exactly
-// what "identifier kSheenAlbedoLut is undefined" meant when the closest-hit
-// module was compiled. `static` keeps it internal to the translation unit, so
-// relocatable device code does not end up with duplicate definitions.
-//
-// Plain g++ building the OptiX host side reaches this branch too (see
-// STRELKA_MATERIAL_CUDA_HOST) and does not know __device__, hence the split.
 #    if defined(__CUDACC__)
 #        define DEVICE_CONST static __device__ const
 #    else
@@ -170,10 +147,6 @@ inline float3 reflect_dir(float3 incident, float3 normal)
 #    include <cmath>
 #    include <algorithm>
 
-// Guarded with the same macro material_params.h uses, so whichever of the two
-// is included first wins and the other is a no-op. They must agree on GLM --
-// see the note at the top of material_params.h for what happens when they do
-// not.
 #    ifndef STRELKA_MATERIAL_FLOAT_TYPES
 #        define STRELKA_MATERIAL_FLOAT_TYPES
 using float2 = glm::vec2;
@@ -182,12 +155,7 @@ using float4 = glm::vec4;
 #    endif
 
 // NOLINTBEGIN(modernize-return-braced-init-list)
-//
-// Naming the type is the whole point of a shim three compilers share, so a
-// braced return would delete the only thing these lines say. Markers rather
 // than trailing NOLINTs because clang-format splits a one-liner it is asked
-// to format and carries the comment to the closing brace, where it suppresses
-// nothing -- and this block is hand-aligned, so it is not formatted at all.
 inline float3 make_float3(float x, float y, float z)
 {
     return float3(x, y, z);
@@ -272,10 +240,6 @@ DEVICE_FUNC float3 normalizeFiniteVectorOrZero(float3 v)
     return lengthSquared > 0.0f ? scaled / sqrtf(lengthSquared) : make_float3(0.0f);
 }
 
-/// A tangent is transported as a vector and then made orthogonal to the
-/// inverse-transpose normal. Returning zero for a collapsed frame keeps all
-/// three backends out of normalize(0) and gives callers an explicit invalid
-/// sentinel.
 DEVICE_FUNC float3 orthonormalizeTangent(float3 normal, float3 transformedTangent)
 {
     const float3 n = normalizeFiniteVectorOrZero(normal);
@@ -307,7 +271,6 @@ DEVICE_FUNC float finiteVectorLength(float3 v)
     const float normalizedLength = sqrtf(dot(scaled, scaled));
     return normalizedLength <= 3.402823466e38f / scale ? scale * normalizedLength : 0.0f;
 }
-
 
 DEVICE_FUNC float3 finiteDirectionAndDistance(float3 offset, THREAD_REF float& distance)
 {
@@ -537,10 +500,6 @@ DEVICE_FUNC void addExactProduct(THREAD_REF ExactFloatExpansion& expansion, floa
 
 DEVICE_FUNC CompensatedFloat exactScalarTransmittedCosineSquared(float incidentCosine, float eta)
 {
-    // A product of two binary32 values is represented exactly by these two
-    // terms. Expanding its square and eta^2 before the final subtraction keeps
-    // the sign and magnitude even when the Snell remainder is below 2^-48 of
-    // either operand.
     const CompensatedFloat etaCosine = compensatedProduct(eta, incidentCosine);
     ExactFloatExpansion expansion{};
     addExactProduct(expansion, etaCosine.high, etaCosine.high);
@@ -574,10 +533,6 @@ DEVICE_FUNC CompensatedFloat dielectricTransmittedCosineSquared(CompensatedFloat
         multiplyCompensated(compensatedSum(eta, -1.0f), compensatedSum(eta, 1.0f));
     const CompensatedFloat result = addCompensated(etaSquaredCosineSquared, negateCompensated(etaSquaredMinusOne));
 
-    // Two-float arithmetic is ample until the two terms cancel to within one
-    // part per million. Scalar sample-side cosines can then use the exact
-    // binary32 expansion to certify both the TIR sign and the tiny root without
-    // paying that cost for ordinary Fresnel evaluations.
     const float cancellationScale =
         fmaxf(fabsf(compensatedValue(etaSquaredCosineSquared)), fabsf(compensatedValue(etaSquaredMinusOne)));
     if (incidentCosine.low != 0.0f || fabsf(compensatedValue(result)) > 9.5367431640625e-7f * cancellationScale)
@@ -732,10 +687,6 @@ DEVICE_FUNC float3 finiteCrossDirection(float3 a, float3 b)
     return normalizeFiniteVectorOrZero(accurateCross(scaledA, scaledB));
 }
 
-// `numerator / length(cross(a, b))`, evaluated without first forming either
-// the potentially overflowing cross product or its reciprocal. This is the
-// useful quantity for area densities: the area itself need not fit in float as
-// long as the final density does.
 DEVICE_FUNC float finiteCrossReciprocal(float3 a, float3 b, float numerator)
 {
 #if defined(STRELKA_FAST_FINITE_GPU_MATH)

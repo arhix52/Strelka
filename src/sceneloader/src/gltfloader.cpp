@@ -81,7 +81,6 @@ uint32_t& lodSkipCounter()
     return skipped;
 }
 
-
 // packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
 // packTangent uses same format as packNormal (tangents are unit vectors in [-1,1])
 
@@ -154,20 +153,9 @@ void countModelGeometry(const tinygltf::Model& model, size_t& vertexCount, size_
 namespace
 {
 
-// Spread [0, count) over the machine, or run it here when that would cost more
-// than it saves.
-//
-// A thread per chunk rather than a pool: this is called a handful of times in a
-// scene load -- once per unique mesh primitive -- and the pine forest's are two
-// million vertices each, so the launch is noise against the work and a pool
-// would be machinery with one customer.
 template <typename Fn>
 void parallelFor(size_t count, Fn&& body)
 {
-    // Under this a load is faster on one thread than it is handing the range
-    // out. Measured on the small validation scenes, whose primitives are in the
-    // thousands of vertices and which must not get slower to make a forest
-    // faster.
     constexpr size_t kSerialBelow = size_t{ 64 } * 1024;
     const unsigned hardware = std::thread::hardware_concurrency();
     const size_t threads = count < kSerialBelow ? 1u :
@@ -213,15 +201,6 @@ void processPrimitive(const tinygltf::Model& model,
     using namespace std;
     assert(primitive.attributes.find("POSITION") != primitive.attributes.end());
 
-    // A glTF mesh referenced by more than one node is one mesh, not one per
-    // node. The pine forest scatters 34 539 placements over 24 objects; built
-    // per node that is 34 539 copies of vertices that are bit-identical, and
-    // 34 539 acceleration structures over them -- the instancing the scene is
-    // made of buys nothing at all.
-    //
-    // Safe because the vertices here are in object space: only globalScale is
-    // folded in, the node transform goes to the instance. Checked before the
-    // accessors are read, so a hit skips the parse as well as the upload.
     {
         const auto cached = meshCache.find(primitiveKey);
         if (cached != meshCache.end())
@@ -367,18 +346,9 @@ void processPrimitive(const tinygltf::Model& model,
         sb.reserve(vertexCount);
     }
 
-    // Written straight into the scene arrays. A local vector that createMesh
-    // then copies is a second pass over every unique vertex -- 1.5 GB on the
-    // pine forest, on top of the realloc copies that happen if those arrays
-    // were not reserved.
     auto& vertices = scene.getVertices();
     auto& indicesOut = scene.getIndices();
     const uint32_t vbOffset = static_cast<uint32_t>(vertices.size());
-    // Sized once so the conversion below can be handed out by index. resize()
-    // value-initialises the new tail, which is a pass this loop then overwrites
-    // -- and it is still cheaper than doing the conversion on one core: a
-    // primitive here is two million vertices on the pine forest, and the packing
-    // it does per vertex is most of what a scene load spends outside the kernel.
     vertices.resize(size_t(vbOffset) + vertexCount);
 
     // One vertex, from whatever attributes this primitive turned out to have.
@@ -772,14 +742,6 @@ void processNode(const tinygltf::Model& model,
         scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::mesh;
         const tinygltf::Mesh& mesh = model.meshes[node.mesh];
 
-        // EXT_mesh_gpu_instancing: the node's mesh is drawn once per entry in
-        // the TRANSLATION/ROTATION/SCALE accessors, and the node itself is not
-        // drawn on its own.
-        //
-        // A scattered scene is almost entirely this. Written as one node per
-        // placement -- the obvious first version -- the pine forest's 2.2 M
-        // placements came to 763 MB of JSON and a third of the load time was
-        // spent reading it back as text.
         std::vector<glm::float4x4> instanceTransforms;
         readGpuInstancing(model, node, instanceTransforms);
 
@@ -845,14 +807,6 @@ void processNode(const tinygltf::Model& model,
     }
 }
 
-// A GLB keeps its images in buffer views, not as files, and the renderer only
-// ever opens a path. Rather than teach every backend to take pixels, the bytes
-// are written out once beside the scene and the rest of the pipeline sees an
-// ordinary texture file.
-//
-// This is what a DCC export of a large scene looks like -- one self-contained
-// GLB instead of a .gltf plus a folder of a hundred loose jpegs -- so treating
-// it as unsupported cost every embedded texture in the file.
 std::string extractEmbeddedImage(const tinygltf::Model& model, int imageId, const std::string& modelPath)
 {
     const tinygltf::Image& image = model.images[imageId];
@@ -909,29 +863,12 @@ std::string getTextureUri(const tinygltf::Model& model, int texIndex, const std:
     if (uri.empty())
         return extractEmbeddedImage(model, imageId, modelPath);
 
-    // A glTF URI is percent-encoded, and a filename is not: an exporter that
-    // writes "Material #449.png" stores "Material%20%23449.png", which opens
-    // nothing. Spaces in texture names are common enough in DCC exports that
-    // this shows up as a single missing texture rather than as an obvious fault.
     std::string decoded;
     if (tinygltf::URIDecode(uri, &decoded, nullptr))
         return decoded;
     return uri;
 }
 
-// Read one scalar out of a KHR_materials_* extension, falling back to the
-// spec default when the extension or the key is absent.
-//
-// Blender writes the whole Principled BSDF through these: ior, specular,
-// transmission, anisotropy and emissive strength all leave as extensions rather
-// than as core glTF fields. Every one of them used to be hardcoded below, which
-// is why a scene could round-trip through glTF carrying the right numbers and
-// still render with none of them.
-// KHR_texture_transform lives on the texture *slot*, not the material, so it has
-// to be dug out of whichever slot carries one. Blender drives every slot of a
-// material from a single Mapping node, so taking the first is not a compromise
-// in practice -- and without it a tiled texture authored at scale 0.1 renders
-// ten times too large.
 void readTextureTransform(const tinygltf::Material& material, MaterialParams& p)
 {
     p.uv_offset_x = 0.0f;
@@ -1019,11 +956,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.roughness = (float)material.pbrMetallicRoughness.roughnessFactor;
     p.metallic = (float)material.pbrMetallicRoughness.metallicFactor;
 
-    // IOR / specular / transmission / anisotropy, from the KHR extensions.
-    // specularFactor is a 0..1 multiplier on the dielectric F0, and glTF's
-    // default of 1.0 corresponds to Strelka's specular 0.5 -- so halve it, or a
-    // material Blender exported with specularFactor 0 still gets an F0 = 0.04
-    // lobe it was never meant to have.
     p.ior = khrFloat(material, "KHR_materials_ior", "ior", 1.5f);
     p.specular = 0.5f * khrFloat(material, "KHR_materials_specular", "specularFactor", 1.0f);
     // specularColorFactor, white when the extension is absent or silent about it.
@@ -1042,10 +974,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     }
     p.transmission = khrFloat(material, "KHR_materials_transmission", "transmissionFactor", 0.0f);
 
-    // KHR_materials_diffuse_transmission. Foliage: light enters the leaf and
-    // leaves diffusely on the far side. Blender writes this through a Translucent
-    // BSDF, which the glTF exporter cannot express, so export_scene.py injects
-    // the extension after the fact -- see flatten_materials.py.
     p.diffuse_transmission = khrFloat(material, "KHR_materials_diffuse_transmission", "diffuseTransmissionFactor", 0.0f);
     p.diffuse_transmission_color = glm::float3(1.0f);
     {
@@ -1061,11 +989,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
             }
         }
     }
-    // KHR_materials_sheen. The extension carries a colour and a roughness and no
-    // separate weight, so the weight is the colour's peak channel and the colour
-    // is normalised by it -- that keeps a dim grey sheen dim rather than turning
-    // it into a full-strength grey layer, and leaves sheen at 0 (the lobe off)
-    // when the extension is absent.
     p.sheen = 0.0f;
     p.sheen_roughness = khrFloat(material, "KHR_materials_sheen", "sheenRoughnessFactor", 0.0f);
     p.sheen_color = glm::float3(1.0f);
@@ -1085,15 +1008,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
         }
     }
 
-    // STRELKA_materials_subsurface. Not a ratified extension: glTF has nothing
-    // for subsurface, and the alternative was to fold it into
-    // KHR_materials_diffuse_transmission, which describes a leaf -- light out the
-    // far side immediately -- and not a random walk through wax.
-    //
-    // scatterColor is the *single-scattering* albedo, not the diffuse albedo a
-    // DCC shows in its colour picker. The two are related by an inversion that
-    // needs a fit, and stating which one this field is beats implementing the
-    // fit badly. Values near 1 are what marble, soap and skin want.
     p.subsurface = 0.0f;
     p.subsurface_radius = glm::float3(0.0f);
     p.subsurface_anisotropy = 0.0f;
@@ -1136,11 +1050,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
 
             if (p.subsurface > 0.0f)
             {
-                // The medium is entered through the diffuse transmission lobe:
-                // everything that would have scattered diffusely goes in instead
-                // and comes back out of the walk. scatterColor rides on
-                // diffuse_transmission_color, which is what the walk uses as its
-                // single-scattering albedo.
                 p.diffuse_transmission = p.subsurface;
                 const auto cit = ext.Has("scatterColor") ? &ext.Get("scatterColor") : nullptr;
                 if (cit && cit->IsArray() && cit->ArrayLen() >= 3)
@@ -1153,14 +1062,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
         }
     }
 
-    // STRELKA_materials_medium: a participating medium bounded by the geometry
-    // carrying this material. V-Ray's EnvironmentFog with a gizmo.
-    //
-    // The medium's interior parameters ride on the subsurface fields -- a fog
-    // volume and a block of wax differ in where light enters, not in what happens
-    // once it is inside -- so only the emission and the boundary flag are read
-    // here. `density` is the extinction, i.e. the reciprocal of the mean free
-    // path, because that is the number a DCC's fog gizmo exposes.
     p.medium_flags = 0u;
     p.medium_emission = glm::float3(0.0f);
     {
@@ -1207,10 +1108,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
 
     p.clearcoat = khrFloat(material, "KHR_materials_clearcoat", "clearcoatFactor", 0.0f);
     p.clearcoat_roughness = khrFloat(material, "KHR_materials_clearcoat", "clearcoatRoughnessFactor", 0.0f);
-    // Not in KHR_materials_clearcoat, which fixes the coat at a clear lacquer.
-    // Blender writes it into extras, and the ceramics in the bathroom scene are
-    // authored at 2.0 -- an F0 of 0.111 against the extension's 0.04, which is
-    // most of the difference between glazed and painted.
     p.clearcoat_ior = 1.5f;
     {
         const auto cit = material.extensions.find("KHR_materials_clearcoat");
@@ -1237,10 +1134,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
         }
     }
 
-    // Emission. emissiveFactor is clamped to [0,1] by the spec, so anything
-    // brighter than 1 leaves in KHR_materials_emissive_strength -- which is
-    // exactly the field this used to overwrite with a presence flag, collapsing
-    // every emitter in every Blender export to 1x.
     const auto& emf = material.emissiveFactor;
     p.emission = { (float)emf[0], (float)emf[1], (float)emf[2] };
     p.emission_strength = khrFloat(material, "KHR_materials_emissive_strength", "emissiveStrength", 1.0f);
@@ -1257,19 +1150,6 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.emission_tex = -1;
     p.occlusion_tex = -1;
     p.transmission_tex = -1;
-    // Thin-walled: a surface with no interior, so light passes straight through
-    // instead of refracting twice. A soap bubble, not a marble.
-    //
-    // glTF says a transmissive material is thin-walled unless KHR_materials_volume
-    // gives it a non-zero thickness, and taken literally that would be right. It
-    // is not followed here, because Blender only writes that extension for a
-    // specific node setup ("glTF Material Output" with a Thickness socket): under
-    // the literal reading every ordinary glass export becomes a bubble. Absence
-    // is read as solid, and thin-walledness has to be stated.
-    //
-    // What this fixes: the bubbles floating on the bath water rendered as dark
-    // specks, because a solid sphere of IOR 1.6 refracts into itself and the path
-    // dies before it gets out.
     p.thin_walled = 0;
     {
         const auto vit = material.extensions.find("KHR_materials_volume");
@@ -1300,25 +1180,10 @@ void loadMaterials(const tinygltf::Model& model, oka::Scene& scene)
 {
     for (const tinygltf::Material& material : model.materials)
     {
-        // alphaMode describes opacity, not material type. Routing MASK and BLEND
-        // to the dielectric converter turned every cutout and every blended
-        // surface into rough glass -- and, worse, silently dropped all five
-        // texture paths, because convertToDielectric never assigns them. Glass
-        // arrives through KHR_materials_transmission instead, which
-        // convertToStandardPBR now parses into a transmission lobe.
         scene.addMaterial(convertToStandardPBR(model, material, scene.getSourcePath()));
     }
 }
 
-// Fills `gltfToScene` with one entry per glTF camera: the index of the camera it
-// became in the scene, or -1 if it was not loaded.
-//
-// The map is the point. Camera *nodes* address cameras by glTF index, so if this
-// function ever appends fewer cameras than the file declares, every later index
-// is off by the number skipped and the last one addresses past the end of the
-// vector. That went unnoticed for a while because it does not crash: it corrupts
-// a projection matrix, which then compares unequal to itself in MetalRender's
-// "did the camera move" test and resets the accumulator on every single frame.
 void loadCameras(const tinygltf::Model& model, oka::Scene& scene, std::vector<int>& gltfToScene)
 {
     gltfToScene.assign(model.cameras.size(), -1);
@@ -1565,13 +1430,6 @@ void loadSkeletalData(const tinygltf::Model& model, oka::Scene& scene, const flo
 
 } // namespace
 
-
-// Curves ride in a binary sidecar; see curve_sidecar.h for the format and for
-// why glTF cannot carry them. Named after the model rather than scanned for,
-// unlike the light sidecar: a directory holding two converted scenes would
-// otherwise give one of them the other's hair.
-// External linkage is intentional: the binary-format regression test calls this
-// loader hook directly without making it part of the public glTF loader API.
 // NOLINTNEXTLINE(misc-use-internal-linkage)
 bool loadCurvesFromSidecar(const std::string& modelPath, oka::Scene& scene)
 {
@@ -1588,11 +1446,6 @@ bool loadCurvesFromSidecar(const std::string& modelPath, oka::Scene& scene)
 namespace
 {
 
-/// Re-authors named materials as OpenPBR from <stem>_openpbr.json.
-///
-/// Runs after loadMaterials() because it matches by the name that gave them, and
-/// it is deliberately additive: a scene with no sidecar, or a material the
-/// sidecar does not name, keeps the glTF model and the exact pixels it had.
 void loadOpenPBRMaterialsFromSidecar(const std::string& modelPath, oka::Scene& scene)
 {
     const std::string stem = modelPath.substr(0, modelPath.rfind('.'));
@@ -1604,11 +1457,6 @@ void loadOpenPBRMaterialsFromSidecar(const std::string& modelPath, oka::Scene& s
     oka::materialsidecar::loadMaterialsJson(scene, path);
 }
 
-/// Re-authors named materials from <stem>.mtlx, when one sits beside the scene.
-///
-/// Runs after the JSON sidecar so that a hand-written block can override what a
-/// document says -- the JSON is the place to correct a material without editing
-/// someone else's .mtlx.
 void loadMaterialXFromSidecar(const std::string& modelPath, oka::Scene& scene)
 {
     const std::string stem = modelPath.substr(0, modelPath.rfind('.'));
@@ -1652,11 +1500,6 @@ bool loadLightsFromJson(const std::string& modelPath, oka::Scene& scene)
     return loadLightsJson(scene, jsonPath);
 }
 
-// Peak luminous efficacy, lm/W. KHR_lights_punctual intensity is photometric
-// (candela for point/spot, lux for directional) while everything downstream of
-// UniformLightDesc is radiometric, so the two are exactly this factor apart.
-// Blender's exporter multiplies watts by the same constant on the way out, so
-// dividing here round-trips: 27175.7 cd / 683 = 39.79 W/sr = 500 W / 4pi.
 static constexpr float kLumensPerWatt = 683.0f;
 
 // KHR_lights_punctual: lights live in root extensions and are referenced from
@@ -1843,21 +1686,6 @@ void loadCamerasFromJson(const std::string& modelPath, oka::Scene& scene)
 namespace
 {
 
-// tinygltf's own ReadWholeFile sizes the destination with vector::resize and
-// then reads over it, so every byte of an external buffer is written twice: once
-// as the zero that resize is required to store, once as the file content. On the
-// pine forest's 2.8 GB .bin that second pass was 18% of the whole load in a CPU
-// profile -- more than the mesh conversion it feeds.
-//
-// Mapping the file and handing the range to vector::assign writes each byte
-// once, into freshly allocated storage that is never zeroed, and lets the page
-// cache supply the data without a read() bounce buffer. The copy itself stays:
-// tinygltf owns the buffer as a std::vector and nothing short of patching it
-// takes that away.
-//
-// Any failure falls back to the stock reader rather than to a load error -- a
-// path that cannot be mapped (a pipe, a filesystem without mmap) is still a
-// path tinygltf can read.
 bool readWholeFileMapped(std::vector<unsigned char>* out, std::string* err, const std::string& path, void* userData)
 {
 #if defined(_WIN32)
@@ -1910,10 +1738,6 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     using namespace std;
     tinygltf::Model model;
     tinygltf::TinyGLTF gltf_ctx;
-    // tinygltf refuses external buffers over INT32_MAX by default. A production
-    // scene passes that easily -- a 50 M triangle forest lands at 2.8 GB of
-    // positions, normals, indices and uvs -- and the refusal reads as a plain
-    // load failure with nothing to act on.
     gltf_ctx.SetMaxExternalFileSize(std::numeric_limits<size_t>::max());
     // Everything but the read stays on tinygltf's own callbacks; SetFsCallbacks
     // refuses a partially filled set.
@@ -1929,18 +1753,6 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     {
         STRELKA_WARNING("Falling back to tinygltf's own file reader: {}", fsErr);
     }
-    // Do not let tinygltf decode the images.
-    //
-    // The only thing this loader ever reads out of model.images is the uri --
-    // the renderer opens the file itself, mips it, compresses it and keeps its
-    // own cache of the result. Every pixel tinygltf decodes here is thrown
-    // away, and it decodes them one at a time on the calling thread while
-    // parsing. On the pine forest that was 9017 of the 14680 samples in a CPU
-    // profile of the load: 61% of it, for nothing.
-    //
-    // An image embedded in a buffer view rather than referenced by uri would
-    // lose its pixels this way -- but such an image has no file to open either,
-    // so it was never supported.
     gltf_ctx.SetImageLoader([](tinygltf::Image*, const int, std::string*, std::string*, int, int, const unsigned char*,
                                int, void*) { return true; },
                             nullptr);
@@ -1948,10 +1760,6 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     std::string warn;
     bool res = false;
     const std::string ext = fs::path(modelPath).extension().string();
-    // One indivisible read with no way in for a callback, and a third of the load
-    // on a scene the size of the pine forest. It gets a stage of its own so the
-    // UI can name what it is waiting on instead of showing a bar that does not
-    // move for a second.
     if (mProgress)
     {
         mProgress->beginStage(LoadProgress::Stage::Reading, 0);
@@ -1985,17 +1793,6 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
                         model.scenes[sceneId].name.empty() ? "<unnamed>" : model.scenes[sceneId].name, sceneId);
     }
 
-    // The load expressed as a list of phases rather than as a sequence of calls.
-    //
-    // Progress is then a property of the list: the loop reports it, so there is
-    // no per-phase call to forget and no separately maintained total that has to
-    // agree with how many of those calls there are. Adding a phase and not
-    // listing it here means it does not run at all, which is a loud failure --
-    // unlike a bar that quietly stops short of the end.
-    //
-    // The graph walk contributes one phase per root node because it is most of
-    // the parse, and a bar that sits still through it is indistinguishable from
-    // one that has hung.
     struct Phase
     {
         const char* name;
@@ -2085,11 +1882,6 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
                               scene.createLight(lightDesc);
                           }
                       } });
-    // Last, and it has to be: a MaterialX <look> assigns by geometry name, so it
-    // needs both the node graph (loaded in "nodes") and the instances the graph
-    // produced (created in "geometry"). Run any earlier and it binds nothing
-    // while reporting that it read the file -- which is exactly how it failed
-    // the first time.
     phases.push_back({ "materialx", [&] { loadMaterialXFromSidecar(modelPath, scene); } });
     phases.push_back({ "animation", [&] { loadAnimation(model, scene); } });
 
@@ -2114,10 +1906,6 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         }
     }
 
-    // Geometry, skins, and animations have copied all binary data into the
-    // scene's own arrays. Holding the source buffers while the renderer builds
-    // acceleration structures can make otherwise valid large scenes run out of
-    // memory.
     {
         size_t released = 0;
         for (tinygltf::Buffer& buffer : model.buffers)

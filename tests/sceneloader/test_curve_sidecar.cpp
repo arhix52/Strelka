@@ -10,31 +10,11 @@
 #include <string>
 #include <vector>
 
-// Curves reach the renderer through a binary sidecar, and nothing between the
-// exporter and the acceleration structure validates them: a set whose strand
-// counts disagree with its point array does not draw wrong, it builds a corrupt
-// BLAS. So the reader is the last place a bad file can be caught, and these
-// cases are what it is required to catch or carry.
-//
-// The radii are the reason this file exists. The format carries *radii*, while
-// Blender's particle properties are diameters -- an exporter that skipped the
-// conversion rendered every groom at twice its reference thickness, which
-// presented as a warm shading error rather than a geometric one (see
-// docs/open-defects.md, Closed). The writer end of that contract is pinned in
-// tools/iso_bathroom/test_curve_sidecar.py; this end pins that the reader hands
-// on whatever it was given, unscaled, so there is exactly one place the
-// convention can be wrong.
-
 using namespace oka;
 namespace fs = std::filesystem;
 
 namespace oka
 {
-// Defined in gltfloader.cpp and not declared in any header, because the glTF
-// loader is its only caller. Redeclared here rather than exported: the naming
-// convention it implements is shared with two Python exporters that hardcode the
-// same suffix, and if the two ever disagree the result is a scene that loads
-// clean with no hair in it.
 bool loadCurvesFromSidecar(const std::string& modelPath, oka::Scene& scene);
 } // namespace oka
 

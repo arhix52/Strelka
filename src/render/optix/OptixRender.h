@@ -18,11 +18,6 @@
 
 #include "OptixScenePreparation.h"
 #include "gpu_stage_breadcrumb.h"
-// Host-side and backend-neutral despite living under metal/: it decides whether
-// a half-built scene can be traced at all and how often the partial picture may
-// be republished, and neither question has anything Metal in it. Duplicating it
-// here would mean two answers to one question, and the copy that has the test
-// would be the one that stayed right.
 #include <host/scene_stream.h>
 
 #include <cuda_runtime.h>
@@ -75,16 +70,6 @@ struct PathTracerState
 
     std::unique_ptr<OptixBuffer> mParamsBuffer;
 
-    /// Page-locked staging for the launch parameters. A copy out of pageable
-    /// memory has to be synchronous -- the driver stages it and waits -- and on
-    /// a 300 byte structure that wait was 14.5% of the editor's CPU time in a
-    /// profile. From pinned memory the same copy rides the launch's own stream
-    /// and the host never blocks.
-    ///
-    /// One buffer is enough because every render() is followed by
-    /// syncFrameAndLatchErrors() before the next one starts, in the editor's
-    /// triggerRenderIfIdle() as well as in renderSync(). Null when the
-    /// allocation failed, and then the synchronous copy is used instead.
     Params* pinnedParams = nullptr;
 
     OptixShaderBindingTable sbt = {};
@@ -97,18 +82,8 @@ private:
     {
         OptixTraversableHandle gas_handle = 0;
         CUdeviceptr d_gas_output_buffer = 0;
-        /// What the structure actually occupies, after compaction if it happened.
-        /// Recorded rather than recomputed: the memory report has no other way to
-        /// ask a bare CUdeviceptr how big it is, and an estimate made from the
-        /// triangle count would be the thing the report exists to avoid.
         size_t gas_bytes = 0;
         uint32_t geometry_flags = OPTIX_GEOMETRY_FLAG_NONE;
-        /// This mesh's opacity micromap array, or 0 when it has none.
-        ///
-        /// Owned here because the structure references it: an acceleration
-        /// structure built with micromaps reads them during traversal, which is
-        /// why optixAccelRelocate has an input for relocating them. Freeing it
-        /// after the build would leave the GAS pointing at nothing.
         CUdeviceptr d_omm_array = 0;
         size_t omm_bytes = 0;
         ~Mesh()
@@ -176,23 +151,11 @@ private:
     bool mEnableMotionBlur = false;
     bool mShaderReorderSupported = false;
 
-    /// The launch-parameter fields the modules are compiled against as
-    /// constants, so the branches they gate are not in the binary at all.
-    ///
-    /// Each folds a scene-wide branch and its unused code out of the pipeline.
-    ///
-    /// What is *not* here matters as much. `max_depth` is a slider, and a
-    /// recompile is a visible hitch; anything a user drags has to stay a
-    /// runtime read.
     struct PipelineSpec
     {
         uint32_t sharcCapacity = 0;
         /// Whether the sampler's blue-noise mask is compiled in; see Params.
         uint32_t hasBlueNoise = 0;
-        /// Whether any light is responsive. A constant rather than a runtime
-        /// read because it gates a second hash probe on every cached read and a
-        /// second set of atomics on every deposit; a scene without a responsive
-        /// light must not pay a branch for one.
         uint32_t sharcResponsive = 0;
         uint32_t debug = 0;
         uint32_t estimatorMode = 0;
@@ -230,14 +193,6 @@ private:
     /// stops render() launching against a pipeline that is being replaced.
     bool mPipelineSpecValid = false;
 
-    /// The pipeline build running on a worker thread, if any.
-    ///
-    /// OptiX compiles the OPTIXIR module on the first launch of every distinct
-    /// specialisation, and on a cold module cache that is ten seconds -- measured
-    /// on the Cornell box, so it is the module and not the scene. Held on the
-    /// main thread it exceeds mutter's five-second check-alive-timeout and the
-    /// desktop offers to kill the editor. The scene build carries on stepping
-    /// while this runs; only the launch waits.
     std::future<void> mPipelineBuild;
     std::chrono::steady_clock::time_point mPipelineBuildBegin;
     bool mPipelineBuildWasFirst = false;
@@ -249,10 +204,6 @@ private:
     /// instance, so it has to be rebuilt with it; a refit leaves it alone.
     bool mSbtDirty = false;
 
-    /// How many skeletal BLASes may be rebuilt from scratch in one frame, and
-    /// where the next frame's round-robin picks up. Bounded so that no single
-    /// frame pays for the whole cast; the same shape as Metal's
-    /// kMaxBlasRebuildsPerFrame.
     static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
     size_t mNextBlasRebuildIndex = 0;
 
@@ -273,10 +224,6 @@ private:
     std::unique_ptr<OptixBuffer> mAlphaMaterialParamsBuffer; // traversal-only OptixAlphaMaterialData[]
     uint32_t mMaterialCount = 0;
 
-    // OpenPBR, in two arrays parallel to the two above and indexed by the same
-    // material id. Both stay null when the scene shades with the glTF model and
-    // authors no OpenPBR material, which is what the closest-hit program's null
-    // check reads as "this model is not in this launch".
     std::unique_ptr<OptixBuffer> mOpenPBRParamsBuffer; // OpenPBRParams[] on device
     std::unique_ptr<OptixBuffer> mOpenPBRTexturesBuffer; // cudaTextureObject_t[n * MAX_OPENPBR_TEXTURES]
     std::vector<cudaTextureObject_t> mHostOpenPBRTextures;
@@ -289,17 +236,6 @@ private:
     std::unique_ptr<Curve> createCurve(const oka::Curve& curve);
     size_t compactAccel(CUdeviceptr& buffer, OptixTraversableHandle& handle, CUdeviceptr result, size_t outputSizeInBytes);
 
-    // --- Opacity micromaps ---------------------------------------------------
-    //
-    // Off by default. What they buy is traversal that resolves the wholly-opaque
-    // and wholly-cut-away parts of an alpha cutout without entering a shader;
-    // what they must not do is change what any surviving hit shades. See
-    // opacity_micromap_policy.h for the two rules that keep that true.
-
-    /// The base-colour alpha channel of one material, as the *device* texture
-    /// holds it: decoded through the same plan the upload used, block
-    /// compression included. Alpha read off the source file instead would
-    /// describe a texture the renderer does not have.
     struct OmmAlphaImage
     {
         int width = 0;
@@ -459,25 +395,11 @@ private:
 
     void updatePathtracerParams(const uint32_t width, const uint32_t height);
 
-    // --- Radiance cache ----------------------------------------------------
-    //
-    // Off by default, and off means `Params::sharcCapacity == 0`, which the
-    // device code reads before anything else -- so the default is a
-    // byte-for-byte no-op rather than a path that happens to agree.
     std::unique_ptr<OptixBuffer> mSharcBuffer;
     /// One SharcPathState per pixel, allocated only while the cache is on.
     std::unique_ptr<OptixBuffer> mSharcPathBuffer;
     size_t mSharcPathStateCount = 0;
     uint32_t mSharcCapacity = 0;
-    /// Whether the table has to be cleared before the next launch.
-    ///
-    /// Raised when it is allocated, when the scene under it changes, and when a
-    /// user asks -- and deliberately *not* when accumulation restarts, which is
-    /// what it used to do. Accumulation restarts on every camera movement, so
-    /// that rule cleared the whole table several times a second and the cache
-    /// never held more than one frame of anything. Entries the camera has
-    /// invalidated are now aged out one at a time by the resolve pass instead,
-    /// which is what the SDK does and the reason it has a resolve pass at all.
     bool mSharcClearPending = false;
     /// Temporal window and eviction threshold, in frames, read from settings
     /// once per frame and handed to the resolve pass. See sharc_resolve.h.
@@ -491,10 +413,6 @@ private:
     std::unique_ptr<OptixBuffer> mSharcResponsiveLightBuffer;
     uint32_t mSharcResponsiveLightCount = 0;
     void createSharcResponsiveLightBuffer();
-    /// Where the eye was when the previous frame resolved, and whether there was
-    /// one. Reprojection needs both cameras to work out which way the grid level
-    /// moved under a voxel; on the first frame there is nothing to reproject
-    /// from and the probe is skipped rather than fed the origin.
     float mSharcPrevCameraPosition[3] = { 0.0f, 0.0f, 0.0f };
     bool mSharcHasPrevCameraPosition = false;
     /// This frame's eye position, taken in updateSharcParams -- which has the
@@ -549,14 +467,6 @@ private:
     /// Size the guide and denoiser buffers for a plan, reallocating only what
     /// changed.
     void updateGuideBuffers(const DenoisePlan& plan);
-    // ---------------------------------------------------------------- timing --
-    // A frame is several asynchronous submissions on one stream, so wall clock
-    // around render() measures how long it took to *enqueue* them, which on this
-    // backend is microseconds however long the GPU then works. Events are the
-    // only thing that answers the question the editor's title bar is asking.
-    /// The output slot of the frame that has been submitted and not yet
-    /// published, and -1 when nothing is in flight. Only one frame is ever
-    /// outstanding: the other slot is the one being displayed.
     int mSubmittedIndex = -1;
 
     cudaEvent_t mFrameStartEvent = nullptr;
@@ -569,12 +479,6 @@ private:
     /// still running, and the previous frame's number stands.
     void collectFrameTiming(bool wait);
 
-    // ----------------------------------------------------------- device error --
-    // Latched rather than fatal. An abort inside the renderer takes the editor
-    // and the harness down with it and leaves nothing to inspect; a latch lets
-    // StrelkaCLI exit non-zero instead of writing a black EXR that reads as a
-    // lighting bug, which is the logic it already has and never saw an error to
-    // trigger.
     bool mDeviceError = false;
     bool mDeviceErrorReported = false;
     /// Latches and reports. Returns true when `err` was a failure.
@@ -592,13 +496,6 @@ private:
     void markStageSubmitted(optix::GpuStage stage, CUstream stream);
     void reportGpuStageFailure();
 
-    // -------------------------------------------------- nested-dielectric losses --
-    /// Three counters the shading path raises when the IOR stack loses a path:
-    /// a push onto a full stack, a pop that matched nothing, and a path that
-    /// reached the environment still inside a medium. Zeroed before each launch
-    /// and read back once per scene, because the numbers are a property of the
-    /// asset rather than of the frame. Metal reports the same stack overflow,
-    /// unmatched exit, and escaped-inside failures.
     std::unique_ptr<OptixBuffer> mIorStatsBuffer;
     bool mReportedIorStats = false;
     /// Reads the counters back and warns once, if any of them fired.
@@ -651,10 +548,6 @@ private:
     // ---------------------------------------------------------------- capture --
     bool mCaptureActive = false;
 
-    // --------------------------------------------------------- memory tracking --
-    /// Sizes of allocations the report cannot otherwise ask about, recorded where
-    /// they are made. Everything with an OptixBuffer behind it is measured from
-    /// the object instead.
     size_t mSbtBytes = 0;
 
 public:
@@ -734,13 +627,6 @@ public:
 
     void triggerRenderIfIdle() override;
 
-    /// Publish the frame that is in flight, if it has landed.
-    ///
-    /// With `wait` the caller is prepared to block for it; without, a frame that
-    /// is still running is left alone and the previous one stays on screen. The
-    /// editor submits a frame and then draws its UI, so by the time it asks
-    /// again the trace has been running for the whole of that UI rather than
-    /// starting after it.
     void reapSubmittedFrame(bool wait);
     Buffer* getReadyBuffer() override;
     ReadyFrame getReadyFrame() override;
@@ -770,11 +656,6 @@ public:
     /// medium. Gates the second traversal every shadow ray would otherwise take
     /// to accumulate optical depth across those boundaries.
     bool sceneHasBoundedMedium() const;
-    /// The three scene-content bound values, computed from the same material
-    /// table and the same tests MetalMaterials applies for its function
-    /// constants. Conservative in the same direction: anything that might need
-    /// the feature turns it on, because a scene that needs a path the pipeline
-    /// does not contain renders wrong rather than slowly.
     bool sceneHasSubsurface() const;
     bool sceneHasCurves() const;
     bool sceneHasCutout() const;

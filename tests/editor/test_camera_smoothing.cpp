@@ -26,11 +26,6 @@ float yawDegrees(const Camera& cam)
 
 } // namespace
 
-// What this pins: the camera used to take deltaTime * speed as a step every frame,
-// and a path tracer's deltaTime is not steady -- the frame that restarts
-// accumulation costs several times what the next one does. Equal input, unequal
-// step, motion that visibly stutters. Smoothing ramps the *input*, so a spike in
-// one frame's dt is spread across the ones after it.
 TEST_CASE("held movement ramps up instead of starting at full speed")
 {
     Camera cam;

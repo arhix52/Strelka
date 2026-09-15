@@ -1,25 +1,6 @@
 #ifndef STRELKA_SHEEN_ALBEDO_LUT_H
 #define STRELKA_SHEEN_ALBEDO_LUT_H
 
-// ============================================================================
-// sheen_albedo_lut.h -- directional albedo of the Charlie sheen lobe
-//
-// E(NdotV, sheenRoughness): the fraction of light arriving from NdotV that the
-// sheen layer sends back. KHR_materials_sheen needs it twice -- once to scale
-// the base layer down by what the fabric already reflected, and once to
-// normalise the lobe itself.
-//
-// The second use is the one the spec does not call for. Ashikhmin's visibility
-// term does not conserve energy, and this table peaks at 2.77559 at low roughness
-// and grazing incidence -- so a layer applied at face value reflects nearly
-// three times the light that fell on it. Measured, not assumed: the additive
-// version put a plain white cloth at 1.40 directional albedo, which
-// tests/material/test_sheen.cpp now pins.
-//
-// Regenerate with tools/material/gen_sheen_albedo_lut.py. 16x16 over
-// NdotV in (0,1] and sheenRoughness in (0,1], both bin-centred.
-// ============================================================================
-
 #include "material_math.h"
 
 enum : int

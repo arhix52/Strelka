@@ -10,29 +10,6 @@
 #include <numbers>
 #include <random>
 
-// ============================================================================
-// test_light_pdf.cpp -- the densities the two halves of the MIS estimate divide
-// by, and the heuristics that split them.
-//
-// Two separate properties are pinned here and they fail in different ways:
-//
-//   1. CONSISTENCY. Next-event estimation divides by its own density and the
-//      BSDF strategy weighs itself against the same number. If the two agree,
-//      the weights sum to one whatever the number is -- so a wrong density is
-//      invisible to any test that only checks the weights. The sphere light was
-//      wrong for exactly that reason and looked self-consistent throughout.
-//
-//   2. CORRECTNESS. The density has to be the one the sampler actually drew
-//      from, or the estimator that divides by it is biased. There is only one
-//      way to test that: sample the way the shader samples, divide by the
-//      density the shader reports, and compare the mean against a closed form.
-//      That is what the Monte Carlo cases below do.
-//
-// The shaders call these same functions -- common/lights.h on the OptiX side,
-// metal/lights_metal.h on the Metal side -- so the arithmetic under test is the
-// arithmetic that ships, not a host restatement of it.
-// ============================================================================
-
 namespace
 {
 
@@ -83,12 +60,6 @@ glm::dvec3 objectCoordinates(const glm::dmat3& transform, float3 center, float3 
     return glm::inverse(transform) * (glm::dvec3(point) - glm::dvec3(center));
 }
 
-/// The irradiance a Lambert-facing point receives, estimated exactly the way
-/// connectLight() + estimateDirectLighting() do it: draw a point on the emitter,
-/// take the cosine at the shading vertex, divide by the reported solid-angle
-/// density, and reject the samples the facing test rejects.
-///
-/// `radiance` is what UniformLight::color holds for an area light.
 double sphereLightIrradiance(float radius, float distance, float radiance, int samples)
 {
     const float3 shadingPoint = make_float3(0.0f, 0.0f, 0.0f);
@@ -182,10 +153,6 @@ LightPdfQuery plausibleQuery(int type)
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// The sphere light. This is the case that was wrong, and wrong in a way that
-// only a comparison against a closed form could see.
-// ---------------------------------------------------------------------------
 TEST_CASE("a sphere light's density integrates to the analytic irradiance")
 {
     const float radiance = 1.0f;
@@ -1414,10 +1381,6 @@ TEST_CASE("unrepresentable independent axis scales do not fabricate ellipsoid hi
     const float3 origin = make_float3(1.07635714e25f, -2.29488357e25f, -8.30321789e24f);
     const float3 direction = make_float3(-0.403538615f, 0.860378146f, 0.311297208f);
 
-    // Decimal-120 inversion puts the closest point at
-    // (4.3873221996, 8.00926302565, 0), whose sphere margin is -82.39689.
-    // Independent column scaling resolves the determinant, but the float
-    // point map cannot retain all three object coordinates.
     CHECK(scaledAffineBasis(axisX, axisY, axisZ).valid);
     CHECK_FALSE(analyticAffineTransformIsNonsingular(axisX, axisY, axisZ));
     const AnalyticLightIntersection hit =
@@ -1552,11 +1515,6 @@ TEST_CASE("complete area-light marginal PDF agrees with a long-double oracle")
     CHECK(oldFailures > 100u);
 }
 
-// ---------------------------------------------------------------------------
-// A point light with a radius. Colour means intensity there and radiance on a
-// sphere light, so the conversion has to be exactly the one that makes the two
-// meet as the radius closes.
-// ---------------------------------------------------------------------------
 TEST_CASE("a soft point light converges on the sharp one as its radius shrinks")
 {
     const float intensity = 10.0f;
@@ -1585,10 +1543,6 @@ TEST_CASE("intensity to radiance on a sphere is the inverse of its projected are
     CHECK(std::isfinite(sphereRadianceFromIntensity(0.0f)));
 }
 
-// ---------------------------------------------------------------------------
-// The dome. Sampled uniformly over the sphere of directions, and missing from
-// one backend's switch entirely.
-// ---------------------------------------------------------------------------
 TEST_CASE("a dome light's density integrates to one over the sphere")
 {
     Rng rng(0xD0DEu);
@@ -1624,10 +1578,6 @@ TEST_CASE("uniform sphere directions really are unit and really do cover the sph
 // ---------------------------------------------------------------------------
 TEST_CASE("the cone solid angle survives sun-sized half angles")
 {
-    // The reference is the same quantity in double precision, where neither form
-    // cancels. The float form that shipped on one side -- 1/(2pi(1-cos a)) -- is
-    // computed here too, so this case states what the difference is rather than
-    // merely asserting the good one.
     const float angles[] = { 0.1f, 0.01f, 0.00465f /* the sun */, 0.001f };
     for (float a : angles)
     {
@@ -1641,10 +1591,6 @@ TEST_CASE("the cone solid angle survives sun-sized half angles")
         const float cancelling = 1.0f / (2.0f * float(M_PI_F) * (1.0f - std::cos(a)));
         if (a <= 0.00465f)
         {
-            // Not a property of the code under test -- a property of the form it
-            // must not go back to. At the sun's half angle this is already 0.2%
-            // off, and the host bakes the light's radiance by dividing by the
-            // same solid angle, so the error does not cancel.
             const double relative = std::abs(double(cancelling) - exact) / exact;
             CHECK(relative > 1e-3);
         }
@@ -1817,10 +1763,6 @@ TEST_CASE("a sharp distant is delta and has no continuous density")
 
 TEST_CASE("a distant cap narrower than the portable float measure is a delta atom")
 {
-    // Apple GPU arithmetic flushes subnormal products in supported production
-    // modes. Calling this a continuous cap on the CPU but a zero-measure cap on
-    // the GPU gives the two backends different supports and PDF classifications.
-    // The old exact-zero classification fails this assertion.
     CHECK(distantLightIsDelta(1e-30f));
     CHECK(lightIsDeltaForMis(LIGHT_TYPE_DISTANT, 1e-30f));
     const float3 axis = make_float3(0.0f, 0.0f, 1.0f);
@@ -1869,10 +1811,6 @@ TEST_CASE("analytic infinite lights obey camera and secondary visibility masks")
 
 TEST_CASE("dome NEE and BSDF-miss shares form one Lambertian estimate")
 {
-    // Unit-radiance dome over a unit-albedo Lambertian surface has outgoing
-    // radiance exactly one. One sample from each strategy is combined. Removing
-    // the BSDF-miss term is the old implementation's mutation: it leaves only
-    // about 0.299 even though the MIS arithmetic inside either branch is valid.
     Rng rng(0xD04Eu);
     constexpr int samples = 500000;
     double nee = 0.0;
@@ -1901,10 +1839,6 @@ TEST_CASE("dome NEE and BSDF-miss shares form one Lambertian estimate")
     CHECK(combined == doctest::Approx(1.0).epsilon(0.01));
 }
 
-// ---------------------------------------------------------------------------
-// The dispatcher. One switch for both backends, so a light type cannot be
-// sampled by one and be invisible to the other.
-// ---------------------------------------------------------------------------
 TEST_CASE("every light type has a density")
 {
     for (int type : kAllLightTypes)
@@ -1912,10 +1846,6 @@ TEST_CASE("every light type has a density")
         CAPTURE(type);
         const LightPdfQuery q = plausibleQuery(type);
         const float pdf = lightSolidAnglePdf(q);
-        // A missing case returns zero, which the connection code reads as "this
-        // light cannot be sampled" and silently drops. That is what happened to
-        // LIGHT_TYPE_DOME on Metal: no compile error, no NaN, just an unlit
-        // scene.
         CHECK(pdf > 0.0f);
         CHECK(std::isfinite(pdf));
     }

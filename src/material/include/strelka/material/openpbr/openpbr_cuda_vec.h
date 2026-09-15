@@ -1,41 +1,6 @@
 #ifndef STRELKA_MATERIAL_OPENPBR_CUDA_VEC_H
 #define STRELKA_MATERIAL_OPENPBR_CUDA_VEC_H
 
-// The vec2/vec3/vec4 openpbr's CUDA interop layer should have shipped.
-//
-// `interop/openpbr_interop_cuda.h` aliases them to CUDA's `float2/float3/float4`
-// unless OPENPBR_USE_CUSTOM_VEC_TYPES is set. That alias cannot work, and this
-// header exists because the failure is not subtle once you look for it: openpbr
-// is written against GLSL and GLM vectors, and CUDA's are bare aggregates.
-// Compiling `openpbr.h` under nvcc with the shipped alias produces, in order,
-//
-//     vec3(a, b, c)      no matching constructor -- float3 is an aggregate
-//     v[0]               no operator[]
-//     c.r, c.g, c.b      no such members
-//     a != b, a > b      no comparison operators
-//     exp(v), max(v, s)  no GLSL-named componentwise math
-//
-// so what follows is not a convenience layer: it is the missing half of the
-// interop. It is included by openpbr_shim.h on the CUDA branch only. Metal and
-// the host both have a vector type that satisfies openpbr already (MSL's
-// `float3`, GLM's `glm::vec3`), and both take the interop's own path.
-//
-// Two consequences worth stating, because they leak into calling code:
-//
-//  * `vec3` is a *distinct type* from `float3` here, not an alias. Conversion
-//    runs implicitly in both directions, so expressions mix freely, but a
-//    non-const `vec3&` out-parameter will not bind to a `float3` lvalue.
-//    openpbr_bsdf_sample() in openpbr_bridge.h is the one place that matters.
-//
-//  * The x/y/z and r/g/b spellings are one union, matching GLM. The layout is
-//    three floats, same as `float3`; nothing here changes the size or alignment
-//    of anything the host uploads.
-//
-// The comparison operators follow the semantics openpbr's own CUDA interop
-// documents for its `equal`/`greaterThan` macros: they reduce over all
-// components, because openpbr only ever uses them inside `all()`/`any()`, which
-// that layer defines as identities.
-
 #include <vector_types.h>
 
 #define OPENPBR_USE_CUSTOM_VEC_TYPES 1
@@ -114,15 +79,6 @@ struct vec4
     STRELKA_OPENPBR_VEC_FUNC float& operator[](int i) { return (&x)[i]; }
     STRELKA_OPENPBR_VEC_FUNC const float& operator[](int i) const { return (&x)[i]; }
 };
-
-// ---------------------------------------------------------------------------
-// Arithmetic
-// ---------------------------------------------------------------------------
-//
-// Written through operator[] and a fixed-count loop rather than component by
-// component: the loop bound is a literal, so every one of these unrolls, and the
-// macro then covers all three widths without twelve near-identical bodies to
-// keep in step.
 
 #define STRELKA_OPENPBR_VEC_BINOP(T, N, op)                                                                            \
     STRELKA_OPENPBR_VEC_FUNC inline T operator op(const T a, const T b)                                                \
@@ -209,38 +165,6 @@ STRELKA_OPENPBR_VEC_FUNC inline bool operator!=(const vec4 a, const vec4 b)
 {
     return !(a == b);
 }
-
-// ---------------------------------------------------------------------------
-// GLSL-named math
-// ---------------------------------------------------------------------------
-//
-// sutil's vec_math.h has most of these for float3 under CUDA's names (fmaxf,
-// expf, ...). openpbr calls them by their GLSL names on vector arguments, so
-// these are the spellings it needs, defined on the vec types only -- nothing
-// here overloads anything that already takes a float3.
-//
-// This is exactly the set the tree needs and not one function more. An earlier
-// version also carried componentwise abs/acos/cos/sin/floor, a second pow and
-// min, both clamps, a vector smoothstep, `>=` and unary minus; openpbr calls
-// those on scalars, where CUDA's own overloads answer, and none of them is
-// reachable from here.
-//
-// Two things this set rests on, both of which cost a measurement to find:
-//
-//  * The operators above and the geometric functions below cannot go, even
-//    though sutil has float3 versions of every one. Theirs return `float3`, and
-//    openpbr feeds the result straight back into an expression that also holds a
-//    `vec3` -- `mix()` inside a ternary, in openpbr_bsdf.h. Both conversions
-//    then apply and the operands are ambiguous. Keeping the result in `vec3` is
-//    what these are for, not the arithmetic.
-//
-//  * **Compiling is not the test.** Removing dot/length/normalize for `vec2`
-//    builds clean: resolution simply falls through to sutil's float2 versions,
-//    which compute the same quantities by a different expression. Under
-//    --use_fast_math that is not the same number, and the chess set came back
-//    with 1563 differing bytes -- about 500 pixels -- from a change that looked
-//    like pure deletion. Anything removed from this header has to be graded on a
-//    render, not on a build.
 
 #define STRELKA_OPENPBR_VEC_CWISE(name, f)                                                                             \
     STRELKA_OPENPBR_VEC_FUNC inline vec2 name(const vec2 v)                                                            \

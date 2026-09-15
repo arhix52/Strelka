@@ -23,7 +23,6 @@
 
 #include <glm/glm.hpp>
 
-
 namespace oka::metal
 {
 
@@ -37,10 +36,6 @@ struct AsBuildGeometry
 
 struct AsBuildState
 {
-    // Instances that hang off the same node share a transform by construction.
-    // The transform is part of the key because one node can carry a million
-    // placements -- that is what EXT_mesh_gpu_instancing is -- and keying on the
-    // node alone scatters every placement after the first into groups of its own.
     struct GroupKey
     {
         int node;
@@ -194,11 +189,6 @@ void MetalAccelStructure::prepareEmissiveMeshInputs()
     std::span<const uint32_t> indices = mScene->getIndices();
     if (mScene->hostGeometryReleased())
     {
-        // All Metal geometry buffers use shared storage, including buffers that
-        // adopted the scene's page-aligned vectors. Reconstruct selection
-        // powers from that live storage after the optional host release so a
-        // later material/transform edit cannot leave a newly positive emitter
-        // outside the proposal support.
         MTL::Buffer* vertexBuffer = mGeometry ? mGeometry->vertexBuffer() : nullptr;
         MTL::Buffer* indexBuffer = mGeometry ? mGeometry->indexBuffer() : nullptr;
         if (!vertexBuffer || !indexBuffer || !vertexBuffer->contents() || !indexBuffer->contents())
@@ -302,16 +292,11 @@ void MetalAccelStructure::rebuildEmissiveMeshLights()
     uploadEmissiveMeshLights();
 }
 
-
 size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geometries, bool skeletal)
 {
     const std::vector<oka::Instance>& instances = mScene->getInstances();
     const std::vector<oka::Mesh>& meshes = mScene->getMeshes();
 
-    // Validate the whole group before appending GeometryEntry rows. In addition
-    // to protecting malformed scene data, this keeps a partially prepared mesh
-    // table from becoming an out-of-bounds pointer read if a staged build ever
-    // regresses again.
     uint64_t blasTriangleCount = 0u;
     for (const AsBuildGeometry& geometry : geometries)
     {
@@ -405,10 +390,6 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
                                                    MetalGeometry::kNoPrimitiveAlphaDataOffset :
                                                    primitiveAlphaDataOffset / sizeof(PrimitiveAlphaData);
         const bool usePrimitiveAlphaData = primitiveAlphaDataIndex <= GEOM_PRIMITIVE_ALPHA_DATA_INDEX_MASK;
-        // Keep every compatible static BLAS ready for hardware any-hit alpha.
-        // The production path keeps UVs in their dense external buffer after the
-        // AS-resident form inflated pine's compacted BLAS by 34%. The embedded
-        // form remains available as a controlled Metal-version A/B.
         const bool useHardwareAlpha = isCutout && usePrimitiveAlphaData && !(skeletal && mBuildMotionBlas);
         if (useHardwareAlpha)
         {
@@ -521,10 +502,6 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     }
     else
     {
-        // Every rigid BLAS is immutable, including a mesh reused by many TLAS
-        // instances. Prefer the compact representation to reduce both memory
-        // use and the BVH footprint competing with vertex/index fetches. Keep
-        // the escape hatch solely for driver/performance A/B diagnosis.
         blas.mCompacted = staticBlasCompactionEnabled();
         blas.mAs = blas.mCompacted ? createAccelerationStructure(primDescriptor) :
                                      createAccelerationStructureNoCompact(primDescriptor);
@@ -549,12 +526,6 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     return mBlasList.size() - 1;
 }
 
-// One acceleration structure per curve set.
-//
-// Not merged with the triangle path: a curve geometry descriptor names different
-// buffers and a different primitive, and the grouping that merges a glTF mesh's
-// primitives has nothing to merge here -- the converter already writes one set
-// per material.
 size_t MetalAccelStructure::buildCurveBlas(uint32_t sceneInstanceId)
 {
     const oka::Instance& inst = mScene->getInstances()[sceneInstanceId];
@@ -650,12 +621,6 @@ size_t MetalAccelStructure::buildAnalyticLightBlas(uint32_t intersectionFunction
     return mBlasList.size() - 1;
 }
 
-
-// Rebuild the acceleration structures for a different motion setting.
-//
-// Only reachable from the motion-blur toggle, which is a UI action, so a hitch is
-// acceptable — but the structures about to be released may still be referenced by
-// the last frame's command buffers, hence the drain.
 void MetalAccelStructure::rebuild()
 {
     // Drain in-flight builds on whichever queue the path uses so structures
@@ -784,10 +749,6 @@ bool MetalAccelStructure::step(double budgetMs)
         st.phaseMs[(size_t)st.phase] += std::chrono::duration<double, std::milli>(t - mark).count();
         mark = t;
     };
-    // Grouping and building are one item per scene instance each, so the two
-    // cursors against twice the instance count is close enough for a bar -- the
-    // group count is within a percent of the instance count on any scene where
-    // this stage is long enough to matter.
     auto report = [&]() {
         if (mLoadProgress)
         {
@@ -956,16 +917,6 @@ bool MetalAccelStructure::step(double budgetMs)
             }
         }
 
-        // --- Group mesh instances -------------------------------------------------
-        //
-        // glTF splits a mesh into primitives by material, and the loader turns each
-        // primitive into its own instance. Left alone that produces one BLAS per
-        // primitive, all with the same transform and heavily overlapping bounds, and
-        // every ray that has to traverse deeply pays for the overlap. Unique
-        // rigid meshes are transformed into world space and packed by locality.
-        // Reused, skeletal and animation-capable meshes retain their instance
-        // transform and the old move-together grouping.
-
         mGeometry->geometryEntries().clear();
         mEmittedInstances.clear();
         mGeometryTransformSceneInstances.clear();
@@ -1122,20 +1073,6 @@ bool MetalAccelStructure::step(double budgetMs)
 
     if (st.phase == Phase::Blas)
     {
-        // Share one BLAS between every group that holds the same geometry.
-        //
-        // Scattered scenes are built almost entirely out of repeats: the pine forest
-        // places 38 000 instances drawn from 50 distinct objects. A BLAS per instance
-        // would be 38 000 structures over the same 50 meshes, which is both the build
-        // time and the memory of a scene 700 times larger than the one authored.
-        //
-        // The signature is (mesh, material, triangle range) per geometry rather
-        // than mesh alone, because the material and range are baked into the shared
-        // geometry entries -- two instances of the same mesh with different
-        // materials are not the same BLAS.
-        // Skeletal groups are excluded: their vertices are rewritten per frame and
-        // the structure refit alongside, so sharing one would mean two instances
-        // deforming the same geometry.
         while (st.blasCursor < st.groups.size())
         {
             const size_t g = st.blasCursor++;
@@ -1189,12 +1126,6 @@ bool MetalAccelStructure::step(double budgetMs)
             emitted.asIndex = (uint32_t)blasIdx;
             emitted.userID = mBlasList[blasIdx].mGeometryBase;
             emitted.identityTransform = st.groupBaked[g];
-            // The boundary of a participating medium gets its own mask: shadow
-            // rays must pass through it, or a fog gizmo blacks out everything it
-            // encloses. Groups are keyed by node, so a gizmo -- one object, one
-            // material -- is never merged with anything else, and reading the
-            // first member's material is reading the group's. Baked groups are
-            // explicitly partitioned by this same mask.
             const uint32_t groupMaterial = instances[st.groups[g].front().sceneInstanceId].mMaterialId;
             const bool isMediumBoundary = groupMaterial < mMaterials->isMediumBoundary().size() &&
                                           mMaterials->isMediumBoundary()[groupMaterial] != 0u;
@@ -1209,10 +1140,6 @@ bool MetalAccelStructure::step(double budgetMs)
 
             if (outOfTime(st.blasCursor, built))
             {
-                // Close whatever group the last build landed in before handing
-                // control back, so the scratch buffers it holds are not carried
-                // across frames waiting for a group that may be many slices away
-                // from filling up.
                 flushAccelerationStructureGroup();
                 chargePhase();
                 report();
@@ -1306,20 +1233,6 @@ bool MetalAccelStructure::step(double budgetMs)
                 emitted.sceneInstanceId = (uint32_t)i;
                 emitted.asIndex = (uint32_t)blasIdx;
                 emitted.userID = curr.mLightId; // lights address the light table, not geometry
-                // Point/spot proxies exist for picking and the gizmo; they are not
-                // emissive surfaces. Putting them on the light mask would treat their
-                // radiant intensity as radiance and blow out the frame.
-                //
-                // They must not be on the geometry mask either. A point light is sampled
-                // at its centre, which sits inside the proxy sphere, so a shadow ray to
-                // it necessarily crosses the shell -- and RAY_MASK_SHADOW *is*
-                // GEOMETRY_MASK_GEOMETRY, so every next-event connection to a point or
-                // spot light was reported occluded and those lights lit nothing at all.
-                // Picking runs on the CPU in Scene::pick() and never consults these
-                // masks, so a proxy invisible to every ray costs nothing.
-                // Scene::updateLight is the single host-side validation point.
-                // normal.w is zero for disabled or rejected lights, so their
-                // editor proxy must not survive as a ray-visible TLAS instance.
                 const bool enabled =
                     curr.mLightId < mScene->getLights().size() && mScene->getLights()[curr.mLightId].normal.w != 0.0f;
                 const bool visibleToCamera = curr.mLightId < mScene->getLightsDesc().size() ?
@@ -1350,27 +1263,10 @@ bool MetalAccelStructure::step(double budgetMs)
         st.blasOfSignature.clear();
     }
 
-    // --- Finish: buffers and the top level ------------------------------------
-    //
-    // Not sliced. What is left is one pass over the emitted instances and a single
-    // top-level build, which measures in the tens of milliseconds even on the
-    // largest scene here -- and it cannot be interrupted anyway, since the TLAS
-    // descriptor has to see every structure at once.
-
-    // Record whether host copies survived after all current upload and build consumers have run.
-    //
-    // Off by default because Scene::pick() walks these arrays -- the editor needs
-    // them, a headless render does not.
     const size_t vtxBytes = mGeometry->hostGeometryBytes().first;
     const size_t idxBytes = mGeometry->hostGeometryBytes().second;
     const bool hostFreed = mScene->hostGeometryReleased();
 
-    // Keep bounded-medium descriptors as a prefix of the ordinary descriptor
-    // buffer. That gives their filtered TLAS native instance ids which still
-    // index the main descriptor table, avoiding a remap buffer in every volume
-    // hit. Curves and lights were appended after triangle groups, and the
-    // stable partition preserves that relative order for the triangle-only SSS
-    // TLAS below.
     mMediumTlasInstanceCount = 0u;
     if (!envFlag("STRELKA_NO_MEDIUM_ONLY_TLAS"))
     {
@@ -1430,13 +1326,6 @@ bool MetalAccelStructure::step(double budgetMs)
     STRELKA_INFO("Primitive surface data: {} geometries, {} triangles embedded in BLAS", mPrimitiveSurfaceGeometryCount,
                  mPrimitiveSurfaceTriangleCount);
 
-    // A sole baked triangle BLAS is already in world space. Extend can traverse
-    // it directly and intersect the small set of area lights from UniformLight,
-    // avoiding the instance level entirely. Other stages retain the TLAS for
-    // now, so this eligibility rule is deliberately strict and easy to audit.
-    // Analytic intersection is a linear scan. It wins over entering a handful
-    // of proxy instances, but must not turn a scene with hundreds of lights
-    // into hundreds of tests per ray.
     constexpr size_t kMaxDirectStaticLightTests = 8u;
     bool directStaticEligible =
         !envFlag("STRELKA_NO_DIRECT_STATIC_EXTEND") && mScene->getLightsDesc().size() <= kMaxDirectStaticLightTests;
@@ -1481,14 +1370,6 @@ bool MetalAccelStructure::step(double budgetMs)
     mGeometry->uploadGeometryEntryBuffer();
     uploadEmissiveMeshLights();
 
-    // buildEmptyTopLevel may have left a one-descriptor placeholder here so the
-    // scene could be traced while it loaded. It is replaced, not appended to.
-    // Retired, not just released: the set does not retain what it names, and the
-    // allocator readily hands the same address back for the buffer allocated
-    // next. addAllocation would then see an address the set already holds, add
-    // nothing, and the replacement would never be made resident -- read later at
-    // an offset that is perfectly in range, faulting because the page is not
-    // resident, and reported by the queue as kIOGPUCommandBufferCallbackErrorHang.
     retireResident(mInstanceBuffer);
     const size_t instanceDescriptorStorageCount = mEmittedInstances.size() + mGeometryTransformSceneInstances.size();
     mInstanceBuffer = mDevice->newBuffer(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) *
@@ -1500,16 +1381,6 @@ bool MetalAccelStructure::step(double budgetMs)
     {
         const EmittedInstance& e = mEmittedInstances[d];
         instanceDescriptors[d].accelerationStructureID = mBlasList[e.asIndex].mAs->gpuResourceID();
-        // Not marked opaque when the scene has cutouts. The flag used to mean
-        // "skip the intersection function"; the alpha test now runs in the
-        // kernel, and the flag is what makes traversal report these triangles as
-        // *candidates* to it at all. Setting it here would hand the shadow walk a
-        // committed hit with no chance to test coverage -- every cutout would
-        // block outright and the canopy would go solid.
-        //
-        // The kernels that do not want the test -- extend, and the shadow path of
-        // a scene without cutouts -- force opacity on the intersector instead,
-        // which overrides this and costs them nothing.
         const bool lightProxy = (e.mask & (GEOMETRY_MASK_LIGHT | GEOMETRY_MASK_LIGHT_HIDDEN)) != 0;
         instanceDescriptors[d].options = (mMaterials->hasAlphaMaterials() || lightProxy) ?
                                              MTL::AccelerationStructureInstanceOptionNone :
@@ -1519,12 +1390,6 @@ bool MetalAccelStructure::step(double budgetMs)
         instanceDescriptors[d].mask = e.mask;
     }
     writeInstanceTransforms(mInstanceBuffer);
-    // Both buffers carry identical immutable descriptor fields. Transform
-    // updates can now exchange their roles and overwrite only the new current
-    // one; the old current remains the previous rendered pose at zero copy cost.
-    // Same rule for the pose buffer, which until now was overwritten without
-    // being released at all: that leaked the allocation and left the residency
-    // set naming it forever.
     retireResident(mPreviousInstanceBuffer);
     mPreviousInstanceBuffer = mDevice->newBuffer(mInstanceBuffer->length(), MTL::ResourceStorageModeShared);
     if (mPreviousInstanceBuffer)
@@ -1853,12 +1718,6 @@ void MetalAccelStructure::updateInstanceTransforms()
         return;
     }
 
-    // The old current buffer is exactly the transform state the preceding frame
-    // rendered. Keep it untouched for motion-vector reconstruction and rewrite
-    // the other fully initialized descriptor buffer as this frame's current.
-    // More than one scene edit can be folded into one rendered frame; only the
-    // first update swaps, or the second would turn an intermediate same-frame
-    // state into "previous".
     if (!mInstanceTransformsChanged)
     {
         std::swap(mInstanceBuffer, mPreviousInstanceBuffer);
@@ -2016,12 +1875,6 @@ void MetalAccelStructure::publishPartialTopLevel()
     // buffer is tens of megabytes and the load publishes repeatedly.
     if (!mInstanceBuffer || mInstanceBuffer->length() < bytes)
     {
-        // See the rebuild path above for why this is retired rather than
-        // released. Doubling rather than fitting exactly: `bytes` grows
-        // monotonically while a million-instance scene streams in and this
-        // function publishes on every batch, so an exact fit reallocated both
-        // buffers -- and, below, copied all of them -- once per publish instead
-        // of O(log n) times.
         const size_t grown = growthTarget(mInstanceBuffer, bytes);
         retireResident(mInstanceBuffer);
         mInstanceBuffer = mDevice->newBuffer(grown, MTL::ResourceStorageModeShared);
@@ -2051,12 +1904,6 @@ void MetalAccelStructure::publishPartialTopLevel()
     }
     writeInstanceTransforms(mInstanceBuffer);
 
-    // The two pose buffers exchange roles every frame, so the previous one has
-    // to be able to hold this instance count too. Growing only the current one
-    // left the shorter buffer to be swapped in by the next transform update --
-    // and writeInstanceTransforms writes mEmittedInstances.size() descriptors
-    // with no regard for the length it was handed, which is a heap overflow on
-    // the host and an out-of-range read for the tracer.
     if (mPreviousInstanceBuffer && mPreviousInstanceBuffer->length() < bytes)
     {
         const size_t grown = growthTarget(mPreviousInstanceBuffer, bytes);

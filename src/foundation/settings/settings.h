@@ -18,14 +18,6 @@ class SettingsManager
 private:
     using SettingValue = std::variant<uint32_t, float, bool, std::string>;
 
-    // std::less<> is a transparent comparator, so find() accepts a std::string_view
-    // (and thus a raw `const char*`) directly. std::unordered_map only gained
-    // heterogeneous lookup in C++20 — with the
-    // hash map every get/set had to materialise a std::string key, which heap
-    // allocates for any key longer than the SSO buffer (e.g.
-    // "render/post/tonemapper/shutterSpeed"). The UI issues dozens of those per
-    // frame; the settings table only holds a few dozen entries, so the O(log n)
-    // tree lookup is cheaper than the allocation it replaces.
     std::map<std::string, SettingValue, std::less<>> mMap;
 
 public:
@@ -92,12 +84,6 @@ public:
     }
 };
 
-/// The per-animation settings keys.
-///
-/// A dozen call sites -- the editor, the animation panel, the Metal renderer --
-/// build these, and getAs() treats a key that differs by one character as a
-/// missing setting: it logs, asserts, and hands back a default. Spelling them
-/// once is what keeps a writer and its reader on the same key.
 inline std::string animationStateKey(size_t index)
 {
     return fmt::format("render/animation/anim{}/state", index);

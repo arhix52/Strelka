@@ -135,10 +135,6 @@ TEST_CASE("the resolution readout follows each backend's own rule")
     CHECK(optixRes.pathTraceHeight == 540);
     CHECK(optixRes.upscaling);
 
-    // An odd output dimension: the 2x model would return an image a pixel short,
-    // so denoisePlan declines to upscale at all and the readout has to say the
-    // tracer is running at full size -- otherwise it reports half a frame that
-    // never happens.
     const oka::editor_denoiser::Resolution oddRes = resolution(optix(), kOptixDenoiseUpscale, 0.5f, 1921, 1080);
     CHECK(oddRes.pathTraceWidth == 1921);
     CHECK(oddRes.pathTraceHeight == 1080);

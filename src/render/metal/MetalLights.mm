@@ -115,13 +115,6 @@ void MetalLights::releaseProjectorTextures()
     mProjectorImagePaths.clear();
 }
 
-/// Decode the images projector lights throw, in the order the scene registered
-/// them, so that a light's points[0].z indexes this vector.
-///
-/// LDR slides use an uncompressed sRGB texture; HDR and EXR slides use linear
-/// RGBA32F. A slot whose file failed to decode stays null and the shader throws
-/// a plain white frame there, which is a visible rectangle rather than a light
-/// that quietly stopped working.
 void MetalLights::loadProjectorImages(const std::vector<std::string>& paths, MetalTextures& textures)
 {
     if (paths == mProjectorImagePaths)
@@ -157,11 +150,6 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
     std::swap(mLightBuffer, mPreviousLightBuffer);
     mPendingTemporalMapping = mPreviousLightBuffer != nullptr;
 
-    // This backend's UniformLight carries one field the host's Scene::Light does
-    // not -- the bindless handle of a projector's image -- so the table is built
-    // field for field rather than memcpy'd whole. The shared prefix is still one
-    // copy; only the handle is resolved per light, from the slot the scene
-    // packed into points[0].z.
     static_assert(offsetof(UniformLight, projectorTexture) == sizeof(Scene::Light),
                   "the host light must be the exact prefix of the GPU light");
     static_assert(sizeof(UniformLight) == sizeof(Scene::Light) + 16,
@@ -270,11 +258,6 @@ void MetalLights::upload(const std::vector<Scene::Light>& lightDescs,
             dst.selectionAlias = selection.entries[i].alias;
             if (lightDescs[i].type == LIGHT_TYPE_RECT)
             {
-                // Rectangle sampling needs corners 0, 1 and 3 only. The Metal
-                // hit path uses slot 2 for the inverse of the edge Gram matrix:
-                // (inv00, inv01, inv11). This removes an invariant matrix solve
-                // from every ray/light pair without changing the shared scene
-                // representation used by the other backends.
                 const glm::float3 inverseGram = rectangleInverseGrams[i];
                 dst.points[2] = vector_float4{ inverseGram.x, inverseGram.y, inverseGram.z, 0.0f };
             }

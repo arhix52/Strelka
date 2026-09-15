@@ -9,13 +9,6 @@ static uint32_t packNormal(float3 normal)
     return pack_float_to_unorm10a2(float4(normal * 0.5f + 0.5f, 0.0f));
 }
 
-// Skin data layout per vertex (64 bytes):
-//   [0..15]  joints  (int4)
-//   [16..31] weights (float4)
-//   [32..47] initial position (float3 + pad)
-//   [48..63] initial normal (float3) + packed tangent (uint32)
-// Must match CPU-side Scene::vertexSkinData (64 bytes).
-// Metal's float3 is 16 bytes in structs; packed_float3 is 12 bytes — matching glm::float3.
 struct SkinData
 {
     int4           joints;   // 16 bytes, offset 0

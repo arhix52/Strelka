@@ -18,29 +18,6 @@ using oka::test::stratum;
 
 #include <cmath>
 
-// ---------------------------------------------------------------------------
-// An opaque surface hit from behind.
-//
-// Nothing culls a back face here, so this hit is ordinary: a leaf card seen
-// from its underside, or a rock whose decimated shell has the winding inverted.
-// Neither has an interior to be inside of, so the far side is the near side.
-//
-// Two other things arrive as dot(N, wo) < 0 and neither is this, which is what
-// most of the cases below are pinning down:
-//
-//   * a ray leaving a dielectric -- test_dielectric_exit.cpp owns that one, and
-//     the transmission lobe answers it by flipping the normal itself;
-//   * a triangle facing the camera whose normal map tipped the shading normal
-//     past the viewer. That is a different defect with a different fix, and
-//     flipping it costs 06_normalmap 1.8% against Cycles.
-//
-// What the flip is worth: on the pine forest 40331 primary hits, 13.2% of the
-// frame, were absorbing with the shading normal below the geometric horizon,
-// and 99.7% of them were geometric back faces. They came out exactly black
-// rather than merely dark, because the closest-hit program terminates on absorb
-// above next-event estimation, so the pixel lost its direct lighting too.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 
@@ -108,10 +85,6 @@ TEST_CASE("the predicate flips an opaque back hit and nothing else")
     // A front hit is already the right way round.
     CHECK_FALSE(opaqueBackHitFlipsFrame(true, 0.7f, 0.0f, 0.0f));
 
-    // The distinction the ladder paid for: a triangle facing the camera whose
-    // normal map tipped the shading normal past the horizon is NOT this defect.
-    // Flipping it shades a surface pointing away from the light that lights it,
-    // and 06_normalmap goes from 1.061 to 1.079 against Cycles.
     CHECK_FALSE(opaqueBackHitFlipsFrame(true, -0.7f, 0.0f, 0.0f));
 
     // A ray leaving glass. Flipping here would take the hit away from the
@@ -273,11 +246,6 @@ TEST_CASE("the shaded frame is what both halves of the estimate must be told")
 
 TEST_CASE("a flipped hit offers and pairs over the same hemisphere it scatters into")
 {
-    // The property that keeps MIS legal after the flip: the directions
-    // next-event estimation offers, the directions the bounce is weighted over,
-    // and the directions the BSDF actually samples all have to be one set. The
-    // failure this guards is the one that withholds the weight from a bounce the
-    // estimate did offer, which counts the light about twice.
     const SurfaceInteraction si = back_hit(0.4f);
     const ShadedFrame f = shadedFrame(si.front_face, dot(si.shading_normal, si.wo), si.transmission,
                                       si.diffuse_transmission);

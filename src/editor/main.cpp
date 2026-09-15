@@ -28,10 +28,6 @@ int main(int argc, const char* argv[])
         return 0;
     }
 
-    // A scene on the command line is optional. Without one -- or with one that is
-    // not there -- the editor comes up on its empty document, which is a state it
-    // already supports: File > Open loads into it, and the window is up either way
-    // rather than the process exiting before anything is drawn.
     std::string sceneFile(result["s"].as<std::string>());
     if (!sceneFile.empty() && !std::filesystem::exists(sceneFile))
     {

@@ -6,11 +6,6 @@
 namespace oka
 {
 
-/// Camera selection, lens/DOF, photographic exposure and navigation speed.
-///
-/// Was part of Render Settings; moved out because a camera is a scene object a
-/// user picks and tunes, not a renderer preference -- and it made that panel's
-/// scroll twice as long as it needed to be.
 void EditorApp::drawCameraPanel()
 {
     ImGui::Begin("Camera:");
@@ -145,14 +140,6 @@ void EditorApp::drawCameraPanel()
         ImGui::TreePop();
     }
 
-    // Exposure, the camera side of the tone curve. The renderer computes
-    //     film speed  > 0 : cm2_factor * iso / (shutter * fstop^2) / 100
-    //     film speed == 0 : cm2_factor
-    // so a zero film speed is the arbitrary-units mode, which is what a scene lit
-    // in normalised rather than photometric units wants -- and what the light
-    // sidecar writes. Both forms are editable here because the sidecar can carry
-    // either, and a scene that opens too dark is otherwise unexplainable from
-    // inside the editor.
     if (ImGui::TreeNode("Exposure"))
     {
         float iso = m_settingsManager->getAs<float>("render/post/tonemapper/filmIso");

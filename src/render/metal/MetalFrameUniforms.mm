@@ -21,7 +21,6 @@
 
 #include <simd/simd.h>
 
-
 namespace oka::metal
 {
 
@@ -170,10 +169,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     const bool denoiseOn = denoising;
     const bool temporalOn = denoiseOn || temporalUpscaling;
     pUniformData->writeAov = settings.getAs<uint32_t>("render/pt/writeAov") || DEBUG_MODE_IS_AOV(debug) || temporalOn;
-    // Walk to the first rough, opaque surface. Glass and mirrors have no albedo
-    // of their own to demodulate against; writing the pane (guidePrimaryHit)
-    // hands MetalFX a black specular lobe in front of a transmitted room and
-    // the pane comes out opaque and smeared.
     pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
     pUniformData->restirDIEnabled = settings.getAs<bool>("render/pt/restirDIEnabled") ? 1u : 0u;
     pUniformData->initialCandidateCount = std::max(settings.getAs<uint32_t>("render/pt/initialCandidateCount"), 1u);
@@ -196,12 +191,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->restirProposalCollision = 0.0f;
     pUniformData->restirProposalEntropy = 0.0f;
 #endif
-    // PT accumulation and MetalFX history solve different problems. The former
-    // remains the converged scene-linear result; the latter must see a fresh,
-    // coherently jittered launch whose color, depth, motion and material guides
-    // all describe the same camera sample. Feeding the running PT mean together
-    // with one current guide sample mixes hundreds of visibility samples into a
-    // single-surface G-buffer and gives the denoiser a biased input.
     float jx = 0.0f, jy = 0.0f;
     if (temporalOn)
     {
@@ -218,11 +207,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->denoiseFireflyClamp = settings.getAs<float>("render/pt/denoiseFireflyClamp");
     pUniformData->clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
     pUniformData->hasBoundedMedium = in.materials->hasBoundedMedium() ? 1u : 0u;
-    // The world scale the subsurface walk draws its free flights against. Cached
-    // in Scene against the transform generation, so this is a comparison once
-    // the scene has settled. The fallback matters for a scene with no bounded
-    // geometry -- an environment-only frame -- where there is nothing to bound
-    // and nothing to scatter in either.
     {
         glm::float3 boundsMin(0.0f);
         glm::float3 boundsMax(0.0f);
@@ -392,13 +376,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
             ((height + pUniformData->sharcUpdateDownscale - 1u) / pUniformData->sharcUpdateDownscale);
         pUniformData->sharcFrameIndex = static_cast<uint32_t>(in.frameNumber);
         pUniformData->sharcLevelBias = sharcLevelBias;
-        // The previous frame's camera, not the motion-blur shutter-open one: the
-        // grid's level comes from distance to the camera, so a cell the camera
-        // walked towards is re-keyed at a finer level, and resolve carries its
-        // history over from whichever neighbour it came from.
-        // On the first frame there is no previous pose; using the current one
-        // keeps the delta at exactly zero so the transfer stays off until the
-        // camera has actually moved.
         const bool hasPrevCamera = in.prevView != nullptr && in.frameNumber != 0;
         const glm::float4x4 prevCameraToWorld =
             glm::inverse(hasPrevCamera ? in.prevView->mCamMatrices.view : camera.matrices.view);
@@ -482,17 +459,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformTonemap->height = height;
     pUniformTonemap->outWidth = outWidth;
     pUniformTonemap->outHeight = outHeight;
-    // A debug view is data, not a picture: a normal, a roughness or a motion
-    // vector means what it means, and a tone curve would misreport it. So the
-    // pass runs as a straight copy instead of being skipped -- it is the only
-    // thing that writes the texture the display samples, and skipping it left
-    // every debug view showing the last tonemapped frame, which reads as the
-    // control doing nothing at all.
-    // Debug views paint palette colours -- a hash, a probe depth, an occupancy
-    // flag, a bounce count -- and a photographic exposure applied to those means
-    // nothing. `eSharcRadiance` is the exception: it holds radiance, and it is
-    // only worth reading next to the render, under the render's own exposure and
-    // curve.
     const bool radianceView = debug == (uint32_t)DebugMode::eSharcRadiance;
     const bool sharcPaletteView =
         pUniformData->sharcCapacity != 0u && SHARC_DEBUG_IS_SURFACE_VIEW(pUniformData->sharcDebug);
@@ -627,7 +593,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformTonemap->exposureValue = debugView ? float3(1.0f) : exposureValue;
     pUniformData->exposureValue = exposureValue; // need for proper accumulation
 
-
     FillResult out{};
     out.uniforms = pUniformData;
     out.tonemap = pUniformTonemap;
@@ -640,14 +605,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     out.jitterY = pUniformData->jitterY;
     out.settingsChanged = settingsChanged;
     const auto samplesPerLaunch = pUniformData->samples_per_launch;
-    // Nothing to trace once the budget is spent: the accumulated estimate is the
-    // final one and the frames after it only re-run the display transform.
-    //
-    // That includes the denoised path, which used to keep tracing a sample per
-    // frame forever. Its output is a texture the tone curve reads, so the frame
-    // it produced at the last sample can be re-tonemapped as it stands -- which
-    // is what makes exposure and the tone curve still respond after the estimator
-    // has stopped, at the price of one dispatch rather than a whole re-render.
     out.samplesThisLaunch = accumulationActive ? std::min(samplesPerLaunch, remainingSamples) :
                                                  (effectiveAccumulation ? 0u : samplesPerLaunch);
     return out;

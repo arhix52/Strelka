@@ -55,10 +55,6 @@ TEST_CASE("the frame is upright: +X is to the right and +Y is the top row")
     CHECK(right.u == doctest::Approx(0.75f));
     CHECK(right.v == doctest::Approx(0.5f));
 
-    // The light's up axis has to reach the *top* of the image, which is v = 0:
-    // a decoder hands back the top row first. Get this backwards and the image
-    // is not obviously wrong -- it is a projector mounted upside down, which is
-    // a thing people do on purpose.
     const ProjectorSample up = projectorProject(0.0f, 0.5f * ty, 1.0f, tx, ty, 0.0f);
     CHECK(up.inside);
     CHECK(up.v == doctest::Approx(0.25f));
@@ -86,10 +82,6 @@ TEST_CASE("nothing is thrown backwards out of the lens")
     const float tx = projectorTanHalfX(kHalfFov90);
     const float ty = projectorTanHalfY(tx, 1.0f);
 
-    // Behind the projector. Not a smooth term that happens to reach zero -- the
-    // perspective divide would fold this direction onto a perfectly plausible
-    // place in the image, and the light would throw a mirrored copy of the frame
-    // out of its own back.
     CHECK_FALSE(projectorProject(0.0f, 0.0f, -1.0f, tx, ty, 0.0f).inside);
     CHECK_FALSE(projectorProject(0.1f, 0.1f, -1.0f, tx, ty, 0.0f).inside);
     // Exactly sideways, where the divide is a division by zero.
@@ -165,12 +157,6 @@ TEST_CASE("a narrow pyramid approaches the product of its angular extents")
 
 TEST_CASE("the host's solid angle is the shader's, to the last bit")
 {
-    // oka::projectorSolidAngleFromFov() divides a projector's Watts in
-    // scene/light_desc.h and projectorSolidAngle() is what the shader spreads
-    // the image over. They are two copies of one number -- the scene header
-    // cannot include the shader one, see the comment on the host copy -- so a
-    // drift between them scales every projector in the scene and nothing else
-    // would catch it.
     const float aspects[] = { 1.0f, 4.0f / 3.0f, 16.0f / 9.0f, 2.39f, 0.75f };
     const float halfFovs[] = { 0.01f, 0.1f, 0.3f, kHalfFov90, 1.5f };
     for (const float aspect : aspects)

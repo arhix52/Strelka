@@ -381,10 +381,6 @@ ContourProxy analyzeContour(const ImageAlpha& alpha, const AlphaGeometryAnalysis
     std::vector<uint8_t> states(alpha.values.size());
     std::ranges::transform(alpha.values, states.begin(), [&](uint8_t texel) { return alphaState(texel, options); });
     ContourProxy result;
-    // States 1/2 survive; state 2 can use opaque hardware traversal. Building
-    // both regions needs their two boundaries. Direct opaque/transparent edges
-    // are deliberately counted in each: this is a conservative complexity
-    // proxy before polygon sharing and simplification.
     result.exterior = countContourEdges(states, alpha.width, alpha.height, (1u << 1u) | (1u << 2u));
     result.opaqueBoundary = countContourEdges(states, alpha.width, alpha.height, 1u << 2u);
     return result;

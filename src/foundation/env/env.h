@@ -8,19 +8,7 @@
 namespace oka
 {
 
-/// Environment overrides, parsed in one place.
-///
-/// The benchmarks, audits and backend switches are all driven by STRELKA_*
-/// variables, and every one of them used to be read with atoi(getenv(...)):
-/// undefined behaviour when the variable is unset, and silently zero when it is
-/// misspelled. Zero is a meaningful value for most of these knobs -- upscaling
-/// off, depth 0, Metal 3 -- so a typo produced a measurement quietly taken with
-/// settings nobody asked for. Parsing here reports it instead.
-
-/// std::getenv is flagged mt-unsafe because another thread may call setenv
-/// underneath it. Nothing in this tree writes the environment, and every read
 /// below happens while the process is still setting itself up, so the NOLINTs
-/// on the three call sites record that rather than repeating it.
 
 /// True when the variable is present, whatever its value.
 inline bool envFlag(const char* name)

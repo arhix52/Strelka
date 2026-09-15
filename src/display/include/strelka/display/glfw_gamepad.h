@@ -9,19 +9,6 @@
 namespace oka::glfw_gamepad
 {
 
-/// Finding and reading a gamepad through GLFW, once, for both windowing
-/// backends. Metal and Vulkan each own their own GLFWwindow but the joystick API
-/// is per-process and window-independent, so a copy per backend would be two
-/// answers to one question -- and the copy without the slot-scan below is the
-/// one that would look correct and never see the pad.
-
-/// The first connected joystick GLFW has a game controller mapping for, or -1.
-///
-/// A scan, not GLFW_JOYSTICK_1: joystick slots are handed out to anything the
-/// platform exposes as one, and on a desk with a Keychron K8 Pro the keyboard's
-/// system-control HID collection takes slot 0 while the DualSense lands in slot
-/// 1. Reading slot 0 finds a device with no mapping, no axes worth the name and
-/// no way to tell that something went wrong.
 inline int findGamepadSlot()
 {
     for (int slot = GLFW_JOYSTICK_1; slot <= GLFW_JOYSTICK_LAST; ++slot)
@@ -34,11 +21,6 @@ inline int findGamepadSlot()
     return -1;
 }
 
-/// Read `slot` into `out`, normalising as GamepadState documents.
-///
-/// Returns false and leaves `out` disconnected if the pad went away between the
-/// scan and the read, which is a frame that happens every time somebody pulls
-/// the cable.
 inline bool read(int slot, GamepadState& out)
 {
     GLFWgamepadstate raw{};
@@ -71,11 +53,6 @@ inline bool read(int slot, GamepadState& out)
     return true;
 }
 
-/// Rescan when the pad we were using goes away, and log the transitions.
-///
-/// Held by the display rather than by the editor so that a headless or
-/// non-GLFW display simply never calls it. `previous` is the state from last
-/// frame, used only to decide whether anything is worth saying.
 inline bool poll(GamepadState& state)
 {
     const bool wasConnected = state.connected;

@@ -5,18 +5,6 @@
 #include <cstdlib>
 #include <string>
 
-// ---------------------------------------------------------------------------
-// The camera dump is an input, not a report.
-//
-// Its whole value is that the block it prints can be pasted into a .toml and
-// rendered by StrelkaCLI to the same frame the viewport was showing. Two things
-// can quietly destroy that and neither is visible by eye: a key that the CLI
-// does not parse, and a coordinate printed to too few digits.
-//
-// The key names below are checked against HeadlessApp::parseConfig(); if that
-// function is renamed a key, this file is the thing that should fail.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 

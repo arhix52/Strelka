@@ -26,13 +26,6 @@
 namespace oka
 {
 
-/// The "no such thing" value of the uint32_t ids the scene runs on: node,
-/// instance, light, material, and the counts that mark an absent attribute.
-///
-/// It was written out as `kInvalidIndex` in sixty-one places. The value is the
-/// same and always was -- but the conversion is what made every comparison
-/// against it a signed-to-unsigned one, which is the shape a real sign bug
-/// takes, and none of the sixty-one said what the number meant.
 inline constexpr uint32_t kInvalidIndex = ~uint32_t{ 0 };
 
 struct Mesh
@@ -46,11 +39,6 @@ struct Mesh
         uint32_t triangleCount = 0;
     };
 
-    // Large static primitives are spatially ordered and cut into ranges of at
-    // most this many triangles while the source geometry is still available to
-    // the loader. Metal enables ExtendedLimits above its standard 2^28-
-    // primitive ceiling; 2^29 remains below Metal's extended 2^30 ceiling and
-    // matches the practical DXR/Vulkan budget used by the other backends.
     static constexpr uint32_t kMaxStaticBlasTriangles = 1u << 29;
 
     uint32_t mIndex = 0; // Index of 1st index in index buffer
@@ -79,10 +67,6 @@ struct Curve
     // parameter of createCurve that nothing stored, so every consumer had to
     // assume one -- and the two backends assumed different ones.
     Type mType = Type::eLinear;
-    /// Segments per strand when every strand in the set has the same count, else
-    /// 0. Hair from a particle system always does, and knowing it lets a shader
-    /// recover where along a strand a hit landed from the segment index alone --
-    /// which is the whole of what a root-to-tip gradient needs, for no memory.
     uint32_t mSegmentsPerStrand = 0;
 };
 
@@ -139,12 +123,6 @@ inline bool any(ChangeBits bits)
     return static_cast<uint32_t>(bits) != 0;
 }
 
-/// How a texture file is encoded, where something authoritative said so.
-///
-/// Only the transfer function. The renderer decodes sRGB or it does not, and has
-/// no colour-management path for primaries, so acescg and lin_rec709 both arrive
-/// as Linear even though their gamuts differ -- the loader warns rather than
-/// pretending otherwise.
 enum class TexColorSpace : uint8_t
 {
     Unspecified = 0, // nothing was stated, so the slot's own default stands
@@ -160,23 +138,8 @@ public:
         std::string name;
         MaterialParams params = {}; // GPU-ready PBR material parameters
 
-        /// The OpenPBR argument block, when this material is authored as OpenPBR
-        /// rather than translated from glTF.
-        ///
-        /// Meaningful only when params.material_type == MATERIAL_TYPE_OPENPBR,
-        /// which the <stem>_openpbr.json sidecar sets. Kept beside params
-        /// rather than inside it so that adding this model moved no byte of the
-        /// struct the shaders read -- see openpbr/openpbr_params.h.
         OpenPBRParams openpbr = openpbr_make_default_params();
 
-        /// Texture per OpenPBR slot, indexed by OpenPBRTextureSlot. Empty where
-        /// the parameter is a constant.
-        ///
-        /// Separate from the five glTF paths above rather than folded into them:
-        /// the two models do not agree on what a slot means (glTF's
-        /// metallicRoughness packs two channels of one image, OpenPBR names each
-        /// input separately), and a material is authored through one route or
-        /// the other, never both.
         std::array<std::string, MAX_OPENPBR_TEXTURES> openpbrTexPaths;
         /// Per-slot override of the renderer's own encoding guess, from a
         /// MaterialX document -- the only place that knows a roughness map was
@@ -191,13 +154,6 @@ public:
         std::string occlusionTexPath;
     };
 
-    // 32 bytes, and it must stay 32: the Metal shaders hardcode this stride and
-    // read attributes by byte offset (search for vtxStride). The two trailing
-    // words were padding; uv1 and color fit in them exactly, so a second UV set
-    // and vertex colours cost nothing and change no offset that already exists.
-    //
-    // color defaults to opaque white rather than zero: an unset vertex colour is
-    // a multiplier of 1, and a zeroed one would render the surface black.
     struct Vertex
     {
         glm::float3 pos{ 0.0f };
@@ -315,11 +271,6 @@ public:
     int blasUpdateCount = 0;
     int tlasUpdateCount = 0;
 
-    // GPU side structure
-    // Uploaded to the GPU verbatim, so every field is initialized: a light type
-    // that does not write one (a rect light never sets normal) otherwise ships
-    // whatever the allocation held, and a huge or NaN value sitting in a buffer
-    // the shader may start reading is a trap that costs a day to find.
     struct Light
     {
         glm::float4 points[4]{};
@@ -344,23 +295,7 @@ public:
         glm::float3 orientation{ 0.0f }; // euler angles in degrees
         bool useXform = false;
         bool enabled = true;
-        /// Whether camera rays may hit the light's own geometry.
-        ///
-        /// False is a light that lights the scene and appears in reflections but
-        /// is not in frame -- a softbox just outside the crop, which is what
-        /// V-Ray's "invisible" flag means. Distinct from `enabled`, which turns
-        /// the light off entirely.
         bool visibleToCamera = true;
-        /// Whether this light's contribution is cached separately, in the
-        /// radiance cache's short-window "responsive" entries.
-        ///
-        /// For a light that changes fast enough that the cache's ordinary
-        /// temporal window lags visibly behind it -- a torch being swung, a lamp
-        /// switched on, anything animated. The cache then tracks this light's
-        /// contribution over a few frames while the rest of the signal keeps
-        /// averaging over dozens, which is what the two windows are for. Costs a
-        /// second entry per voxel and a second deposit per path, so it is off
-        /// unless a light asks for it. Ignored entirely when the cache is off.
         bool responsive = false;
         std::string name;
 
@@ -379,12 +314,6 @@ public:
         // distant: half-angle in radians. spot: unused here (see cone angles).
         float halfAngle = 0.0f;
 
-        // Spot cone, radians. Defaults match KHR_lights_punctual (π/4 outer,
-        // 0 inner = hard edge). Emission along local -Z, like every other light.
-        //
-        // A projector reads outerConeAngle as half of its *horizontal* field of
-        // view and ignores the inner angle: its edge is a rectangle, not a cone,
-        // and softening it is projectorEdgeSoftness below.
         float innerConeAngle = 0.0f;
         float outerConeAngle = std::numbers::pi_v<float> / 4.0f;
 
@@ -396,13 +325,6 @@ public:
         std::string iesPath;
         int32_t iesProfile = -1;
 
-        // Projector: the image it throws, resolved relative to the scene, and
-        // its index in Scene::mProjectorImages -- the same two-field shape the
-        // IES profile above uses, and for the same reason. The renderer turns
-        // that index into a texture of its own kind (an MTL::ResourceID on
-        // Metal, a cudaTextureObject_t on OptiX), so nothing here has to know
-        // which backend is running. Empty path = a plain white frame, which is
-        // still a usable rectangular spot.
         std::string projectorImagePath;
         int32_t projectorImage = -1;
         // Width / height of the thrown frame. 16:9 because that is what a home
@@ -468,24 +390,10 @@ public:
     };
     std::vector<MeshBounds> mMeshBounds;
 
-    // Conservative world-space box per instance, for picking.
-    //
-    // Rebuilt when the transforms have moved since it was made, which is what the
-    // generation counter tracks -- mDirtyInstances cannot be used for this, since
-    // the renderer consumes and clears it every frame. Without the cache a pick
-    // pays a 4x4 inverse per instance, and at 1.1 million instances that alone is
-    // most of a second of latency on a click.
     std::vector<MeshBounds> mInstanceWorldBounds;
     uint64_t mTransformGeneration = 1;
     uint64_t mInstanceBoundsGeneration = 0;
 
-    // The reduction of the array above to one box. Cached on the same generation
-    // counter, because worldBounds() is called once per frame from the OptiX
-    // backend -- updateEmitterSelectionProbabilities() asks for the scene extent
-    // to split the emitter selection -- and the walk is O(instances) with a
-    // branch per element. On pine_scene's 1 124 123 instances that is 31 MB of
-    // MeshBounds streamed per frame, measured at 2.32 ms and 15% of the render
-    // span, in a gap Nsight Systems shows between every pair of launches.
     MeshBounds mWorldBounds;
     uint64_t mWorldBoundsGeneration = 0;
     size_t mWorldBoundsCount = 0;
@@ -496,10 +404,6 @@ public:
     std::vector<Instance> mInstances;
     std::vector<Light> mLights;
     std::vector<IesProfile> mIesProfiles;
-    /// Images thrown by projector lights, in the order the GPU table holds them.
-    /// A light carries the index, never the path, for the same reason an IES
-    /// light does: the renderer walks this list once and the light struct stays
-    /// a fixed size.
     std::vector<std::string> mProjectorImages;
 
     Scene() = default;
@@ -565,15 +469,6 @@ public:
         return mIndices;
     }
 
-    /// Drop the CPU-side vertex and index arrays once a backend has uploaded
-    /// them. On a 50 M triangle scene that is 2.3 GB held for the life of the
-    /// process, duplicating what already sits in GPU-visible buffers -- on
-    /// unified memory both halves are the same pool, and the machine starts
-    /// swapping.
-    ///
-    /// Not free of consequence, which is why it is opt-in: Scene::pick() walks
-    /// these arrays, so the editor keeps them and headless rendering does not.
-    /// Anything that reads them afterwards must handle them being empty.
     void releaseHostGeometry()
     {
         std::vector<Vertex>().swap(mVertices);
@@ -596,11 +491,6 @@ public:
         return mHostGeometryReleased;
     }
 
-    /// Grow geometry storage once, before a graph walk that appends many meshes.
-    /// Without this, a 50 M triangle forest reallocates the vertex array through
-    /// every doubling -- copying gigabytes that the next mesh will copy again.
-    /// Capacity is rounded to a host page so a Metal no-copy wrap can legally
-    /// pass the allocation as a buffer length.
     void reserveGeometry(size_t vertexCount, size_t indexCount, size_t skinCount = 0);
 
     const std::vector<Instance>& getInstances() const
@@ -633,12 +523,6 @@ public:
     glm::mat4 calculateNodeLocalTransform(const uint32_t nodeId);
     glm::mat4 calculateNodeGlobalTransform(const uint32_t nodeId);
 
-    /// World transform of every node, refreshed in one top-down pass.
-    ///
-    /// Recomputing a node's world transform by walking up to the root (as
-    /// calculateNodeGlobalTransform does) is O(depth) *per node*, and driving it
-    /// from every animation channel independently re-walked the same subtrees
-    /// over and over. Caching turns per-frame animation into O(nodes).
     const std::vector<glm::mat4>& getGlobalTransforms()
     {
         ensureGlobalTransforms();
@@ -741,11 +625,6 @@ public:
         const glm::float4x4 translationMatrix = glm::translate(glm::float4x4(1.0f), desc.position);
         const glm::quat rotation = glm::quat(glm::radians(desc.orientation)); // to quaternion
         const glm::float4x4 rotationMatrix{ rotation };
-        // The shape's own size, not always the rectangle's. A disc or sphere light
-        // carries a radius and no width, so scaling every light by
-        // (width, height, 1) collapsed its transform: the in-plane axes came out
-        // zero and the light's mesh was squashed flat, which left a light that
-        // illuminated nothing and could not be seen either.
         glm::float3 scale{ 1.0f };
         if (desc.type == LIGHT_TYPE_RECT)
         {
@@ -772,25 +651,10 @@ public:
         float intensity = 1.0f;
         glm::float3 color = glm::float3(1.0f);
         float rotationY = 0.0f;
-        // What camera rays see, when that differs from what lights the scene.
-        // Production worlds routinely branch on Light Path: the pine forest
-        // shows an 8k HDRI backdrop at strength 0.2 to the camera and a
-        // procedural sky at 0.7 to everything else. Baking one environment out
-        // of that has to pick a side, and either choice is wrong in the frame.
-        // Empty means camera rays see the lighting environment, as before.
         std::string backgroundTexturePath;
         float backgroundIntensity = 1.0f;
     };
 
-    // Homogeneous atmospheric scattering below `height`. A slab, not a bounded
-    // volume -- see fog.h for why that is the shape offered.
-    /// Camera exposure, in the photographic terms the tonemapper already takes.
-    ///
-    /// glTF cameras carry a projection and nothing else -- no ISO, no aperture,
-    /// no shutter -- so a scene cannot say how bright it is meant to look, and a
-    /// renderer defaulting to a daylight exposure renders a world authored in
-    /// normalised units as black. Whoever builds the scene knows which it is, so
-    /// this travels in the light sidecar alongside the lights it belongs with.
     struct ExposureDesc
     {
         float filmIso = 100.0f;
@@ -876,20 +740,10 @@ public:
                                const glm::float3& scale);
 
     void setMaterial(uint32_t id, const MaterialDescription& desc);
-    /// <summary>
-    /// Create Mesh geometry
-    /// </summary>
-    /// <param name="vb">Vertices</param>
-    /// <param name="ib">Indices</param>
-    /// <returns>Mesh id in scene</returns>
     uint32_t createMesh(const std::vector<Vertex>& vb, const std::vector<uint32_t>& ib);
     uint32_t createSkeletalMesh(const std::vector<Vertex>& vb,
                                 const std::vector<uint32_t>& ib,
                                 const std::vector<oka::Scene::vertexSkinData>& sb);
-    /// Register a mesh whose vertices and indices have already been appended to
-    /// the scene arrays. The loader writes those arrays in place so a 1.5 GB
-    /// forest is not copied from a temporary into mVertices and then again onto
-    /// the GPU.
     uint32_t createMeshFromOffsets(uint32_t vbOffset, uint32_t vertexCount, uint32_t ibOffset, uint32_t indexCount);
     uint32_t createSkeletalMeshFromOffsets(uint32_t vbOffset,
                                            uint32_t vertexCount,
@@ -897,13 +751,6 @@ public:
                                            uint32_t indexCount,
                                            uint32_t sbOffset,
                                            uint32_t skinCount);
-    /// <summary>
-    /// Creates Instance
-    /// </summary>
-    /// <param name="meshId">valid mesh id</param>
-    /// <param name="materialId">valid material id</param>
-    /// <param name="transform">transform</param>
-    /// <returns>Instance id in scene</returns>
     uint32_t createInstance(const Instance::Type type,
                             const uint32_t geomId,
                             const uint32_t materialId,
@@ -918,13 +765,6 @@ public:
                          const std::vector<float>& widths);
 
     uint32_t createLight(const UniformLightDesc& desc);
-    /// <summary>
-    /// Removes instance/mesh/material
-    /// </summary>
-    /// <param name="meshId">valid mesh id</param>
-    /// <param name="materialId">valid material id</param>
-    /// <param name="instId">valid instance id</param>
-    /// <returns>Nothing</returns>
     void removeInstance(uint32_t instId);
     void removeMesh(uint32_t meshId);
     void removeMaterial(uint32_t materialId);
@@ -952,12 +792,6 @@ public:
         mChanges |= bits;
     }
 
-    /// <summary>
-    /// Updates Instance matrix(transform)
-    /// </summary>
-    /// <param name="instId">valid instance id</param>
-    /// <param name="newTransform">new transformation matrix</param>
-    /// <returns>Nothing</returns>
     void updateInstanceTransform(uint32_t instId, glm::float4x4 newTransform);
 
     struct PickHit
@@ -973,34 +807,10 @@ public:
     /// CPU raycast against mesh instances (and light proxies). Closest hit wins.
     PickHit pick(const glm::float3& origin, const glm::float3& direction);
 
-    /// Axis aligned bounds of an instance in the space its transform maps to
-    /// world, with the current skinning pose applied.
-    ///
-    /// Skinning runs on the GPU and its result never comes back, so the CPU
-    /// vertex buffer of a skeletal mesh keeps holding the rest pose. Anything
-    /// CPU side that needs the posed geometry has to re-evaluate it from the
-    /// joint palette, which is what this does.
     bool computeInstanceBounds(uint32_t instId, glm::float3& outMin, glm::float3& outMax);
 
-    /// World-space bounds of every instance, unioned; false when the scene has
-    /// no bounded geometry at all. Cached against the transform generation, so
-    /// asking once a frame costs a comparison after the scene has settled.
-    ///
-    /// The renderer needs a world scale it can trust. A subsurface free flight
-    /// longer than the whole scene cannot have stayed inside a bounded medium,
-    /// and without that bound the random walk places scatter events -- and the
-    /// shadow rays connecting them to lights -- arbitrarily far outside it.
-    /// See docs/open-defects.md #15.
     bool worldBounds(glm::float3& outMin, glm::float3& outMax);
 
-    /// Local-space bounds of a mesh, computed once and kept.
-    ///
-    /// A mesh's extent is a property of the mesh, not of the instance drawing it,
-    /// and a scattered scene has orders of magnitude more instances than meshes:
-    /// the pine forest places 1.1 million of them over 316 geometries. Walking
-    /// the vertices per instance is what made selecting anything there take
-    /// seconds. Skeletal meshes are excluded -- their extent depends on the pose,
-    /// so they keep the per-instance path.
     bool meshBounds(uint32_t meshId, glm::float3& outMin, glm::float3& outMax);
 
     /// Joint matrices driving the instance this frame, empty when it is rigid.

@@ -9,7 +9,6 @@
 
 #include <fmt/format.h>
 
-
 namespace oka::editor_document
 {
 
@@ -40,10 +39,6 @@ inline std::string restorePathAfterFailedLoad(const std::string& previousPath)
     return previousPath;
 }
 
-/// Which camera a freshly loaded document opens on. The cameras the scene authored
-/// come first and the fitted "Main" is appended last, so this opens on the authored
-/// shot when the scene has one -- that is what the scene was built around and what
-/// StrelkaCLI renders for the same file -- and falls back to Main when it has none.
 inline int selectCameraIndexAfterLoad(uint32_t authoredCameraCount, uint32_t totalCameraCount)
 {
     if (totalCameraCount == 0)
@@ -80,10 +75,6 @@ inline int clampCameraIndex(int selected, uint32_t cameraCount)
 /// a working set without turning the submenu into a file browser.
 inline constexpr size_t kRecentScenesCapacity = 10;
 
-/// Absolute, weakly-canonical form so "/a/../b.glb" and "/b.glb" collide in the
-/// recent list. Falls back to the input when the path cannot be resolved yet
-/// (a file that has not been written, a missing drive), because the caller still
-/// wants that string remembered.
 inline std::string normalizeRecentPath(const std::string& path)
 {
     if (path.empty())

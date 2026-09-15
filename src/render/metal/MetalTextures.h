@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <vector>
 
-
 namespace oka::metal
 {
 
@@ -36,17 +35,6 @@ public:
         bool srgb = false;
         TextureKind kind = TextureKind::Color;
     };
-    /// Decode, resample, mip and encode every request across all cores, ahead of
-    /// the material build that will ask for them one at a time.
-    ///
-    /// All of that is per-file, pure CPU and by far the longest part of a cold
-    /// load -- 53.9 s of the pine forest, against 6.2 s for the encode alone --
-    /// and it ran on one core while the rest of the machine sat idle. What it
-    /// produces is held until loadFromFile() asks, which then only has the Metal
-    /// calls left to make.
-    /// Returns true when every request has been decoded. Runs batches until the
-    /// budget is spent, so the caller keeps publishing frames while it works;
-    /// zero budget means run it all in one call.
     bool prewarmStep(const std::vector<Request>& requests, double budgetMs);
 
     // Deduped load for material build. Tracks ownership in materialTextures().

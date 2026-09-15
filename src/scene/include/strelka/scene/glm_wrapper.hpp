@@ -26,13 +26,6 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
-// Cg-style names (glm::float3, glm::float4x4, ...) used to come from
-// gtx/compatibility.hpp, which #includes glm.hpp and therefore every GLM
-// header. The aliases are the only part of that extension this tree needs, so
-// they live here. gtx/hash.hpp is unused (no glm key in any unordered_map).
-// Translate/scale/perspective stay in <glm/gtc/matrix_transform.hpp> at the
-// call sites — pulling that into every camera.h / common.h consumer was free
-// until GLM 1.0 made the experimental headers much heavier.
 namespace glm
 {
 using float2 = vec<2, float, highp>;

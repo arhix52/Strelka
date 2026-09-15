@@ -51,13 +51,6 @@ static __forceinline__ __device__ float fogOpticalDepth(
     return sigmaT * (t1 - t0);
 }
 
-/// Free-flight distance sampling, analog: the probability of reaching the far end
-/// is exactly exp(-sigma_t * L), so the throughput needs no correction on the
-/// surface branch and only the single-scattering albedo on the scatter branch.
-/// Getting this wrong is invisible in a thin medium and doubles the haze in a
-/// thick one.
-///
-/// Returns true when the ray scatters before tMax, with `distance` set.
 static __forceinline__ __device__ bool fogSampleDistance(float3 origin,
                                                          float3 direction,
                                                          float tMax,

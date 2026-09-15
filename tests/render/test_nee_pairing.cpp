@@ -6,22 +6,6 @@
 
 #include <cmath>
 
-// ---------------------------------------------------------------------------
-// The two halves of the multiple-importance-sampling estimate at a shading
-// vertex, and the one property that has to hold between them.
-//
-// Next-event estimation proposes a restricted set of directions. BSDF sampling
-// proposes all of them. The balance heuristic splits every direction *both* can
-// reach and gives the whole of a direction only one of them can -- so a bounce
-// may only be weighted down if a light connection could have reached the same
-// place. Deducting a share that is never delivered loses light outright, and
-// that is what the frosted end of `22_thin_walled` and every transmitted hair
-// path were paying before these two predicates were written down together.
-//
-// The transport cannot be a unit test; its instruments are the ladder and
-// tools/feature_tests/strand_probe.py. What is pinned here is the agreement.
-// ---------------------------------------------------------------------------
-
 TEST_CASE("a front face offers the hemisphere above its shading normal, and only that")
 {
     CHECK(neeProposesDirection(false, /*frontFace=*/true, 0.7f));
@@ -83,10 +67,6 @@ TEST_CASE("a fibre bounce pairs whichever side of the strand it leaves by")
 
 TEST_CASE("the bounce and proposal rules have identical directional support")
 {
-    // The property the whole file exists for. A direction either has both
-    // strategies, whose heuristic shares sum to one, or exactly one strategy,
-    // whose weight is one. A one-way implication still permits the old positive
-    // bias: NEE took 0.4 while an incorrectly unpaired BSDF hit took 1.0.
     for (const bool crossesSurface : { true, false })
     {
         for (const bool frontFace : { true, false })
@@ -181,10 +161,6 @@ TEST_CASE("a surface that scatters through is connected to on both sides")
     CHECK(neeCrossesSurface(false, 0.5f, 0.0f));
     CHECK(neeCrossesSurface(false, 0.0f, 0.5f));
 
-    // A leaf lit from behind: front-facing hit, light below the surface.
-    // standard_pbr_eval() answers there, so withholding the proposal left that
-    // lobe's light to the bounce ray alone -- and a bounce ray that finds a sun
-    // brings the whole sun.
     constexpr float nDotView = 0.8f;
     constexpr float nDotLight = -0.7f;
     CHECK(neeSurfaceSupportsDirection(false, true, nDotView, 0.0f, 0.5f, nDotLight));
@@ -194,29 +170,10 @@ TEST_CASE("a surface that scatters through is connected to on both sides")
     CHECK_FALSE(neeSurfaceSupportsDirection(false, true, nDotView, 0.0f, 0.0f, nDotLight));
     CHECK(neeSurfaceCosine(false, true, nDotView, 0.0f, 0.0f, nDotLight) == 0.0f);
 
-    // The bounce through the leaf pairs with that proposal rather than taking a
-    // light whole -- but asserting it here would restate the case above, which
-    // already holds neePairsWithBounce to neeProposesDirection for both values
-    // of this flag.
 }
-
-// ===========================================================================
-// When a vertex owes the bounce ray a deduction at all
-//
-// The rules above are about *which directions* the two halves share. These are
-// about *whether* the vertex made an estimate to share them with -- the other
-// half of the same question, and the one both backends got wrong in their own
-// way: OptiX gated it on the BSDF event that came back, Metal on whether the
-// light connection produced a shadow ray. Both tie the two halves of the
-// estimate to a draw belonging to one of them.
-// ===========================================================================
 
 TEST_CASE("next-event estimation runs on the material, not on the bounce that was drawn")
 {
-    // The gate is three independent conditions and nothing else. In particular
-    // there is no argument for "what the BSDF sample came back as": a vertex
-    // either has a lobe a light can connect to or it does not, and that is the
-    // same on every draw.
     CHECK(neeRunsAtVertex(true, true, true));
 
     CHECK_FALSE(neeRunsAtVertex(false, true, true)); // estimatorMode 1: BSDF only
@@ -239,27 +196,6 @@ TEST_CASE("a medium vertex always owes the deduction its bounce is discounted by
 namespace
 {
 
-// ---------------------------------------------------------------------------
-// A single scattering event in a medium, integrated two ways.
-//
-// One isotropic phase function (p = 1/4pi), one emitter covering a fraction
-// `emitterFraction` of the sphere of directions, and a light-sampling strategy
-// that draws uniformly over the whole sphere. A light draw that lands off the
-// emitter carries nothing -- the ordinary way a Monte Carlo sample contributes
-// zero, not a failure -- and the question is what the *bounce* ray is then
-// weighted by when it lands on the emitter itself.
-//
-// Both densities are 1/4pi here, so the balance heuristic gives each strategy
-// exactly half of every direction and the closed form of the whole estimate is
-// simply the emitter's mean radiance, L * emitterFraction.
-//
-// `flagFromOutcome` reproduces the shipped Metal behaviour: the vertex is
-// recorded as having made an estimate only when its light draw happened to
-// deliver something. The bounce then keeps the *whole* emitter on the draws
-// where the light strategy came back empty, and the two halves sum to more than
-// one. The analytic value of that error is (1.5 - 0.5 * emitterFraction), which
-// the case below both measures and states.
-// ---------------------------------------------------------------------------
 double singleScatterEstimate(double emitterFraction, bool flagFromOutcome, unsigned int seed, int samples)
 {
     // A tiny deterministic LCG; the two policies must see the same draws.
@@ -343,10 +279,6 @@ TEST_CASE("a shadow ray is offset along the face it actually leaves through")
     const float3 up = orientedFaceNormal(ng, make_float3(0.0f, 1.0f, 0.0f));
     CHECK(up.y == doctest::Approx(1.0f));
 
-    // Leaving below it -- a back-face hit, or a transmitted bounce. Offsetting
-    // along the raw normal here pushes the origin into the geometry the ray
-    // starts on, and the connection reports an occlusion the BSDF strategy
-    // never sees.
     const float3 down = orientedFaceNormal(ng, make_float3(0.0f, -1.0f, 0.0f));
     CHECK(down.y == doctest::Approx(-1.0f));
 

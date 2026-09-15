@@ -1,25 +1,3 @@
-// ============================================================================
-// test_material_sidecar.cpp
-//
-// <stem>_openpbr.json is the only way to author an OpenPBR material for now,
-// so it is also the only route by which coat_darkening, a fuzz layer, dispersion
-// or a per-channel subsurface radius can reach the renderer at all -- glTF can
-// express none of them, and openpbr_from_gltf.h therefore never moves them off
-// their defaults.
-//
-// The failure mode a JSON format has is silence. A misspelt key, a colour given
-// as a scalar, a material name that matches nothing: each of those does exactly
-// nothing and looks from the outside like the renderer ignoring the file. So
-// what is pinned here is mostly that the loader is *not* silent, plus the two
-// places where the file's spelling and the runtime's differ:
-//
-//   * rotations. The spec and the file use an angle; OpenPBRParams stores its
-//     cosine and sine, so that a filtered value cannot wrap through the
-//     discontinuity. The conversion happens on load.
-//   * defaults. An omitted key must leave the OpenPBR 1.1.1 default in place,
-//     not zero -- a zeroed block is a material with no refractive index and a
-//     degenerate anisotropy frame.
-// ============================================================================
 
 #include <doctest/doctest.h>
 

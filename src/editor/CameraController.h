@@ -18,17 +18,6 @@ class CameraController : public oka::InputHandler
     float movementSpeed = 1.0f;
     float keyRotationSpeed = 60.0f; // degrees per second for arrow key rotation
 
-    // Smoothing time constants, in seconds. Everything the user drives the camera
-    // with is filtered through one of these, because the raw input is not the
-    // problem -- the frame it lands on is. A path tracer's frame time swings by a
-    // factor of several between the frame that restarts accumulation and the ones
-    // that follow, so equal input per frame is unequal motion per frame, and that
-    // is what reads as jerky. Filtering spreads each frame's share over the next
-    // few, which costs a little latency and buys motion that does not step.
-    //
-    // Look is the tighter of the two: the hand expects the view to follow the
-    // mouse, and past ~50 ms the lag is felt as the camera lagging rather than as
-    // smoothness.
     static constexpr float kMoveSmoothingSec = 0.09f;
     static constexpr float kLookSmoothingSec = 0.045f;
     // A frame longer than this is a hitch -- a scene load, a window drag, a
@@ -36,19 +25,11 @@ class CameraController : public oka::InputHandler
     // by whatever the pause happened to last, so it is treated as one slow frame.
     static constexpr float kMaxFrameSec = 0.1f;
 
-    // Input the user has given that has not been applied to the camera yet, in the
-    // units rotate()/translate() take. A buffer rather than a filtered value, so
-    // nothing is lost or invented: every pixel of mouse travel still reaches the
-    // camera, just spread over a few frames.
     float mPendingLookX = 0.0f, mPendingLookY = 0.0f;
     glm::float3 mPendingTranslate{ 0.0f };
     // E-folds of orthographic zoom per wheel notch: ~16% of the frame per click,
     // and it composes smoothly with the fractional deltas a trackpad sends.
     static constexpr float kWheelZoomRate = 0.15f;
-    // The same for a stick held on an orthographic camera, per world unit the
-    // stick asked to travel. Mirrors kOrthoKeyZoomRate in camera.cpp, which is
-    // file-static there and cannot be shared -- so it is written down here that
-    // the two are meant to match, and that a change to one wants the other.
     static constexpr float kOrthoStickZoomRate = 1.0f;
 
     bool mIsViewportHovered = false;
@@ -129,13 +110,6 @@ public:
         applyPendingInput(dt);
     }
 
-    /// Hand the queued look/translate input to the camera, a fixed fraction of
-    /// what is left per unit of wall-clock time.
-    ///
-    /// Exponential rather than a fixed number of frames: the fraction depends on
-    /// dt, so the camera arrives at the same place at the same time whether the
-    /// scene renders at 15 fps or 120, and the feel of the control does not change
-    /// with how expensive the scene is.
     void applyPendingInput(float dt)
     {
         // Below this a residual would take forever to reach zero (an exponential
@@ -171,18 +145,6 @@ public:
         }
     }
 
-    /// Add a frame of gamepad input to the same queues the mouse and keys feed.
-    ///
-    /// Queued rather than applied, for the reason handleMouseMoveCallback is:
-    /// everything the user drives the camera with goes through one filter, so a
-    /// hand on the stick and a hand on the mouse compose instead of fighting, and
-    /// the stick inherits the smoothing that makes motion survive a path tracer's
-    /// uneven frame times.
-    ///
-    /// Gated on the viewport being hovered like the movement keys are -- a stick
-    /// held while the user is in a text field must not fly the camera -- except
-    /// that a pad has no cursor, so "hovered" here means the viewport is the
-    /// thing the pointer is over, which is the editor's normal resting state.
     void applyGamepad(const gamepad::CameraInput& input)
     {
         if (mGizmoBlocksInput || !input.active)
@@ -196,25 +158,6 @@ public:
         glm::float3 translate = input.translate;
         if (mCam.projection == Camera::ProjectionType::orthographic)
         {
-            // A parallel projection cannot dolly: sliding the camera along its
-            // own view axis leaves the image identical, so pushing the stick
-            // forward on an orthographic camera moved it through the scene and
-            // changed nothing on screen -- a control that looks broken because
-            // it is doing exactly what it was told.
-            //
-            // Camera::update spends the movement keys' forward axis on
-            // zoomOrthographic instead, and scrollCallback does the same for the
-            // wheel. The stick joins them rather than being the one input that
-            // behaves differently.
-            //
-            // input.zoom rather than translate.z: the radial deadzone lets the
-            // other axis's rest drift through, and a compounding exponential is
-            // the one control where that is visible. See CameraInput::zoom.
-            //
-            // input.zoom is already speed- and dt-scaled, and it carries the
-            // stick's own sign -- pushed away is negative, like translate.z --
-            // while the key path's mMoveInput.z is +1 forward, so the exponent's
-            // sign flips relative to camera.cpp's exp(-rate * moveInput.z).
             if (input.zoom != 0.0f)
             {
                 mCam.zoomOrthographic(std::exp(kOrthoStickZoomRate * input.zoom));
@@ -225,10 +168,6 @@ public:
 
         if (input.worldUp != 0.0f)
         {
-            // The queue is in camera space and this lift is in world space, so it
-            // is rotated into the queue's frame rather than the queue being split
-            // in two. Camera::translate applies conjugate(orientation), so
-            // orientation * v is the delta that comes back out as world v.
             mPendingTranslate += mCam.mOrientation * (mCam.getWorldUp() * input.worldUp);
         }
     }
@@ -382,10 +321,6 @@ public:
         }
     }
 
-    // Only an orthographic camera zooms on the wheel. A perspective one zooms by
-    // moving, which the left-drag dolly and the movement keys already do, and
-    // taking the wheel over for a second way to do it would change a control that
-    // every existing scene is driven with.
     void scrollCallback([[maybe_unused]] double xoffset, double yoffset) override
     {
         if (mGizmoBlocksInput || yoffset == 0.0 || mCam.projection != Camera::ProjectionType::orthographic)
@@ -417,11 +352,6 @@ public:
             }
         }
 
-        // Queued, not applied: mouse motion arrives in a burst of callbacks inside
-        // one pollEvents, so applying it here puts a whole frame's travel into a
-        // single step however long that frame turned out to be. applyPendingInput
-        // pays it out against the clock instead. Nothing is dropped -- the queue
-        // drains -- so a gesture still turns the camera by exactly as much.
         if (mCam.mouseButtons.right)
         {
             mPendingLookX += -dx;

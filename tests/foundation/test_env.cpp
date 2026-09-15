@@ -14,12 +14,7 @@ using oka::envUint;
 namespace
 {
 
-// setenv/unsetenv rather than putenv: putenv keeps the caller's buffer in the
-// environment, and a test-local one goes out of scope while getenv still points
-// at it.
 // The NOLINTs are the point of the fixture rather than an exception to it:
-// writing the environment is what these tests do, and doctest runs its cases
-// on one thread, so there is no other reader to race.
 struct ScopedEnv
 {
     explicit ScopedEnv(const char* name, const char* value) : mName(name)

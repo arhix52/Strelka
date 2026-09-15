@@ -1,13 +1,6 @@
 #ifndef STRELKA_BXDF_DIELECTRIC_H
 #define STRELKA_BXDF_DIELECTRIC_H
 
-// ============================================================================
-// bxdfs/dielectric.h -- Glass / dielectric BSDF (reflection + refraction)
-//
-// Smooth or rough dielectric using the GGX microfacet model.
-// Handles both thin-walled and solid (volumetric) modes.
-// ============================================================================
-
 #include "../material_math.h"
 #include "../bsdf_types.h"
 #include "../surface_interaction.h"
@@ -16,10 +9,6 @@
 #include "../microfacet.h"
 #include <discrete_sampling.h>
 
-// Continuous samples are finalized from the rounded direction that is actually
-// returned to the path tracer.  Near the critical angle, reconstructing the
-// half vector from that endpoint is better conditioned than carrying a second,
-// pre-rounding BSDF/PDF formula in the sampler.
 DEVICE_FUNC BsdfEvalResult dielectric_eval(const THREAD_REF SurfaceInteraction& si, float3 wi);
 
 DEVICE_FUNC bool dielectric_finish_continuous_sample(const THREAD_REF SurfaceInteraction& si,

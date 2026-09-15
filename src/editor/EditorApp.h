@@ -74,11 +74,6 @@ private:
     editor_viewport::PresentationMode m_viewportPresentation = editor_viewport::PresentationMode::Fit;
     uint32_t mPresentedPreviewWidth = 0;
     uint32_t mPresentedPreviewHeight = 0;
-    /// Which entry of the *current backend's* denoiser list is selected. The list
-    /// is not the same on both backends, so this is only meaningful next to the
-    /// Ui it was resolved against; clearing the flag makes the panel re-derive it
-    /// from settings, which is what everything outside the panel does after
-    /// writing those settings itself.
     int mDenoiseModeIndex = 0;
     bool mDenoiseModeInitialized = false;
 
@@ -149,11 +144,6 @@ private:
     std::string m_pendingResourcePath;
     bool m_isLoading = false;
 #ifdef __APPLE__
-    // The startup renderer is initialised so the window can share its Metal
-    // device, but no frame is submitted while the initial file is parsing. It
-    // can therefore adopt that first scene without compiling Metal/MetalFX a
-    // second time. Later File -> Open operations have live scene resources and
-    // still take the full teardown path.
     bool m_initialMetalRendererUnused = false;
 #endif
 
@@ -218,19 +208,7 @@ private:
 public:
     EditorApp(const std::string& sceneFile, const std::string& resourceSearchPath);
 
-    /// Render `sppTotal` samples, write one screenshot, close.
-    ///
-    /// This is what --need_screenshot is for. Call before run(); with
-    /// `screenshotOnComplete` false it only sets the sample counts, which is
-    /// what --spp_total and --spp_subframe do on their own.
     void setBatchCapture(uint32_t sppTotal, uint32_t sppSubframe, bool screenshotOnComplete);
-    /// Cancels a load in flight and waits for it.
-    ///
-    /// std::future's destructor blocks until the task finishes, so without the
-    /// cancel first, closing the window during a load hangs the app for the rest
-    /// of that load. Waiting here rather than letting the member destructor do it
-    /// also keeps the worker's raw pointer to m_sceneLoader valid for as long as
-    /// the worker can still use it.
     ~EditorApp() override;
 
     void framebufferResize(int newWidth, int newHeight) override;
@@ -239,10 +217,6 @@ public:
     glm::vec3 computeSceneFitPosition(float fovDegrees) const;
 
     void loadSettings();
-    /// Start loading a scene on a worker. Returns immediately; the main loop
-    /// picks the result up in checkLoadingComplete(). Used both for the scene
-    /// named on the command line and for File -> Open, so startup and reload
-    /// cannot drift apart.
     void beginSceneLoad(const std::string& sceneFile, const std::string& resourceSearchPath);
     /// Take the exposure the freshly loaded scene asks for, or arrange to measure
     /// it. Must run after loadSettings(), which writes the photographic defaults.

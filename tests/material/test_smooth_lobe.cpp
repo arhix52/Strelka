@@ -14,26 +14,6 @@
 #include <cmath>
 #include <cstdint>
 
-// ============================================================================
-// test_smooth_lobe.cpp -- what decides whether a vertex makes a next-event
-// estimate.
-//
-// bsdf_has_smooth_lobe() answers "is there anything here a light connection
-// could reach", and neeRunsAtVertex() turns that into the decision. The reason
-// both exist is that the integrators used to ask a different question: they drew
-// a BSDF sample first and gated next-event estimation on whether *that draw*
-// came back non-delta.
-//
-// That is a coin flip belonging to the other half of the estimate. On a material
-// with both a delta lobe and a smooth one -- a clearcoat over a diffuse base is
-// the ordinary case, and glTF's default coat roughness is 0 -- the smooth lobe's
-// direct lighting was then delivered only on the draws where the delta lobe lost
-// the lobe selection, and the rest of it was simply lost. The cases below
-// measure how often that happens, so the gap between "the material has a smooth
-// lobe" and "this draw produced one" is a number in the test rather than an
-// argument in a comment.
-// ============================================================================
-
 namespace
 {
 
@@ -137,14 +117,6 @@ double specularDrawFraction(const SurfaceInteraction& si, int samples = 100000)
     return live > 0 ? double(specular) / double(live) : 0.0;
 }
 
-/// How much of bsdf_eval()'s density a light connection could actually reach.
-///
-/// The integral over the sphere, by uniform sampling. Deliberately not "is there
-/// a direction with a non-zero pdf": a near-delta GGX lobe at alpha 1e-8 still
-/// returns a positive-but-denormal density far from its peak, so that question
-/// answers yes for a perfect mirror and means nothing. What next-event
-/// estimation can deliver is mass, and a delta lobe's mass is unreachable by any
-/// sampling the connection does.
 double reachableDensityMass(const SurfaceInteraction& si, int samples = 400000)
 {
     FixedSeedSampler rng(0x27D4EB2Fu);
@@ -234,10 +206,6 @@ TEST_CASE("smooth glass has no lobe either, rough glass does")
     rough.roughness = 0.3f;
     CHECK(bsdf_has_smooth_lobe(makeSi(rough)));
 
-    // A thin wall raises the transmission lobe's alpha, so a wall that is smooth
-    // on its reflection side can still be rough on its transmission side. The
-    // predicate errs towards true for that reason -- an unnecessary connection
-    // costs a shadow ray, a missing one costs light.
     Material thin = smooth;
     thin.thinWalled = 1;
     thin.roughness = 0.05f;
@@ -274,11 +242,6 @@ TEST_CASE("the material types the loader does not emit answer too")
 
 TEST_CASE("bsdf_has_smooth_lobe agrees with what bsdf_eval will actually report")
 {
-    // The predicate is a claim about bsdf_eval(). Saying yes when there is
-    // nothing to reach buys a wasted shadow ray; saying no when there is loses
-    // that light for good, so that is the direction asserted here. The measure
-    // is how much density mass a connection can reach, not whether some
-    // direction returns a non-zero float -- see reachableDensityMass().
     const Material materials[] = {
         Material{}, // plain diffuse-ish
         Material{ MATERIAL_TYPE_STANDARD_PBR, make_float3(0.18f), 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0 },
@@ -321,13 +284,6 @@ TEST_CASE("a perfect mirror's density is all in the delta lobe a connection cann
     mirror.baseColor = make_float3(1.0f);
     const SurfaceInteraction si = makeSi(mirror);
 
-    // A near-delta GGX lobe does return a positive density away from its peak --
-    // denormally small, but positive -- so "some direction has a pdf" is not the
-    // question. The mass is what a light connection could deliver, and there is
-    // none of it.
-    // Not exactly zero: at alpha 1e-8 the GGX tails still integrate to about
-    // half a percent of the lobe. That is the residue a connection could reach,
-    // and it is far below the noise any shadow ray spent on it would carry.
     CHECK_FALSE(bsdf_has_smooth_lobe(si));
     CHECK(reachableDensityMass(si) < 0.01);
 }

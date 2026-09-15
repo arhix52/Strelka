@@ -71,16 +71,6 @@ namespace fs = std::filesystem;
 // resident size is not, and undercounts GPU allocations badly.
 namespace
 {
-// How much a failed commit's error is worth saying out loud.
-//
-// A GPU reset kills every command buffer in flight, and the driver reports the
-// bystanders as "Discarded (victim of GPU error/recovery)" -- an error the chunk
-// that actually hung never receives. Feedback arrives in queue order, not in
-// causal order, so reporting the first failure and muting the rest reliably
-// names a bystander and buries the cause: the log ends up pointing at whichever
-// group the feedback queue happened to drain first, which is not evidence about
-// anything. Rank the errors instead, and let a more informative one replace a
-// victim's report.
 enum class Metal4FailureRank : int
 {
     Victim = 1, // discarded by someone else's fault; names no cause
@@ -224,17 +214,9 @@ void MetalRender::triggerRenderIfIdle()
     render(mAsyncOutputBuffers[mWriteIndex]);
 }
 
-
 // The texture the tonemapper writes and the display reads. One per async slot,
 // matching the output buffers, so a frame being shown is never the one being
 // written.
-
-// The reduced-resolution target the tracer renders into when upscaling.
-//
-// Usage flags come from the scaler rather than being guessed: MetalFX validates
-// them at encode time, and a texture allocated without what it wants fails there
-// rather than at creation.
-
 
 // Guides live at render resolution, the denoised result at display resolution.
 // Usage flags come from the denoiser for the same reason they do for the spatial
@@ -267,7 +249,6 @@ bool MetalRender::capturePrevFramePose()
     return deforming;
 }
 
-
 // Half to float by hand: the alternative is pulling in a conversion library for
 // a readback path that only debug and validation code takes.
 namespace
@@ -296,21 +277,6 @@ float halfToFloat(uint16_t h)
 }
 } // namespace
 
-// Rebuild the display image on the host, at a headroom of the caller's choosing.
-//
-// Not a copy of the finished display texture, and deliberately so. That texture
-// is the frame *as presented*: already at the display's EDR headroom and already
-// through the transfer encoding. A PNG needs neither -- it has nowhere to put a
-// value above white, and its writer applies the encoding itself -- so handing it
-// that texture clipped every highlight the headroom had lifted and encoded the
-// transfer twice, which is a washed-out screenshot of an image that looked right
-// on screen.
-//
-// The OptiX backend answers the same way for the same reason, with a CUDA kernel
-// instead of this loop; both replay the transform from the slot's linear frame,
-// through the shared tone curve, at whatever headroom was asked for and with no
-// gamma. The loop is fine here: this is an inspection path, a few frames taken
-// by hand, not something the frame loop runs.
 bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput)
 {
     const int ri = mReadyIndex.load();
@@ -374,10 +340,6 @@ bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width,
     return true;
 }
 
-// Re-run only the spatial frame's presentation chain for the requested output
-// headroom. The scene-linear source is already in the shared output buffer, so
-// this adds no frame-path copy: screenshot time performs one low-resolution
-// tone-map, one MetalFX scale, and the unavoidable GPU-to-CPU readback.
 bool MetalRender::readSpatialDisplayReferred(
     int readyIndex, std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput)
 {
@@ -447,10 +409,6 @@ bool MetalRender::readSpatialDisplayReferred(
         return false;
     }
 
-    // The spatial scaler is configured for perceptual (sRGB) input/output, as
-    // required by the viewport pipeline. Screenshot writers consume
-    // display-linear floats and apply their own transfer encoding, so undo that
-    // one reversible part here. The tone curve and MetalFX scale stay intact.
     if (presentation.gamma > 0.0f)
     {
         for (size_t i = 0; i < rgba.size(); i += 4)
@@ -476,12 +434,6 @@ bool MetalRender::readDisplayTextureHdr(std::vector<float>& rgba, uint32_t& widt
     return readDisplayReferred(rgba, width, height, headroom);
 }
 
-// Read the display texture back to the CPU.
-//
-// This is what the screen shows -- after tonemapping, after MetalFX -- which the
-// output buffer no longer is. Every effect on the MetalFX plan is invisible
-// without it, and "no validation error" has already been shown this session not
-// to mean "correct image".
 bool MetalRender::readHalfTexture(const MTL::Texture* tex, std::vector<float>& rgba, uint32_t& width, uint32_t& height)
 {
     if (!tex || tex->pixelFormat() != MTL::PixelFormatRGBA16Float)
@@ -525,14 +477,6 @@ bool MetalRender::readDisplayTexture(std::vector<float>& rgba, uint32_t& width, 
     const int ri = mReadyIndex.load();
     return ri >= 0 ? readHalfTexture(mPost.displayTexture(ri), rgba, width, height) : false;
 }
-
-// Read any of the denoiser's textures back as RGBA floats.
-//
-// The point of reading these rather than the finished frame is that a guide can
-// be wrong in a way the picture does not obviously show -- a motion vector that
-// ignores a moving limb looks like slightly soft shading until you difference it
-// against the truth. Unused channels come back as zero so one checker can walk
-// every guide.
 
 // Bounding-box diagonal of the skinned vertices, straight off the GPU.
 float MetalRender::skinnedGeometryExtent()
@@ -724,14 +668,6 @@ Buffer* MetalRender::getReadyBuffer()
     return mAsyncOutputBuffers[ri];
 }
 
-
-// Where the memory went, measured from the objects themselves.
-//
-// Deliberately not a running tally kept at allocation sites: those drift the
-// moment someone adds a buffer and forgets the counter, and the first symptom is
-// a total that no longer matches the device's. Walking the members costs a few
-// microseconds and cannot be wrong about anything it looks at -- and what it
-// fails to look at shows up as the unaccounted remainder rather than vanishing.
 bool MetalRender::memoryReport(MemoryReport& report) const
 {
     report.gpu.clear();
@@ -790,10 +726,6 @@ bool MetalRender::memoryReport(MemoryReport& report) const
     add("Materials", bufBytes(mMaterials.buffer()));
     add("Alpha materials", bufBytes(mMaterials.alphaBuffer()));
     {
-        // The slides projector lights throw belong here rather than with the
-        // material maps: they are owned by the light domain and survive a
-        // material reload, so counting them there would show them vanishing and
-        // reappearing for reasons that have nothing to do with them.
         size_t lightBytes = bufBytes(mLights.buffer()) + bufBytes(mLights.retainedPreviousBuffer()) +
                             bufBytes(mLights.temporalMappingBuffer()) + bufBytes(mLights.iesBuffer());
         for (MTL::Texture* t : mLights.projectorTextures())
@@ -849,11 +781,6 @@ bool MetalRender::memoryReport(MemoryReport& report) const
 
 namespace
 {
-// CreateSystemDefaultDevice is for apps with a display. A CLI, a daemon, and a
-// GitHub Actions session have none, and Apple documents MTLCopyAllDevices as
-// the replacement. Prefer a device that can actually trace; a stub GPU that
-// enumerates but cannot is how a headless runner used to get past init and
-// SIGSEGV on the first acceleration structure.
 MTL::Device* acquireMetalDevice()
 {
     NS::Array* devices = MTL::CopyAllDevices();
@@ -980,12 +907,6 @@ void MetalRender::init()
         hooks.writeIndex = &mWriteIndex;
         mPost.init(mDevice, &mMetal4, hooks);
     }
-    // MetalFX builds a large MPS graph when a denoised scaler is created. Do it
-    // during renderer initialization, while startup work is already expected,
-    // instead of stalling the first frame after the default-off editor control
-    // is enabled. When it is off, prewarm the scale that control will select;
-    // an explicitly enabled configuration keeps its exact current dimensions.
-    // A real resize still recreates it, as required by the descriptor.
     const bool denoiseConfigured = getSettings()->getAs<bool>("render/pt/denoise");
     const bool prewarmDenoiser = getSettings()->getAs<bool>("render/pt/prewarmDenoiser");
     if ((denoiseConfigured || prewarmDenoiser) && !envFlag("MTL_SHADER_VALIDATION"))
@@ -1030,15 +951,6 @@ bool MetalRender::stepMetalMaterials(double budgetMs)
     return mMaterials.step(mScene, mLoadProgress, resourcePath, budgetMs);
 }
 
-
-// Declare every persistent allocation resident for the Metal 4 queue.
-//
-// Metal 3 infers residency from the bindings an encoder makes; Metal 4 does not,
-// and an address in an argument table pointing at a non-resident allocation is a
-// GPU fault rather than a validation message. This is the price of the argument
-// table: the caller owns lifetime and residency both.
-// Persistent allocations are gathered here because residency spans every
-// domain and is committed once for the Metal 4 queue.
 void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
 {
     if (!mMetal4.isValid())
@@ -1128,10 +1040,6 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     add(mAccel.mediumAccelerationStructure());
     for (MTL::Buffer* buffer : mAccel.accelerationStructureAuxiliaryBuffers())
         add(buffer);
-    // The renderer alternates between output buffers, so declaring only the one
-    // this frame happens to use leaves every other frame writing into an
-    // allocation the queue does not know about -- which reads back as black
-    // rather than as an error.
     for (Buffer* b : mAsyncOutputBuffers)
     {
         if (b)
@@ -1150,11 +1058,6 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
     {
         mMetal4.removeResident(allocation);
     }
-    // Add all current pointers, not only the apparent set difference. Some
-    // domains (notably acceleration structures) also manage residency directly,
-    // and an allocator may reuse an address after that owner removed it.
-    // Residency is a mathematical set; insertion order cannot affect command
-    // execution or resource lifetime.
     // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (MTL::Allocation* allocation : currentResidents)
     {
@@ -1166,22 +1069,6 @@ void MetalRender::makeResourcesResidentForMetal4(Buffer* output)
                   static_cast<double>(mMetal4.residencyAllocatedSize()) / 1073741824.0);
     mMetal4FrameResidents = std::move(currentResidents);
 }
-
-// How many extend/shade iterations one sample needs to reach `maxDepth` bounces.
-//
-// More than maxDepth, whenever the scene contains something that consumes an
-// iteration without advancing the path's depth: a cutout pass-through, a medium
-// boundary crossing, a subsurface walk step. Each of those deliberately leaves
-// `depth` alone, and each is documented as doing so to avoid exhausting the
-// bounce budget -- but the budget that ends a path is this loop, not `depth`, so
-// without headroom the two disagree and the deepest transport is never encoded.
-// A hedge of cutout leaves goes black at a maxDepth that looks generous.
-//
-// The headroom is per feature and a scene without them pays nothing, which
-// matters because an iteration is five stage encodes even when the queue it
-// dispatches over is empty. It is a budget rather than a guarantee: the paths'
-// own counters (PATH_PASSTHROUGH_MAX, MEDIUM_MAX_STEPS) still bound how many
-// pass-throughs any one path may take, and those are larger than this.
 
 metal::IntegratorSceneBindings MetalRender::integratorSceneBindings()
 {
@@ -1244,10 +1131,6 @@ uint32_t MetalRender::wavefrontIterations(uint32_t maxDepth, uint32_t subsurface
     {
         iterations += kPassthroughIterations;
     }
-    // Subsurface walk steps have a separate ceiling; cap host iterations so rare long tails do not pad every launch.
-    // A depth-1 render terminates in shade before it samples a BSDF or enters a
-    // subsurface walk, so SSS headroom there only encodes zero-work indirect
-    // dispatches after the camera ray.
     if (maxDepth > 1u && mMaterials.hasSubsurfaceMaterials())
     {
         const uint32_t steps = std::min(subsurfaceIterations, (uint32_t)MEDIUM_MAX_STEPS);
@@ -1296,46 +1179,20 @@ void MetalRender::render(Buffer* output)
         const double nowMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const double intervalMs = getSettings()->getAs<float>("render/stream/publishIntervalMs");
-        // One early preview is useful feedback; subsequent half-built snapshots
-        // are actively harmful on scenes with curves or cutouts. Each snapshot
-        // changes the function-constant key as materials, primitive alpha data
-        // and emissive geometry arrive, so tracing it can synchronously compile
-        // a linked traversal pipeline which is obsolete one build slice later.
-        // Keep advancing the build, then publish the completed scene directly.
         const bool redundantIntermediateFrame = !complete && mReportedFirstPartialFrame;
         if (redundantIntermediateFrame || !canTracePartial(readiness) ||
             !mPublishClock.shouldPublish(nowMs, intervalMs, complete))
         {
-            // Nothing to trace yet, or nothing new since the last frame. The busy
-            // flag has to come off here: it is set by triggerRenderIfIdle before
-            // every call, and a build stage that returns without submitting
-            // anything leaves no completion handler to clear it, so the build
-            // would stall one stage in.
             mRenderBusy.store(false, std::memory_order_release);
             pPool->release();
             return;
         }
-        // Geometry can be published only together with the lookup tables shade
-        // uses for every hit. The structure builder currently uploads the
-        // geometry table with the completed TLAS; publishing an earlier partial
-        // TLAS would expose real hits while geometryEntries is still null and
-        // Metal Shader Validation correctly reports out-of-bounds device loads.
-        // Until then the already-published empty TLAS safely shows the scene's
-        // environment.
         if (mScenePrep.stage() == metal::BuildStage::Structures && mMaterials.buffer() != nullptr &&
             mGeometry.geometryEntryBuffer() != nullptr)
         {
             mAccel.publishPartialTopLevel();
         }
         mPublishClock.notePublished(nowMs);
-        // Every slice creates resources the last one did not have: the vertex and
-        // index buffers, the material table, each acceleration structure, and the
-        // top level that replaces the empty one. Metal 4 has no useResource to
-        // fall back on, so anything the residency set does not name is simply not
-        // there for the tracer -- and the set is otherwise only refreshed when the
-        // integrator's capacity changes, which a loading scene never does. Left
-        // alone, the set keeps naming the empty top level for the whole session
-        // and every ray reaches the environment: a sky, and no scene in it.
         mMetal4ResidencyGeneration = 0;
         // Time to first pixel is the number this whole path exists to move, so
         // it is reported rather than inferred from watching a window.
@@ -1359,10 +1216,6 @@ void MetalRender::render(Buffer* output)
 
     mFrameIndex = (mFrameIndex + 1) % kMaxFramesInFlight;
 
-    // Recreate accumulation buffer if output size changed
-    // Render resolution. Upscaling renders fewer pixels and lets MetalFX bring
-    // them up to the display size; the factor is clamped because below a quarter
-    // the scaler has too little to work with and the result is mush.
     const uint32_t outWidth = output->width();
     const uint32_t outHeight = output->height();
     const bool wantUpscale = getSettings()->getAs<bool>("render/pt/enableUpscale");
@@ -1379,11 +1232,6 @@ void MetalRender::render(Buffer* output)
         mTemporalHistoryHeight = height;
     }
     bool denoiserScaleSupported = true;
-    // MetalFX publishes the range of output/input ratios it can actually do, and
-    // going outside it is not refused -- the scaler is created and then produces
-    // NaN. Do not silently raise the PT resolution to satisfy it: curve-heavy
-    // scenes need the quarter-resolution preview to stay below the Metal command
-    // queue watchdog. Spatial scaling is the safe fallback at that resolution.
     if (wantUpscale && getSettings()->getAs<bool>("render/pt/denoise"))
     {
         float minScale = 1.0f, maxScale = 2.0f;
@@ -1405,10 +1253,6 @@ void MetalRender::render(Buffer* output)
     }
     mDenoiserFallbackActive.store(!denoiserScaleSupported, std::memory_order_relaxed);
 
-    // Temporal denoising subsumes upscaling: the denoised scaler takes the
-    // reduced-resolution frame and produces the display-resolution one, so the
-    // spatial scaler is only for when denoising is off.
-    // Denoising requires the wavefront guides.
     const bool useWavefrontTracer = mIntegrator.library() != nullptr;
     const uint32_t debug = getSettings()->getAs<uint32_t>("render/pt/debug");
     const uint32_t sharcDebug = getSettings()->getAs<uint32_t>("render/pt/sharcDebug");
@@ -1435,13 +1279,6 @@ void MetalRender::render(Buffer* output)
     }
     if (denoising)
     {
-        // No Metal 4 variant on purpose: newTemporalDenoisedScalerWithDevice:compiler:
-        // aborts, and Apple has confirmed it as a framework bug (FB22575333) with
-        // the Metal 3 constructor as the recommended workaround -- which is this
-        // call. supportsMetal4FX answers YES and is not to be trusted; the same
-        // trap is reported on A17 Pro, where it aborts differently again.
-        // tools/metalfx_mtl4_denoiser_repro.mm reproduces it and lists what was
-        // ruled out.
         if (!mPost.loggedMetal4DenoiserGap() && mMetal4.isValid())
         {
             mPost.loggedMetal4DenoiserGap() = true;
@@ -1454,11 +1291,6 @@ void MetalRender::render(Buffer* output)
             mPost.ensureGuideTextures(width, height, outWidth, outHeight);
         }
     }
-    // Three ways to get from render resolution to output resolution, and the
-    // choice matters most at one sample: the spatial scaler has no history and
-    // resamples noise as-is, the temporal scaler accumulates across frames, and
-    // the denoiser does that plus a guided denoise -- at the price of a second
-    // traced sample for clean guides.
     const uint32_t upscaleMode = getSettings()->getAs<uint32_t>("render/pt/upscaleMode");
     const bool wantTemporal = upscaling && !denoising && denoiserScaleSupported && upscaleMode == 1u;
     bool temporalUpscaling = false;
@@ -1502,27 +1334,11 @@ void MetalRender::render(Buffer* output)
     // Update motion blur enable state from settings each frame
     mEnableMotionBlur = getSettings()->getAs<bool>("render/enableMotionBlur");
 
-    // Deforming geometry only needs a two-keyframe structure while the shutter is
-    // actually open across them. When it is not, the sample time is pinned to
-    // keyframe 1, the second keyframe is dead weight, and every ray pays for
-    // motion traversal it cannot use.
-    // ...and while nothing is animating, the two keyframes hold the same pose, so
-    // there is nothing to interpolate between either. That is the case that
-    // matters: accumulation runs with playback paused.
     bool anyAnimationPlaying = false;
     for (size_t a = 0; a < mScene->getAnimations().size(); ++a)
     {
         anyAnimationPlaying = anyAnimationPlaying || getSettings()->getAs<bool>(animationStateKey(a));
     }
-    // Playing is not the condition -- a shutter spanning two different poses is.
-    //
-    // Pausing mid-animation should freeze a frame *of the film*, and a frame of
-    // the film has motion blur in it; the estimator then keeps refining that
-    // frame. Tying the motion structures to playback instead threw the blur away
-    // a few frames after the pause and left a crisp still, because the pose
-    // keyframes are only identical once something has made them so. Right after a
-    // pause they still hold t_open and t_close of the last rendered frame, which
-    // is exactly the interval that should stay.
     const bool wantMotionBlas = mEnableMotionBlur && getSettings()->getAs<bool>("render/isMotionBlurVisible") &&
                                 (anyAnimationPlaying || mShutterIntervalActive);
     if (wantMotionBlas != mAccel.motionBlasBuilt() && !mAccel.blasList().empty())
@@ -1561,9 +1377,6 @@ void MetalRender::render(Buffer* output)
         const size_t animCount = animations.size();
         mAnimTargetTimes.resize(animCount);
         mAnimChanged.resize(animCount);
-        // Not std::ranges::fill: mAnimChanged is a vector<bool>, whose proxy
-        // reference does not model indirectly_writable, so the ranges overload
-        // does not apply to it.
         // NOLINTNEXTLINE(modernize-use-ranges)
         std::fill(mAnimChanged.begin(), mAnimChanged.end(), false);
         for (size_t i = 0; i < animCount; ++i)
@@ -1578,16 +1391,6 @@ void MetalRender::render(Buffer* output)
             }
         }
 
-        // A scene that has just been built has never been posed, and no time has
-        // changed to say so: the loader sets each animation's current time to its
-        // start and the editor asks for that same start, so every comparison
-        // above is equal and the block below would do nothing. What is left on
-        // screen is the bind pose the loader uploaded -- for a character, a shape
-        // nobody framed a camera on, and often not in the shot at all.
-        //
-        // Deferred to the first frame past the build rather than taken during it:
-        // skinning indexes the per-mesh records, and those are created in the
-        // structures stage, several published frames after the first.
         if (mNeedsInitialPose && !mScenePrep.isBuilding())
         {
             mNeedsInitialPose = false;
@@ -1754,18 +1557,6 @@ void MetalRender::render(Buffer* output)
         ctx.mSubframeIndex = 0;
     }
 
-    // Temporal history: reset on a cut, not on a move.
-    //
-    // Reprojection maps this frame's pixels onto the previous frame's. Panning,
-    // orbiting and flying keep that mapping meaningful and the motion vectors
-    // describe it. What breaks it is a discontinuity -- a teleport, a switch to
-    // another camera, a projection change -- after which the history describes a
-    // different place and blending it in is ghosting.
-    // A pose cannot reveal whether it arrived through continuous navigation or
-    // an edit/camera switch. Inferring a cut from adjacent movement magnitudes
-    // made a tiny accelerating drag look like a teleport. Smooth translation and
-    // rotation always keep history; operations that replace a pose call
-    // resetTemporalHistory() explicitly.
     if (metal::temporal_history::projectionChanged(currView.mCamMatrices, mPrevView.mCamMatrices))
     {
         mResetDenoiseHistory = true;
@@ -1862,10 +1653,6 @@ void MetalRender::render(Buffer* output)
     mRestirEnvironmentHistoryValid = true;
     mRestirMeshHistoryValid = true;
 
-    // Record the display transform this slot's frame is being encoded with.
-    // A screenshot is taken frames later, after the user has stopped moving
-    // sliders; reading the settings at that point would describe a transform the
-    // pixels never went through.
     bool presentationUnchanged = false;
     if (filled.tonemap != nullptr)
     {
@@ -1912,10 +1699,6 @@ void MetalRender::render(Buffer* output)
         mFrameUniforms.requestSharcReset();
     }
 
-    // Whether the denoised frame already on hand describes this scene and this
-    // camera. Everything that invalidates it -- the denoiser switched on, a
-    // scaler recreated at another resolution, a camera cut -- asks for a history
-    // reset, and the frame that denoises is the one that clears that ask.
     const bool denoisedFrameUsable =
         denoising && mHasDenoisedFrame && !mResetDenoiseHistory && mPost.denoisedTexture() != nullptr;
 
@@ -1923,24 +1706,12 @@ void MetalRender::render(Buffer* output)
     // is a texture, so the frame it produced at the last sample is what the post
     // path re-tonemaps (see MetalFrameUniforms::fill).
     uint32_t samplesThisLaunch = filled.samplesThisLaunch;
-    // Unless there is no such frame to freeze -- the denoiser was switched on
-    // after the last sample, or its history was dropped since. One more traced
-    // launch hands it a fresh color frame and the guides that go with it.
-    // The accumulation buffer is not written at the cap, so that sample cannot
-    // disturb what has already converged.
     const bool traceUsesMetal4 = mMetal4.isValid();
     if (samplesThisLaunch == 0 && denoising && !denoisedFrameUsable)
     {
         samplesThisLaunch = std::max(spp, 1u);
     }
 
-    // At the sample cap the display can keep sampling the last completed
-    // texture. Recreating a classic Metal command buffer every refresh merely
-    // copied the unchanged accumulation buffer and re-ran the same tonemapper;
-    // on the CPU profile this was the only recurring renderer work besides
-    // uniform preparation. A changed presentation falls through to the post-only
-    // path, and synchronous callers retain the old behaviour because they may
-    // need a freshly written output buffer for a checkpoint/readback.
     if (!mSyncMode && samplesThisLaunch == 0 && presentationUnchanged)
     {
         mRenderBusy.store(false, std::memory_order_release);
@@ -1948,11 +1719,6 @@ void MetalRender::render(Buffer* output)
         return;
     }
 
-    // Verbatim copy of a display-resolution texture into the buffer headless
-    // callers (StrelkaCLI, screenshots) read back. Both the denoiser and the
-    // plain MetalFX spatial upscale produce a display-sized texture and
-    // neither is otherwise readable from the CPU side -- the buffer this
-    // function was handed only ever holds render-resolution data on its own.
     auto copyTextureToOutputBuffer = [&](MTL::CommandBuffer* cmd, MTL::Texture* source) {
         if (!mPost.textureToBufferPSO() || !source)
         {
@@ -1976,10 +1742,6 @@ void MetalRender::render(Buffer* output)
         mEnvironment.ensurePlaceholderAliasBuffer();
 
         {
-            // Keep the split Base NEE path available for scenes where separating
-            // connection/eval from sampling wins. Its current A/B result is inside
-            // wall-time noise, so the production default remains the fused path.
-            // ReSTIR and multi-candidate RIS retain their coupled candidate loop.
             const bool splitBaseNee = envUint("STRELKA_SPLIT_BASE_NEE", 0u) != 0u &&
                                       pUniformData->restirDIEnabled == 0u && pUniformData->risCandidates == 1u &&
                                       mMaterials.hasOpenPBRMaterials();
@@ -1997,14 +1759,6 @@ void MetalRender::render(Buffer* output)
             // shows and what MetalFX upscales into.
             mPost.ensureDisplayTextures(outWidth, outHeight);
 
-            // Metal 4 path. Residency has to be refreshed whenever the set of
-            // allocations can have changed; ensureBuffers only does work
-            // when the resolution does, so its capacity doubles as the generation.
-            // On Apple9+ skinning, acceleration-structure maintenance and tracing
-            // share the Metal 4 queue; on earlier GPUs the structures build on the
-            // Metal 3 queue and skinning is retired before them (see the frame
-            // encode below). The denoiser remains a Metal 3 post-process,
-            // synchronized from the Metal 4 frame event after guide resolve.
             const bool useMetal4 = mMetal4.isValid() && mIntegrator.resolvePSO4() != nullptr;
             if (!useMetal4)
             {
@@ -2065,12 +1819,6 @@ void MetalRender::render(Buffer* output)
             featureIn.writeAov = pUniformData->writeAov != 0u;
             featureIn.samplerType = pUniformData->samplerType;
 
-            // The one streaming preview traces an empty TLAS: geometry tables
-            // are deliberately not published until the build finishes. Do not
-            // specialise that sky-only frame for curve traversal, alpha, SSS,
-            // lights or OpenPBR merely because the host scene will contain them
-            // later. Curve-linked variants are especially expensive and the
-            // preview PSO would become dead as soon as the final TLAS arrives.
             if (tracingBuildPreview)
             {
                 featureIn.hasLights = false;
@@ -2114,11 +1862,6 @@ void MetalRender::render(Buffer* output)
                 mIntegrator.beginRenderWorkAudit();
             }
 
-            // The OpenPBR table is reached through the uniforms rather than a
-            // binding -- the shade stage has no slot left. Written here and not
-            // in MetalFrameUniforms because the address belongs to the material
-            // table, which that file cannot see. Null when the scene has none,
-            // and the kernel that reads it is compiled out in that case anyway.
             pUniformData->openpbrParams = mMaterials.openpbrBuffer() ? mMaterials.openpbrBuffer()->gpuAddress() : 0ull;
             pUniformData->openpbrTextures =
                 mMaterials.openpbrTextureBuffer() ? mMaterials.openpbrTextureBuffer()->gpuAddress() : 0ull;
@@ -2175,10 +1918,6 @@ void MetalRender::render(Buffer* output)
             uint32_t traversalBatchesPerGroup = metal::kWavefrontTraversalBatchesPerCommandBuffer;
             if (useMetal4 && !featureIn.hasCurves)
             {
-                // Triangle traversal is preemptible on Apple silicon. Keep one
-                // full-frame dispatch so the RT hardware sees the complete
-                // camera wavefront. The override exists only to subdivide a
-                // failing workload while diagnosing a driver/watchdog issue.
                 const uint32_t requested = envUint("STRELKA_TRIANGLE_BATCH_THREADS", 0u);
                 if (requested != 0u)
                 {
@@ -2252,16 +1991,6 @@ void MetalRender::render(Buffer* output)
                 asUpdate.tlas = encodeTlas;
                 const bool asSideQueue = (encodeSkeletalBlas || encodeTlas) && !mAccel.inlineWithTracer();
 
-                // Skinning writes the vertices both the acceleration-structure
-                // build and the trace read; the copies preserve the shutter-open
-                // keyframe and the previous-frame pose. The same sequence is
-                // encoded onto whichever encoder the active path uses.
-                //
-                // The previous-pose snapshot is taken unconditionally. Skipping it
-                // while the pose is static looks free, but mHasPrevFramePose is
-                // raised elsewhere and independently, so a frame that skips the
-                // copy still tells the shader the buffer is meaningful -- and
-                // before the first skin that buffer has never been written at all.
                 const bool anySkinWork = capturePrevVertices || encodeSkinOpen || copyVerticesAfterOpen ||
                                          encodeSkinClose || copyVerticesAfterClose;
                 auto encodeSkinningAndCopies = [&](MTL4::ComputeCommandEncoder* e, oka::ConstantRing& ring) {
@@ -2398,17 +2127,6 @@ void MetalRender::render(Buffer* output)
                 {
                     if (chunkIndex > 0)
                     {
-                        // Encoder barriers do not cross a Metal 4 command-buffer
-                        // boundary. Publish the queue and indirect arguments the
-                        // next bounce chunk consumes before closing this one.
-                        // Publish this chunk's queue writes to command encoders
-                        // that follow it on the Metal 4 queue. A consumer
-                        // barrier (`barrierAfterQueueStages`) belongs in the
-                        // *next* encoder; placed here at the end of the producer
-                        // it waited for prior encoders and ordered nothing.
-                        // Tail command buffers are committed as one batch, so
-                        // that mistake let adjacent bounce chunks race over the
-                        // ping-pong queues and indirect arguments.
                         enc4->barrierAfterStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
                         enc4->endEncoding();
                         cmd4->endCommandBuffer();
@@ -2446,19 +2164,6 @@ void MetalRender::render(Buffer* output)
                     // ours, so this has to follow endEncoding().
                     mPost.metalFx().encodeSpatial(cmdIntegrate, true, mPost.upscaleTexture(mWriteIndex),
                                                   mPost.displayTexture(mWriteIndex), width, height);
-                    // The scaler's output is a display-sized texture that the
-                    // headless writer (StrelkaCLI, screenshots) cannot read: it
-                    // wants the linear `output` buffer, which still holds only
-                    // whatever the render-resolution tonemap above wrote, laid out
-                    // at the wrong stride for a display-resolution buffer.
-                    //
-                    // A second Metal4 encoder here to copy it back crashed deep in
-                    // AGXMetalG13X (EXC_BAD_ACCESS in emitUscStateLoad) -- the
-                    // scaler's internal encoding appears to leave the command
-                    // buffer unable to open another compute encoder, the same
-                    // family of MetalFX/Metal4 driver fragility already worked
-                    // around above (FB22575333). Flagged for renderSync() to copy
-                    // out on the CPU instead, once the frame is known complete.
                     mPendingSpatialUpscaleReadback = true;
                 }
                 cmdIntegrate->endCommandBuffer();
@@ -2494,11 +2199,6 @@ void MetalRender::render(Buffer* output)
                         [this, state, writeIdx4, asyncPresent, commitStartedAt, profileStages, width, height, maxDepth,
                          samplesThisLaunch, features, traversalBatchThreads, groupIndex, frameSignalValue,
                          reportSharcDiagnostics](MTL4::CommitFeedback* fb) {
-                            // The feedback is the only place a Metal 4 frame reports
-                            // failure: there is no status() to poll afterwards the way
-                            // the Metal 3 path polls its command buffer. Without this
-                            // the sole symptom is the frame event never reaching its
-                            // value, which surfaces as a timeout and names no cause.
                             const NS::Error* error = fb ? fb->error() : nullptr;
                             double chunkGpuMs = 0.0;
                             if (fb && fb->GPUEndTime() >= fb->GPUStartTime())
@@ -2592,11 +2292,6 @@ void MetalRender::render(Buffer* output)
 
                             if (groupIndex + 1 < state->groups.size())
                             {
-                                // Do not recursively commit from a Metal feedback
-                                // handler. The completed workload is not fully
-                                // retired until the handler returns, so recursive
-                                // commits turn nominally separate bounce buffers
-                                // into one watchdog-scale scheduler residency.
                                 mMetal4.afterFeedback([state, groupIndex]() { state->submit(groupIndex + 1); });
                                 return;
                             }
@@ -2714,11 +2409,6 @@ void MetalRender::render(Buffer* output)
             const bool temporalUpscale = temporalUpscaling;
             if (!useMetal4 && (denoising || temporalUpscale))
             {
-                // Spread the packed guides into the textures MetalFX reads, and
-                // hand it linear radiance: exposure and the tone curve come after
-                // the denoise, not before it. The temporal scaler reads two of
-                // the same textures -- depth and motion -- so it takes the same
-                // pass rather than a second one that writes a subset.
                 enc->setComputePipelineState(mIntegrator.aovResolvePSO());
                 enc->setBuffer(pUniformBuffer, 0, 0);
                 enc->setBuffer(mIntegrator.aovBuffer(), 0, 1);
@@ -2755,14 +2445,6 @@ void MetalRender::render(Buffer* output)
                 in.reactive = mPost.guides().reactive;
                 in.denoiseStrength = mPost.guides().denoiseStrength;
                 in.output = mPost.denoisedTexture();
-                // The header documents this property twice and the two readings
-                // have opposite signs: "the subpixel sampling coordinate you use to
-                // generate the color texture input" is what we applied, while "the
-                // pixel offset this scaler samples to return to the frame's
-                // reference frame" is its negation. The measured sign is recorded
-                // in the default of render/pt/jitterSign. The Y term carries our own flip
-                // as well (generateCameraRay builds pixelPos.y as height - y), so
-                // the two axes are switched independently.
                 const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
                 in.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
                 in.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
@@ -2771,12 +2453,6 @@ void MetalRender::render(Buffer* output)
                 // becomes chromatic later.
                 in.exposure = simd::dot(pUniformData->exposureValue, float3{ 0.2126f, 0.7152f, 0.0722f });
                 in.depthReversed = denoiseDepthReversed(pUniformData->denoiseDepthMode, pUniformData->projectionType);
-                // Reset when this frame has no valid predecessor to reproject
-                // from -- *not* when the estimator restarts. Accumulation restarts
-                // on every camera move, and resetting the denoiser with it throws
-                // the history away exactly when it is worth most: while the camera
-                // moves every frame is one sample and the history is all there is.
-                // Motion vectors exist to carry smooth motion, so let them.
                 in.resetHistory = mResetDenoiseHistory;
                 std::memcpy(in.worldToView, glm::value_ptr(currView.mCamMatrices.view), sizeof(in.worldToView));
                 std::memcpy(in.viewToClip, glm::value_ptr(currView.mCamMatrices.perspective), sizeof(in.viewToClip));
@@ -2883,14 +2559,6 @@ void MetalRender::render(Buffer* output)
     }
     else
     {
-        // Post-only frame. The estimator has spent its sample budget, so the
-        // picture behind it is final and the only thing still worth running is
-        // what turns radiance into pixels: exposure, the tone curve, gamma. Those
-        // read the frame rather than produce it, so they keep responding at the
-        // price of a dispatch or two instead of a re-render -- which is the point,
-        // and holds with MetalFX in the pipeline as much as without it. What
-        // differs there is the frame they read: the denoised texture, kept from
-        // the last traced sample, or the accumulation buffer re-upscaled.
         MTL::CommandBuffer* pCmd = mCommandQueue->commandBuffer();
         {
             // Numbered, so a capture names the frame it came from rather than
@@ -2899,10 +2567,6 @@ void MetalRender::render(Buffer* output)
             pCmd->setLabel(NS::String::string(label.c_str(), NS::UTF8StringEncoding));
         }
 
-        // Normally the trace path allocates these before the tonemapper ever runs.
-        // An empty scene never takes that path -- there is no instance buffer to
-        // trace against -- so the tonemapper would be handed a nil texture and the
-        // display a frame that was never written.
         mPost.ensureDisplayTextures(outWidth, outHeight);
         const bool frozenDenoised = denoisedFrameUsable && mPost.tonemapperTexPSO() != nullptr;
         if (upscaling && !frozenDenoised)
@@ -2949,10 +2613,6 @@ void MetalRender::render(Buffer* output)
                 pComputeEncoder->endEncoding();
             }
 
-            // The spatial scaler takes a display-referred frame, so the tone curve
-            // runs before it and re-tonemapping means re-upscaling. Left out, a
-            // tonemap edit at the sample cap wrote a texture nothing sampled and
-            // the display kept the last traced frame: the control looked inert.
             if (upscaling && mPost.metalFx().hasSpatialScaler())
             {
                 mPost.metalFx().encodeSpatial(
@@ -3017,11 +2677,6 @@ void MetalRender::retainCommandBufferForSync(MTL::CommandBuffer* pCmd)
     mLastCommandBuffer = pCmd->retain();
 }
 
-// One frame into a .gputrace, for Xcode's shader profiler -- the only tool that
-// reports a shader's register allocation. `MTL_CAPTURE_ENABLED` has to be set
-// before the device exists, which main() does when --capture is given: the
-// capture layer is inserted when Metal initialises, and asking for it later
-// fails with "Capture layer is not inserted".
 void MetalRender::beginGpuCapture(const std::string& path)
 {
     MTL::CaptureManager* mgr = MTL::CaptureManager::sharedCaptureManager();
@@ -3054,14 +2709,6 @@ void MetalRender::endGpuCapture()
 
 void MetalRender::renderSync(Buffer* output)
 {
-    // Frame boundaries, for anything watching from outside.
-    //
-    // Metal infers a frame from presentDrawable, and a headless renderer never
-    // presents one -- so Instruments sees a single unbroken stretch of work and
-    // every number it reports is an average over the whole run. A capture scope
-    // is the API that says "this is a frame"; with one per sample the timeline
-    // has countable, numbered frames and the counters can be read per frame
-    // instead of per session.
     if (mFrameScope == nullptr && mCommandQueue)
     {
         mFrameScope = MTL::CaptureManager::sharedCaptureManager()->newCaptureScope(mCommandQueue);
@@ -3087,16 +2734,6 @@ void MetalRender::renderSync(Buffer* output)
     const auto tSubmitted = std::chrono::steady_clock::now();
     if (!mLastCommandBuffer && mMetal4FrameValue != 0)
     {
-        // Metal 4 frame. The event is signalled on the queue behind this
-        // frame's work, so returning from here means the output buffer holds it.
-        //
-        // Waited for in slices rather than with one deadline: a launch carrying
-        // many samples runs for seconds by design, and the Metal 3 path it
-        // replaces had no deadline at all (waitUntilCompleted). A single short
-        // timeout therefore reported a healthy GPU as a device error and threw
-        // the render away. What a real failure looks like is the commit feedback
-        // firing with an error, which is what ends the wait early; the budget is
-        // only a backstop for a frame that neither completes nor reports.
         constexpr uint32_t kFrameWaitSliceMs = 1000;
         constexpr uint32_t kFrameWaitBudgetMs = 60000;
         bool completed = false;
@@ -3162,11 +2799,6 @@ void MetalRender::renderSync(Buffer* output)
             if (!mDeviceErrorReported)
             {
                 mDeviceErrorReported = true;
-                // A render command buffer that failed produces a black frame and
-                // nothing else. The usual cause is that the scene's resources do not
-                // all fit on the device at once -- acceleration structures, vertex
-                // and index buffers and textures are all needed resident -- and the
-                // failure is otherwise completely silent.
                 const NS::Error* err = mLastCommandBuffer->error();
                 STRELKA_ERROR(
                     "Render command buffer failed: {}. The scene may not fit on the device; "
@@ -3239,11 +2871,6 @@ void MetalRender::renderSync(Buffer* output)
         mRenderWorkGpuMs += getLastRenderTimeMs();
     }
 
-    // See the comment where this is set: the Metal4 spatial-upscale path could
-    // not copy its own result back into `output`, so it is done here, on the
-    // CPU, once the frame is known complete -- the same blit-to-staging-buffer
-    // pattern readHalfTexture() uses for screenshots, on the classic Metal3
-    // queue rather than a second Metal4 encoder.
     if (mPendingSpatialUpscaleReadback && output)
     {
         mPendingSpatialUpscaleReadback = false;
@@ -3657,11 +3284,6 @@ void MetalRender::handleSceneChanges()
     }
     if (geometryChanged)
     {
-        // A light type edit can point an instance at a different proxy mesh or
-        // add the first finite-light instance. Rebuild buffers and every BLAS/
-        // TLAS descriptor so no stale topology or captured visibility mask is
-        // reused by rebuildTLAS(). The editor retains host geometry precisely
-        // for mutations such as this.
         mGeometry.buildBuffers(mScene);
         rebuildAccelerationStructures();
         needReset = true;
@@ -3715,13 +3337,6 @@ void MetalRender::handleSceneChanges()
         needSharcReset |= !responsiveSharc;
     }
 
-    // Any branch above can have replaced an allocation the residency set names:
-    // a light edit grows the light buffer or decodes a projector's slide, a
-    // material edit reloads its maps, a new environment is a new texture. Metal 4
-    // has no useResource to fall back on, so an address in an argument table that
-    // the set does not know about is a fault rather than a validation message --
-    // and the set is otherwise refreshed only when the integrator's capacity
-    // changes, which an edit never touches.
     mMetal4ResidencyGeneration = 0;
 
     mScene->consumeChanges();
@@ -3751,7 +3366,6 @@ void MetalRender::rebuildAccelerationStructures()
     mAccel.setLoadProgress(mLoadProgress);
     mAccel.rebuild();
 }
-
 
 metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
 {
@@ -3815,14 +3429,6 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
     return hooks;
 }
 
-// The stage that makes a scene visible before it is loaded.
-//
-// Nothing here depends on geometry or materials, and together these three
-// things are already a complete picture: somewhere to accumulate, the sky, and
-// a top level to trace against. The top level is built empty on purpose -- every
-// ray then misses and reaches the environment, so the first frame is the scene's
-// own lighting with none of its objects in it yet, and the objects appear in
-// that rather than replacing a black screen.
 void MetalRender::buildSceneEnvironment(Buffer* output)
 {
     // Device only: nothing reads it back.
@@ -3843,11 +3449,6 @@ void MetalRender::buildSceneEnvironment(Buffer* output)
         }
     }
 
-    // Before the first published frame, not in the last stage. Frames are now
-    // traced from this stage onwards, and each one runs the animation block; a
-    // frame that found no skinning pipeline would consume the pose it was asked
-    // for and dispatch nothing, leaving the character in whatever pose the
-    // vertex buffer happened to hold, with nothing left to mark dirty.
     if (!mScene->getVerticesSkinData().empty())
     {
         mSkinning.setScene(mScene);
@@ -3872,10 +3473,6 @@ void MetalRender::buildSceneTail(Buffer* output)
     {
         mLoadProgress->beginStage(LoadProgress::Stage::Done);
     }
-    // What the scene actually cost, once. The per-category figures scattered
-    // through the build are estimates made at allocation time; this is the
-    // sizes the API reports, and it is the only place the two totals -- the
-    // device's and the OS's -- can be seen next to each other.
     {
         MemoryReport report;
         if (memoryReport(report))
@@ -3910,7 +3507,6 @@ void MetalRender::finishSceneBuild(Buffer* output)
     metal::SceneBuildHooks hooks = makeSceneBuildHooks();
     mScenePrep.finish(hooks, output);
 }
-
 
 // Environment / IBL loading lives in MetalEnvironment.
 void MetalRender::loadEnvBackground(const std::string& texturePath)

@@ -2,10 +2,6 @@
 
 using namespace metal;
 
-// Keep the benchmark on the same generic OpenPBR path as wavefrontShadeTail.
-// The material preset is a runtime uniform, so the compiler cannot remove
-// inactive lobes merely because one benchmark case happens to set their weight
-// to zero.
 #define OPENPBR_GET_SPECIALIZATION_CONSTANT(name) true
 #include <strelka/material/openpbr/openpbr_bridge.h>
 #undef OPENPBR_GET_SPECIALIZATION_CONSTANT
@@ -403,10 +399,6 @@ kernel void openpbrSampleBenchRng(constant OpenPbrSampleBenchParams& params [[bu
     output[gid] = sum;
 }
 
-// The generic benchmark above deliberately preserves the production Tail
-// shader's runtime material choice. These entry points answer a different
-// question: what register allocation and spills remain when the compiler knows
-// the exact material configuration and there is no loop-carried state?
 template <uint Preset>
 static inline void openpbrSampleOnceImpl(constant OpenPbrSampleBenchParams& params, device float4* output, uint gid)
 {

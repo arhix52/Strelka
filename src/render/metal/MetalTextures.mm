@@ -23,7 +23,6 @@
 
 namespace fs = std::filesystem;
 
-
 namespace oka::metal
 {
 namespace
@@ -343,11 +342,6 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         prevH = h;
     }
 
-    // A normal map tagged sRGB is neither compressed nor normalised: BC5 has no
-    // sRGB variant, and both the encode and the Z reconstruction need the values
-    // linear. It does not happen -- the material build asks for normal maps
-    // linear -- but silently dropping the transfer function would be worse than
-    // leaving such a texture as it was.
     const bool srgbNormal = kind == TextureKind::Normal && srgb;
     const bool normalMap = kind == TextureKind::Normal && !srgb;
     const bool canCompress = !srgbNormal && params.deviceSupportsBC && params.compress;
@@ -367,10 +361,6 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
     else
         format = srgb ? MTL::PixelFormatBC1_RGBA_sRGB : MTL::PixelFormatBC1_RGBA;
 
-    // Every mip level, not just the base: the box filter above averages unit
-    // vectors, which shortens them, and the shader rebuilds Z on the assumption
-    // that they are unit. Done whether or not the texture ends up compressed, so
-    // the two paths shade the same.
     if (normalMap)
     {
         oka::bc::normalizeNormalMap(base.get(), texWidth, texHeight);

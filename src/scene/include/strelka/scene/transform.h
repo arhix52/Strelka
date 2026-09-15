@@ -9,18 +9,6 @@
 namespace oka
 {
 
-/// Split an affine transform into the translation, rotation and scale of a glTF
-/// node.
-///
-/// glm::decompose() is the obvious choice and cannot be used here: it reports
-/// failure when the determinant of the upper 3x3 falls below epsilon<float>()
-/// (1.2e-7) and leaves every output untouched, which for a uniformly scaled node
-/// means anything under about 0.005 -- an asset authored in centimetres and
-/// scaled down by 0.003 is enough. Callers that trusted the outputs got whatever
-/// the stack held, and the node's transform became NaN on the first edit.
-///
-/// Shear is not represented: a glTF node cannot express it, and neither can a
-/// gizmo edit. A sheared matrix comes back as the closest rotation.
 inline void decomposeTrs(const glm::float4x4& matrix, glm::float3& translation, glm::quat& rotation, glm::float3& scale)
 {
     translation = glm::float3(matrix[3]);

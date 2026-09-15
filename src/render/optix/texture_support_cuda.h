@@ -13,13 +13,6 @@
 #include <host/texture_cache_key.h>
 #include <host/texture_compress.h>
 
-// stb_image.h and stb_image_resize.h are deliberately NOT included here. Their
-// implementation blocks sit outside their include guards, so a second
-// `#include` while STB_*_IMPLEMENTATION is still defined re-expands the whole
-// implementation and the translation unit stops compiling. The one unit that
-// includes this header (OptixRender.cpp) includes them first, with the
-// implementation macros, and that is the contract.
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -29,13 +22,6 @@
 #include <string>
 #include <vector>
 
-// Custom structure representing a CUDA texture.
-//
-// The unfiltered (point-sampled, border-addressed) object that used to sit
-// beside this one is gone. It was created for every texture in the scene,
-// tracked, destroyed -- and never bound to anything, because nothing in the
-// shading path samples a material texture unfiltered. It was a texture object
-// and a header field per texture for nothing.
 struct Texture
 {
     Texture() = default;
@@ -72,10 +58,6 @@ struct Payload
 namespace detail
 {
 
-/// std::istream and std::ostream traffic in char*, so reading a struct or a
-/// length prefix out of a binary file is a reinterpret_cast by construction.
-/// Two of them here rather than six at the call sites, which is also the only
-/// place the cast has to be read carefully.
 template <typename T>
 void readRaw(std::istream& in, T* dst, size_t bytes)
 {
@@ -129,11 +111,6 @@ inline std::vector<uint8_t> toBytes(const T* src, size_t count)
     return out;
 }
 
-/// sRGB -> linear on 16-bit samples. CUDA's `cudaTextureDesc::sRGB` is defined
-/// for 8-bit unorm formats only, so a 16-bit colour map has to be linearised
-/// before it is uploaded. 16 bits is enough headroom that doing it here costs
-/// nothing visible -- the alternative, quantising to 8 bits so the hardware can
-/// do it, would throw away exactly what a 16-bit source was chosen for.
 inline void linearizeSrgb16(uint16_t* rgba, size_t texels)
 {
     for (size_t i = 0; i < texels; ++i)
@@ -353,11 +330,6 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
     planIn.blockCompress = settings.blockCompress;
     planIn.wantMips = settings.wantMips;
 
-    // What the file is decides the element type. An .hdr or .exr used as a
-    // material map keeps its range; a 16-bit PNG keeps its precision. The old
-    // loader forced everything through STBI_rgb_alpha and therefore through 8
-    // bits, which is a silent clip on the first and a silent quantise on the
-    // second.
     planIn.sourceIsFloat = stbi_is_hdr(fileName.c_str()) != 0;
     planIn.sourceIs16Bit = !planIn.sourceIsFloat && stbi_is_16_bit(fileName.c_str()) != 0;
 
@@ -436,10 +408,6 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
         chain.push_back(std::move(next));
     }
 
-    // Every level, not only the base: the box filter above averages unit vectors,
-    // which shortens them, and the shader rebuilds Z assuming they are unit.
-    // Done whether or not the texture ends up compressed, so that turning
-    // compression on does not change the shading.
     if (plan.normalizeLevels && plan.format != Format::RGBA32F && plan.format != Format::RGBA16)
     {
         for (uint32_t l = 0; l < plan.levels; ++l)
@@ -472,13 +440,6 @@ struct TextureResources
     cudaTextureObject_t object = 0;
 };
 
-/// Upload a payload and build its texture object.
-///
-/// `addressMode` is a parameter rather than a hardcoded `cudaAddressModeWrap`
-/// because glTF samplers carry `wrapS`/`wrapT`. The scene loader does not read
-/// them yet -- see the hand-off in the report -- so every caller passes wrap
-/// today, which is glTF's default; the plumbing is here so that adding it is a
-/// loader change and not a renderer change.
 inline TextureResources createTexture(const Payload& payload,
                                       cudaTextureAddressMode addressModeU = cudaAddressModeWrap,
                                       cudaTextureAddressMode addressModeV = cudaAddressModeWrap)
@@ -543,15 +504,6 @@ inline TextureResources createTexture(const Payload& payload,
     // integer format and comes back in [0,1].
     texDesc.readMode = plan.format == Format::RGBA32F ? cudaReadModeElementType : cudaReadModeNormalizedFloat;
     texDesc.normalizedCoords = 1;
-    // The whole point of the exercise: the hardware does the sRGB decode on the
-    // three colour channels at fetch, before filtering, which is where it
-    // belongs.
-    //
-    // The flag is set for the block-compressed sRGB channel kinds too, and that
-    // is not redundancy: CUDA 13 rejects `cudaCreateTextureObject` with
-    // cudaErrorInvalidValue if a *SRGB block format is described by a texture
-    // whose sRGB flag is clear -- the two have to agree. Measured, not assumed;
-    // the same call succeeds the moment the flag goes on.
     texDesc.sRGB = (plan.srgbTextureFlag || plan.srgbBlockFormat) ? 1 : 0;
     if (plan.levels > 1)
     {

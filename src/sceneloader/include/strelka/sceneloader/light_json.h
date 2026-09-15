@@ -11,7 +11,6 @@
 #include <string>
 #include <numbers>
 
-
 namespace oka::lightjson
 {
 
@@ -80,11 +79,6 @@ inline Scene::UniformLightDesc parseDesc(const nlohmann::json& light, const std:
         break;
     case LIGHT_TYPE_PROJECTOR:
         desc.radius = light.value("radius", 0.0f);
-        // The *full* horizontal field of view in degrees, the way a projector or
-        // a camera is specified, halved into the outer-cone field the GPU light
-        // already has. A spot's "outerConeAngle" is a half angle in the same
-        // file, which reads like an inconsistency and is not one: nobody
-        // describes a beamer by half its throw angle.
         desc.outerConeAngle = light.value("fov", 45.0f) * 0.5f * (std::numbers::pi_v<float> / 180.0f);
         desc.projectorAspect = light.value("aspect", 16.0f / 9.0f);
         desc.projectorEdgeSoftness = light.value("edgeSoftness", 0.0f);
@@ -163,13 +157,6 @@ inline nlohmann::json toJson(const Scene::UniformLightDesc& desc)
     return light;
 }
 
-/// Turn a projector's image path into an index into the scene's image table.
-///
-/// The mirror of resolveIes() below, and split from parseDesc() for the same
-/// reason: parsing is a pure function of the JSON, while registering a resource
-/// needs the Scene. The path is made absolute here so that a sidecar can name
-/// the file next to itself and the renderer, which resolves everything else
-/// against `resource/searchPath`, still finds it.
 inline void resolveProjectorImage(Scene& scene, Scene::UniformLightDesc& desc, const std::string& searchDir)
 {
     if (desc.type != LIGHT_TYPE_PROJECTOR || desc.projectorImagePath.empty())

@@ -1,29 +1,3 @@
-// ============================================================================
-// test_diffuse_transmission.cpp
-//
-// KHR_materials_diffuse_transmission: light that enters a surface and leaves
-// diffusely on the far side. A leaf, not a pane of glass -- which is why it is a
-// separate lobe from `transmission`, whose specular refraction through an
-// interface would make a pine needle read as a shard.
-//
-// The spec defines the result as mix(diffuse_brdf, diffuse_btdf, weight), so the
-// lobe *splits* the diffuse response rather than adding to it. That is the
-// invariant most easily lost: it would be natural to add a transmitted lobe
-// alongside the reflected one, and the material would then be brighter than the
-// light falling on it -- visible as a canopy that glows rather than one that is
-// backlit, which is a difference nobody catches by eye.
-//
-// Pinned here:
-//   1. weight 0 leaves the material bit-identical to before the lobe existed
-//   2. weight 1 sends the whole diffuse response to the far side and nothing back
-//   3. reflected + transmitted never exceeds what arrived, at any weight
-//   4. sample and eval agree, on the far side too -- MIS weighs each strategy by
-//      the other's density, and next-event estimation through a canopy is
-//      exactly where this lobe earns its keep
-//   5. a back-face hit still scatters: a cutout leaf is hit from both sides
-//      constantly, and a lobe that returns nothing there makes foliage opaque
-//      from behind
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -162,17 +136,6 @@ TEST_CASE("weight 1 sends the diffuse response through and keeps none of it")
 
 TEST_CASE("turning the lobe up does not add energy, only move it")
 {
-    // The failure this guards against is additive rather than split: a canopy
-    // that transmits without giving up the matching reflection is brighter than
-    // the sky behind it.
-    //
-    // Measured against the material's own weight-0 response rather than against
-    // 1.0, because a white glTF surface already sits a few percent over -- the
-    // diffuse lobe does not subtract the specular Fresnel and the GGX
-    // multiple-scattering compensation adds a little more. That offset is a
-    // property of the standard model and predates this lobe; asserting on it
-    // here would be testing the wrong thing and would move whenever the
-    // compensation fit is retuned.
     const float weights[] = { 0.25f, 0.5f, 0.75f, 1.0f };
     const float3 directions[] = { glm::normalize(make_float3(0.0f, 0.0f, 1.0f)),
                                   glm::normalize(make_float3(0.6f, 0.0f, 0.8f)),
@@ -240,10 +203,6 @@ TEST_CASE("sample and eval agree on the far side")
 
 TEST_CASE("a back-face hit still scatters")
 {
-    // A cutout leaf is a single sheet: rays arrive from behind as often as from
-    // in front. With no specular transmission to fall back on, this lobe is the
-    // only thing that can answer, and returning nothing makes foliage opaque
-    // from one side -- which reads as a shadowing bug, not a BSDF one.
     const float3 wo = glm::normalize(make_float3(0.2f, 0.1f, -0.97f)); // below the surface
     const MaterialParams p = leaf_params(0.8f);
     const SurfaceInteraction si = make_si(p, wo);

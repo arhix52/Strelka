@@ -3,10 +3,6 @@
 
 #include <light_pdf.h>
 
-// One material/geometry instance in the emissive-mesh hierarchy. The outer
-// alias table selects this record; its contiguous triangle range owns a second
-// alias table. IDs are renderer traversal IDs, so a BSDF hit can recover the
-// same record without guessing from material identity.
 struct EmissiveMeshLight
 {
     unsigned int instanceId;
@@ -40,10 +36,6 @@ struct EmissiveTriangleLight
 };
 static_assert(sizeof(EmissiveTriangleLight) == 16, "EmissiveTriangleLight host/GPU ABI changed");
 
-// Row-major affine transform for an emissive instance. OptiX cannot query an
-// arbitrary TLAS instance transform while constructing a next-event proposal,
-// so the host publishes the same current/previous matrices used by traversal.
-// Metal reads its instance descriptor directly and does not need this table.
 struct EmissiveInstanceTransform
 {
     float matrix[12];
@@ -71,11 +63,6 @@ struct EmissiveScaledTerm
     int exponent;
 };
 
-// A mesh emitter remains part of the traversed scene, so a visibility ray must
-// stop at an offset point on its near side instead of running through the true
-// sample and letting the emitter occlude itself.  Both endpoints are supplied
-// by the backend's scale-aware offset_ray(); this helper only constructs the
-// exact finite segment between them.
 struct EmissiveVisibilitySegment
 {
     float3 direction;

@@ -19,20 +19,12 @@
 #include <utility>
 #include <vector>
 
-
 namespace oka::metal
 {
 
 struct AsBuildState;
 struct AsBuildGeometry;
 
-// BLAS/TLAS domain: build, grouping, motion geometry, skeletal refit, instance buffer.
-// Reads Geometry mesh records / VB offsets and Materials cutout/medium flags; fills
-// GeometryEntry rows via MetalGeometry::geometryEntries() while building BLASes.
-//
-// AS submission is behind AccelBuildPath: Apple9+ shares the Metal 4 tracer queue;
-// earlier GPUs build on Metal 3 and sync with SharedEvent. Callers see only
-// inlineWithTracer() / encodeInline / submitSide — not an API version.
 class MetalAccelStructure
 {
 public:
@@ -42,10 +34,6 @@ public:
         uint64_t tlasBuilds = 0;
         uint64_t tlasRefits = 0;
     };
-    // One acceleration structure covering N geometries that either move
-    // together or were individually transformed into a static world-space BLAS.
-    // A large static glTF primitive may contribute only one spatial index range;
-    // the remaining ranges live in sibling BLASes.
     struct Blas
     {
         MTL::AccelerationStructure* mAs = nullptr;
@@ -136,17 +124,8 @@ public:
         return mPath && mPath->inlineWithTracer();
     }
 
-    /// A valid top level containing no instances, built before any geometry
-    /// exists so the scene can be traced while it loads. Every ray misses it and
-    /// reaches the environment, which is the correct picture of a scene whose
-    /// objects have not arrived. Replaced by the real one when the build
-    /// reaches it; a no-op if a top level already exists.
     void buildEmptyTopLevel();
 
-    /// A top level over the instances built so far, so a scene appears as it
-    /// loads instead of arriving whole when the last structure lands. Safe at any
-    /// slice boundary: an instance is emitted only once its BLAS exists. Replaced
-    /// by the complete one when the build finishes.
     void publishPartialTopLevel();
 
     /// Resumable build. Zero budget = no limit. Returns true when complete.
@@ -209,11 +188,6 @@ public:
     {
         return mDirectStaticInstanceIndex;
     }
-    /// Triangle-only top level used by bounded-medium random walks. Curve BLAS
-    /// are deliberately absent, rather than merely rejected by a ray mask: on
-    /// current Metal 4 drivers a handful of deep rays can still spend watchdog-
-    /// scale time traversing a mixed TLAS. Scenes without curves reuse the main
-    /// top level.
     MTL::AccelerationStructure* volumeAccelerationStructure() const
     {
         if (mVolumeInstanceAccelerationStructure)
@@ -222,10 +196,6 @@ public:
         }
         return mInstanceAccelerationStructure;
     }
-    /// Top level containing only explicit bounded-medium boundaries. Shadow
-    /// transmittance uses this instead of walking the triangle TLAS a second
-    /// time. SSS keeps volumeAccelerationStructure(): it must see the ordinary
-    /// surface that a random walk exits through.
     MTL::AccelerationStructure* mediumAccelerationStructure() const
     {
         if (mMediumInstanceAccelerationStructure)
@@ -303,10 +273,6 @@ private:
     void flushAccelerationStructureGroup();
     MTL::AccelerationStructure* createAccelerationStructureNoCompact(MTL::AccelerationStructureDescriptor* descriptor);
     size_t buildBlas(const std::vector<AsBuildGeometry>& geometries, bool skeletal);
-    /// What buildCurveBlas returns for a set it could not build: an empty one,
-    /// or one whose points never got uploaded. Named because the caller has to
-    /// test for it, and `(size_t)-1` at both ends said nothing about which end
-    /// owned the convention.
     static constexpr size_t kNoCurveBlas = ~size_t{ 0 };
     size_t buildCurveBlas(uint32_t sceneInstanceId);
     size_t buildAnalyticLightBlas(uint32_t intersectionFunctionOffset);
@@ -315,11 +281,6 @@ private:
     void prepareEmissiveMeshInputs();
     void uploadEmissiveMeshLights();
 
-    /// Residency for an allocation this class owns. Null-safe on both the
-    /// allocation and the Metal 4 context, so callers do not repeat either
-    /// guard -- and `retireResident` exists so that "out of the set before it is
-    /// freed" is a single call rather than a rule to remember. The set does not
-    /// retain what it names, and the allocator reuses addresses.
     void makeResident(MTL::Allocation* allocation);
     void retireResident(MTL::Buffer*& buffer);
     void writeInstanceTransforms(MTL::Buffer* buffer);
@@ -366,10 +327,6 @@ private:
     MTL::AccelerationStructureDescriptor* mVolumeTlasDescriptor = nullptr;
     MTL::AccelerationStructureDescriptor* mMediumTlasDescriptor = nullptr;
     MTL::Buffer* mInstanceBuffer = nullptr;
-    // Two are sufficient because MetalRender submits at most one frame at a
-    // time: async rendering stays busy until commit feedback (or the Metal 3
-    // denoiser completion), and renderSync waits. If that policy changes to
-    // multiple frames in flight, this must become one buffer per frame slot.
     MTL::Buffer* mPreviousInstanceBuffer = nullptr;
     bool mInstanceTransformsChanged = false;
     MTL::Buffer* mTlasScratchBuffer = nullptr;
@@ -378,10 +335,6 @@ private:
     size_t mTlasInstanceCount = 0;
     size_t mVolumeTlasInstanceCount = 0;
     size_t mMediumTlasInstanceCount = 0;
-    // A top level that has to grow is replaced from inside the frame's encoder,
-    // where the structure it replaces may still be read by the frames already in
-    // flight. Freeing it there is a fault the frame after next; it waits here
-    // for as many encodes as there can be frames outstanding instead.
     std::vector<std::pair<MTL::AccelerationStructure*, uint64_t>> mRetiredInstanceStructures;
     uint64_t mTlasEncodeCount = 0;
 
@@ -404,18 +357,6 @@ private:
     // because being wrong on the high side only delays a free.
     static constexpr uint64_t kMaxFramesInFlight = 3;
     static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
-    /// How many geometries one refittable bottom level may hold. World-space
-    /// baked static BLASes omit Refit and are limited by triangle count instead.
-    ///
-    /// Past a certain width, a structure built with AccelerationStructureUsageRefit
-    /// returns no intersections at all on this driver -- it builds without error,
-    /// reports a sane size, and every ray misses it. Measured on BrainStem in a
-    /// studio set: the character's 59 primitives merge into one bottom level and it
-    /// is invisible; split at 58 and it renders, and it renders at 59 with the refit
-    /// flag dropped. The flag cannot be dropped -- it is what halves what the builder
-    /// allocates, which is the difference between the pine forest fitting in memory
-    /// and not -- so the width is capped instead, well short of where it was seen to
-    /// fail. Splitting costs one more instance in the top level per 32 primitives.
     static constexpr size_t kMaxGeometriesPerRefitBlas = 32;
     size_t mNextBlasRebuildIndex = 0;
 };

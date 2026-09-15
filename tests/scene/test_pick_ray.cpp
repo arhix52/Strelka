@@ -57,10 +57,6 @@ TEST_CASE("Pick ray leaves the camera along the view direction")
     CHECK(dir.z == doctest::Approx(-1.0f).epsilon(1e-4));
 }
 
-// The editor reads the camera for picking and gizmos before the first frame has
-// been rendered, and the renderer is what normally fills in the projection. A
-// non-finite ray there misses everything and reports nothing, so the camera has
-// to stay usable even when nobody configured it yet.
 TEST_CASE("Pick ray stays finite for a camera whose projection was never set")
 {
     Camera cam;
@@ -121,10 +117,6 @@ TEST_CASE("Screen space pick selects the object under the cursor in every quadra
         return scene.pick(origin, dir);
     };
 
-    // Quads sit at +-1.5 in a plane 5 units away: with a 60 degree vertical fov
-    // the half extent at that depth is 5 * tan(30) ~ 2.9, so each sample lands on
-    // the centre of one quad -- which is also the diagonal shared by its two
-    // triangles, so this doubles as a watertightness check.
     const float offset = 1.5f / (2.0f * 5.0f * std::tan(glm::radians(30.0f)));
 
     const Scene::PickHit tl = pickAt(0.5f - offset, 0.5f - offset);

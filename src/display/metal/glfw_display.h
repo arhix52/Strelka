@@ -74,10 +74,6 @@ private:
     MTL::BlitCommandEncoder* mBlitEncoder = nullptr;
     CA::MetalDrawable* drawable = nullptr;
 
-    // Per-frame autorelease pool. Metal factory methods (commandBuffer(),
-    // nextDrawable(), blitCommandEncoder(), ...) return autoreleased objects;
-    // without a pool that is drained every frame they accumulate for the whole
-    // process lifetime.
     NS::AutoreleasePool* mFramePool = nullptr;
 
     // True while a drawable could not be acquired this frame; onEndFrame/drawUI

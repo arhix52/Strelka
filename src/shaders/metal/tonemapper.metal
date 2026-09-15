@@ -54,11 +54,6 @@ kernel void toneMappingComputeShader(
     displayTexture.write(float4(result, inputColor.a), tid);
 }
 
-// Same tone curve, texture in instead of buffer in.
-//
-// After denoising the frame is a texture at display resolution and the buffer no
-// longer holds it, so the input side has to change; the maths below is the same
-// and stays in one place by construction, because both kernels call it.
 kernel void toneMappingTextureShader(
     uint2 tid [[thread_position_in_grid]],
     constant UniformsTonemap& uniforms [[buffer(0)]],
@@ -66,12 +61,6 @@ kernel void toneMappingTextureShader(
     texture2d<float, access::write> displayTexture [[texture(0)]]
     )
 {
-    // Display resolution, not render resolution. The denoiser hands back a
-    // display-sized texture, and bounding this pass by the render size instead
-    // leaves everything outside the top-left corner holding whatever was in the
-    // display texture before -- a quarter of the screen live and the rest a stale
-    // still, which reads as "working" for as long as that still happens to be
-    // roughly right.
     if (tid.x >= uniforms.outWidth || tid.y >= uniforms.outHeight)
     {
         return;
@@ -81,11 +70,6 @@ kernel void toneMappingTextureShader(
     displayTexture.write(float4(result, inputColor.a), tid);
 }
 
-// Copy a display-resolution texture to the headless writer's linear output
-// buffer, verbatim -- no tonemapping. Used for the denoised frame (still
-// scene-linear) and for the plain MetalFX spatial upscale (already
-// tonemapped by the pass that fed it); either way this is just the last stop
-// before the buffer StrelkaCLI reads.
 kernel void textureToBuffer(
     uint2 tid [[thread_position_in_grid]],
     constant UniformsTonemap& uniforms [[buffer(0)]],

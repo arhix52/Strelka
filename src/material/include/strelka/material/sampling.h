@@ -7,12 +7,6 @@
 
 #include "material_math.h"
 
-// ---------------------------------------------------------------------------
-// Cosine-weighted hemisphere sampling (Malley's method)
-//
-// u1, u2 in [0,1) -- uniform random numbers
-// Returns direction in tangent space where Z = up (normal direction)
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float3 cosine_hemisphere_sample(float u1, float u2)
 {
     const float r = sqrtf(u1);
@@ -25,10 +19,6 @@ DEVICE_FUNC float3 cosine_hemisphere_sample(float u1, float u2)
     return make_float3(x, y, z);
 }
 
-// ---------------------------------------------------------------------------
-// PDF of cosine-weighted hemisphere sampling
-// cos_theta = dot(N, sampled_dir)
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float cosine_hemisphere_pdf(float cos_theta)
 {
     return fmaxf(cos_theta, 0.0f) * M_1_PI_F;
@@ -51,10 +41,6 @@ DEVICE_FUNC float uniform_hemisphere_pdf()
     return M_1_PI_F * 0.5f; // 1 / (2*pi)
 }
 
-// ---------------------------------------------------------------------------
-// Build an orthonormal basis from a normal vector (Frisvad / Duff et al.)
-// Returns tangent T and bitangent B such that (T, B, N) is right-handed.
-// ---------------------------------------------------------------------------
 DEVICE_FUNC void build_onb(float3 N, THREAD_REF float3& T, THREAD_REF float3& B)
 {
     if (N.z < -0.9999999f)
@@ -69,12 +55,6 @@ DEVICE_FUNC void build_onb(float3 N, THREAD_REF float3& T, THREAD_REF float3& B)
     B = make_float3(b, 1.0f - N.y * N.y * a, -N.y);
 }
 
-// ---------------------------------------------------------------------------
-// Tangent-space <-> World-space transforms
-//
-// local  = tangent-space direction (Z = normal)
-// T, B, N = orthonormal basis vectors in world space
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float3 local_to_world(float3 local, float3 T, float3 B, float3 N)
 {
     return local.x * T + local.y * B + local.z * N;

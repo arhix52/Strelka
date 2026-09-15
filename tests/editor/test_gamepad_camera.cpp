@@ -35,10 +35,6 @@ constexpr float kDt = 1.0f / 60.0f;
 
 TEST_CASE("a pad lying still asks for nothing")
 {
-    // The whole point of the deadzone. A pad that reports its rest drift as
-    // camera motion keeps mUserMovedCamera true forever, which restarts
-    // accumulation every frame -- the image never converges and the cause looks
-    // like the renderer rather than like an idle controller.
     const gp::CameraInput out = gp::mapToCamera(restingDualSense(), gp::Config{}, kDt);
 
     CHECK(out.active == false);
@@ -65,10 +61,6 @@ TEST_CASE("a disconnected pad asks for nothing whatever its axes say")
 
 TEST_CASE("pushing the left stick away from the user flies forward")
 {
-    // Two sign conventions meet here and they are four lines apart in
-    // camera.cpp: GLFW reports stick +Y as down, and Camera::translate's forward
-    // is -z (it applies conjugate(orientation), and getFront() is
-    // conjugate(orientation) * (0,0,-1)). Getting either wrong flies backwards.
     GamepadState pad = restingDualSense();
     pad.leftY = -1.0f; // stick pushed away
 
@@ -91,10 +83,6 @@ TEST_CASE("pushing the left stick right strafes right")
 
 TEST_CASE("the right stick looks in the same direction the mouse does")
 {
-    // CameraController queues mouse look as mPendingLookX += -(oldX - newX), so
-    // moving the mouse right is a positive lookX and moving it down a positive
-    // lookY. A pad that disagreed would invert relative to the mouse for a user
-    // holding both, which is the failure this pins.
     GamepadState pad = restingDualSense();
     pad.rightX = 1.0f;
     CHECK(gp::mapToCamera(pad, gp::Config{}, kDt).lookX > 0.0f);
@@ -349,16 +337,6 @@ TEST_CASE("the D-pad and face buttons stay ImGui's")
     }
 }
 
-// ---------------------------------------------------------------------------
-// Against the real camera.
-//
-// Everything above tests the mapping in isolation, which cannot catch the one
-// thing most likely to be wrong: the sign conventions between the pad, this
-// mapping, and Camera::translate. Those are settled by three separate pieces of
-// code, and the failure mode -- a camera that flies backwards, or climbs when
-// asked to descend -- is invisible in a unit test of any one of them.
-// ---------------------------------------------------------------------------
-
 #include "../../src/editor/CameraController.h"
 
 namespace
@@ -542,10 +520,6 @@ TEST_CASE("stick and mouse compose rather than overwrite")
 
 TEST_CASE("on an orthographic camera the stick zooms instead of dollying")
 {
-    // A parallel projection cannot dolly -- sliding along the view axis leaves
-    // the image identical -- so Camera::update spends the movement keys' forward
-    // axis on zoomOrthographic and the wheel does the same. The stick has to
-    // join them, or pushing forward is a control that silently does nothing.
     oka::CameraController controller = makeController();
     oka::Camera& cam = controller.getCamera();
     cam.projection = oka::Camera::ProjectionType::orthographic;
@@ -615,12 +589,6 @@ TEST_CASE("an orthographic camera still strafes and lifts")
     const glm::float3 moved = cam.position - start;
     CHECK(glm::length(moved) > 0.0f);
     CHECK(glm::dot(glm::normalize(moved), right) > 0.99f);
-    // Strafing is not zooming -- exactly, not approximately. This is what the
-    // per-axis deadzone on CameraInput::zoom buys: the radial one passed the
-    // stick's 0.012 of forward drift into a compounding exponential, and a few
-    // seconds of sideways travel walked the frame extents on their own.
-    // Exact, not Approx: doctest's Approx compares with a strict <, so an
-    // epsilon of zero fails even on an equal pair.
     CHECK(cam.xmag == 2.0f);
     CHECK(cam.ymag == 2.0f);
 }

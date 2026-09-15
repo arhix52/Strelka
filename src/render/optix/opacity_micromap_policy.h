@@ -1,46 +1,10 @@
 #pragma once
 
-// How an opacity micromap is derived from the alpha test it is meant to
-// shortcut, and the two rules that keep it from changing the image.
-//
-// An alpha cutout on this backend costs a shader invocation during traversal:
-// shadow rays enter `__anyhit__occlusion` at every cutout triangle they cross,
-// and radiance rays run the closest hit only to find they went straight
-// through. An opacity micromap lets the traversal hardware answer for the
-// regions that are wholly inside or wholly outside the cutout, and call the
-// shader only where the answer actually varies.
-//
-// That is an acceleration, so the only interesting property is that it does not
-// change what is shaded:
-//
-//   1. A microtriangle is called OPAQUE or TRANSPARENT only when *every* point
-//      of it resolves that way under the same resolveOpacity() the shader runs.
-//      Anything else -- including anything this file cannot bound exactly -- is
-//      UNKNOWN, which is a fall-through to the shader and therefore always safe.
-//
-//   2. The bound is taken over texels, not over sample points. Sampling the
-//      three corners of a microtriangle is what the SDK sample does and it is
-//      not conservative: a cutout edge can cross the interior while missing all
-//      three corners. Here the microtriangle's uv box is turned into the set of
-//      texels a bilinear fetch anywhere inside it could read, and the classifier
-//      is handed the min and max alpha over that set.
-//
-// The tolerance argument is the other half of rule 1. Alpha that reaches the
-// GPU through BC3 comes back through an interpolated palette, and the exact
-// rounding of that palette is not pinned down identically by every
-// implementation. A band around the cutoff, inside which nothing is classified,
-// costs a few microtriangles of shortcut and removes the entire question.
-//
-// The OptiX enumerator values are mirrored rather than included so that this
-// file, and its tests, need no CUDA and no OptiX SDK. OptixRender.cpp
-// static_asserts each mirror against the real enumerator.
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
-
 
 namespace oka::optix_omm
 {
@@ -91,14 +55,6 @@ inline size_t microMapBytes(uint32_t level)
     return (size_t)((states * 2u + 7u) / 8u);
 }
 
-/// The finest subdivision `triangleCount` triangles can be given inside
-/// `byteBudget`, never above `maxLevel`.
-///
-/// A budget rather than a constant because the cost is per triangle and the
-/// benefit is not: level 4 is 64 bytes a triangle, which is nothing on the two
-/// triangles of a cutout card and four gigabytes on a forest floor. Returns
-/// kNoSubdivision when even level 1 does not fit, which the caller reads as
-/// "do not build one".
 constexpr uint32_t kNoSubdivision = 0xFFFFFFFFu;
 
 inline uint32_t chooseSubdivisionLevel(size_t triangleCount, size_t byteBudget, uint32_t maxLevel)
@@ -118,12 +74,6 @@ inline uint32_t chooseSubdivisionLevel(size_t triangleCount, size_t byteBudget, 
     return kNoSubdivision;
 }
 
-/// Write one microtriangle's state into the packed 4-state array.
-///
-/// Two bits each, four per byte, least significant pair first -- the layout
-/// OPTIX_OPACITY_MICROMAP_FORMAT_4_STATE reads. Written through bytes rather
-/// than through the 16-bit words the SDK sample uses so the packing does not
-/// depend on the host's endianness.
 inline void setMicroState(uint8_t* states, uint32_t microIndex, uint32_t state)
 {
     uint8_t& byte = states[microIndex >> 2];
@@ -158,12 +108,6 @@ enum class Coverage
     Mixed, ///< neither, or not provable -- the shader has to answer
 };
 
-/// Classify a region from the range of base-colour texture alpha over it.
-///
-/// `minTexAlpha` / `maxTexAlpha` bound the *texture's* alpha channel over
-/// everything a bilinear fetch in the region could read; pass 1,1 when the
-/// material has no texture. `tolerance` widens the Mixed band on both sides and
-/// is therefore always safe to raise.
 inline Coverage classifyCoverage(const AlphaRule& rule, float minTexAlpha, float maxTexAlpha, float tolerance)
 {
     if (rule.alphaMode == kAlphaOpaque)
@@ -198,10 +142,6 @@ inline Coverage classifyCoverage(const AlphaRule& rule, float minTexAlpha, float
         return Coverage::Mixed;
     }
 
-    // BLEND. BC4 stores 0 and 255 as exact palette endpoints, so an all-endpoint
-    // footprint remains exactly transparent or opaque under bilinear filtering.
-    // The tolerance is only relevant to intermediate palette entries, which
-    // remain unknown here.
     if (lo >= 1.0f)
     {
         return Coverage::Opaque;
@@ -213,13 +153,6 @@ inline Coverage classifyCoverage(const AlphaRule& rule, float minTexAlpha, float
     return Coverage::Mixed;
 }
 
-/// The microtriangle state for a coverage.
-///
-/// Mixed becomes UNKNOWN_OPAQUE rather than UNKNOWN_TRANSPARENT. The two are
-/// identical while the 4-state format is in force -- both call the shader -- and
-/// differ only if an instance ever asks for FORCE_OPACITY_MICROMAP_2_STATE, at
-/// which point opaque is the reading that keeps the closest hit running and so
-/// keeps the stochastic cutout test happening at all.
 inline uint32_t microStateFor(Coverage coverage)
 {
     switch (coverage)
@@ -264,16 +197,6 @@ struct TexelSpan
     }
 };
 
-/// Every texel a bilinear fetch anywhere in [c0, c1] of a normalised coordinate
-/// can read, for an axis of `size` texels.
-///
-/// CUDA's linear filter at normalised u reads the two texels either side of
-/// `u * size - 0.5`, so the run starts one texel below the box and ends one
-/// above it. `pad` is added to the box first, which absorbs the difference
-/// between the host's evaluation of a barycentric interpolation and the
-/// device's -- they are the same expression but not the same instruction
-/// sequence, and a uv that lands exactly on a texel boundary must not depend on
-/// which way the last bit went.
 inline TexelSpan bilinearTexelSpan(float c0, float c1, int size, float pad)
 {
     TexelSpan span;
@@ -328,12 +251,6 @@ inline int wrapTexel(int index, int size)
     return m < 0 ? m + size : m;
 }
 
-/// Decode the eight alpha bytes of a BC4 / BC3 block into sixteen texels.
-///
-/// The GPU reads a block-compressed base colour through this palette, so a
-/// micromap built from the *uncompressed* file would be describing a texture the
-/// renderer does not have. Row-major within the block, matching the layout
-/// oka::bc::compressBlockBC4 writes.
 inline void decodeBc4AlphaBlock(const uint8_t block[8], uint8_t out[16])
 {
     const int a0 = block[0];
@@ -369,13 +286,6 @@ inline void decodeBc4AlphaBlock(const uint8_t block[8], uint8_t out[16])
     }
 }
 
-/// How far a decoded alpha may be from the value the GPU's sampler returns.
-///
-/// Zero for a format the host and the device read the same bytes of. Two
-/// levels for BC4-style alpha, which is an integer palette whose rounding the
-/// specification states as an exact expression but which implementations have
-/// been known to round rather than truncate. It buys back a band of
-/// microtriangles around the cutoff and nothing else.
 constexpr float kExactAlphaTolerance = 0.0f;
 constexpr float kBlockCompressedAlphaTolerance = 2.0f / 255.0f;
 
@@ -388,10 +298,6 @@ struct BuildSummary
     size_t uniformUnknown = 0;
     size_t subdivided = 0; ///< triangles that got a micromap of their own
     uint32_t subdivisionLevel = 0;
-    /// Microtriangles the classifier looked at, and how many of them it could
-    /// answer for. The ratio is the whole of what a micromap is worth:
-    /// all-unknown is an array that costs memory and answers nothing, and the
-    /// log has to be able to say which of the two happened.
     size_t microTriangles = 0;
     size_t microResolved = 0;
 

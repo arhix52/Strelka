@@ -1,15 +1,6 @@
 #ifndef STRELKA_BXDF_CONDUCTOR_H
 #define STRELKA_BXDF_CONDUCTOR_H
 
-// ============================================================================
-// bxdfs/conductor.h -- Metallic (conductor) GGX microfacet reflection BRDF
-//
-// Uses the Cook-Torrance model:
-//   f(wo, wi) = D(H) * G2(wo, wi) * F(wo, H) / (4 * NdotV * NdotL)
-//
-// Sampling is done via VNDF (visible normal distribution function).
-// ============================================================================
-
 #include "../material_math.h"
 #include "../bsdf_types.h"
 #include "../surface_interaction.h"

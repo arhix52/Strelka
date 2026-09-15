@@ -1,19 +1,3 @@
-// Display-transform regression on a real frame.
-//
-// The unit suite exercises the tone curves on synthetic ramps, which is where
-// monotonicity and the headroom ceiling are easiest to pin down. It is not where
-// the interesting failures have been. Scaling both of a curve's axes to the
-// display headroom looked correct on a grey ramp and on the Cornell box, and was
-// wrong by a stop and a half on a frame that actually had content above white --
-// the defect lived in the *distribution* of a scene, not in the curve's algebra.
-//
-// So this renders one, at a resolution and sample count chosen to be quick
-// rather than converged, and asserts the properties the display path promises
-// over every pixel of it.
-//
-// Skips with 77 rather than failing when there is no StrelkaCLI beside it, no
-// scene, or no device to render with: a build host without a GPU should not have
-// a red test.
 
 #define TINYEXR_IMPLEMENTATION
 #define TINYEXR_USE_MINIZ 1
@@ -122,10 +106,6 @@ int main()
     // noise only widens the distribution it has to hold for.
     const std::string command = "\"" + cli.string() + "\" \"" + scene.string() + "\" -o \"" + out.string() +
                                 "\" -w 256 --height 192 --spp 32 --checkpoint-spp 16 > /dev/null 2>&1";
-    // A fixed command line built from compile-time paths, run once from a
-    // single-threaded test binary: neither the injection nor the reentrancy the
-    // two checks exist to catch is reachable here, and rendering a frame is the
-    // point of this test.
     // NOLINTNEXTLINE(bugprone-command-processor,concurrency-mt-unsafe)
     if (std::system(command.c_str()) != 0 || !std::filesystem::exists(out, ec))
     {
@@ -226,10 +206,6 @@ int main()
                 {
                     ++darker;
                 }
-                // The curve's own output is the floor here, not white: Reinhard
-                // divides by luminance, so a saturated channel can land above the
-                // display peak on its own, and pulling that back down would be a
-                // pixel darker than the SDR curve rather than a brighter one.
                 if (hdrPeak > std::max(headroom, sdrPeak) + 1e-4f)
                 {
                     ++overCeiling;

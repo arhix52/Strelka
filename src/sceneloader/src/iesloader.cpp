@@ -45,21 +45,6 @@ std::string upperCased(std::string v)
     return v;
 }
 
-/// One LM-63 file, split at the TILT line.
-///
-/// The header above TILT is free text -- a version line that may or may not be
-/// there, and any number of [KEYWORD] lines -- and everything below it is
-/// numbers. Splitting on TILT is the only reliable way to tell the two apart,
-/// and it is what the format is structured around.
-///
-/// The previous reader instead guessed line by line, taking a line if it began
-/// with a digit, a sign, a dot, "IESNA" or "TILT" -- and then, once it had taken
-/// anything at all, taking every line after it. Three things fell out of that:
-/// a file whose keyword text happened to begin with those four letters
-/// ("[TESTLAB] TILTON Photometrics") had that word mistaken for the TILT
-/// specification; a UTF-8 BOM in front of an otherwise valid TILT line made the
-/// line invisible; and TILT written in lower case, or spaced out as "TILT =
-/// NONE", was not found at all.
 struct IesFileBody
 {
     bool found = false;
@@ -119,18 +104,6 @@ IesFileBody splitIesFile(const std::string& path)
     return body;
 }
 
-/// Unfold a symmetric azimuth table to the full turn, and close it at 360.
-///
-/// LM-63 encodes the symmetry in the last horizontal angle: 0 means the
-/// luminaire is rotationally symmetric and only one column is stored, 90 that
-/// it is symmetric about both vertical planes, 180 about one, and 360 that the
-/// whole turn is tabulated.
-///
-/// Doing this once here, rather than folding the lookup angle back at every
-/// sample, is what lets the cubic interpolation in ies_math.h have real
-/// neighbours at the seams. It is also what Cycles does
-/// (IESFile::process_type_c), so the two agree on the columns as well as on the
-/// curve drawn through them.
 void unfoldAzimuthTable(std::vector<float>& hAngles, std::vector<float>& candela, int nV)
 {
     using Diff = std::vector<float>::difference_type;
@@ -219,13 +192,6 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
     const std::vector<std::string>& tokens = body.tokens;
     size_t i = 0;
 
-    // Three legal specifications: NONE, INCLUDE followed by an embedded block,
-    // or the name of a .TLT file holding that block. The tilt data describes how
-    // the luminaire's output changes as it is rotated, which this renderer does
-    // not model, so all three end the same way -- but INCLUDE has to have its
-    // block stepped over, and a file name must NOT be treated as one. Reading a
-    // named file's photometric header as a tilt block consumed the lamp count as
-    // a pair count and threw the rest of the parse away.
     if (body.tiltSpec == "INCLUDE")
     {
         if (i + 1 >= tokens.size())
@@ -301,12 +267,6 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
         STRELKA_ERROR("IES candela multiplier and ballast must be non-negative in {}", path);
         return false;
     }
-    // Type C is the architectural convention and the one sampleIesCandela()
-    // implements: the vertical angle is measured from the photometric axis and
-    // the azimuth turns around it. Types A and B (2 and 3) tabulate a different
-    // pair of angles entirely -- they are for headlamps and floodlights -- and
-    // reading one as type C silently rotates the distribution. Loading it anyway
-    // is better than refusing the file, but it must not be silent.
     if (photometricType != 1)
     {
         STRELKA_WARNING(
@@ -338,10 +298,6 @@ bool loadIesProfile(const std::string& path, Scene::IesProfile& out)
         }
     }
 
-    // Both tables must ascend: the interval search below is a binary search, and
-    // on a descending table it returns an interval that does not contain the
-    // angle -- so the profile would evaluate to a plausible-looking wrong number
-    // rather than fail.
     for (int v = 1; v < nVertical; ++v)
     {
         if (profile.verticalAngles[(size_t)v] < profile.verticalAngles[(size_t)v - 1])

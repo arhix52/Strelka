@@ -117,10 +117,6 @@ TEST_CASE("worldBounds follows a new instance")
     REQUIRE(scene.worldBounds(lo, hi));
     CHECK(hi.x == doctest::Approx(1.0f));
 
-    // The reduction is cached on the transform generation, and adding an
-    // instance does not move it: an instance that arrives without a transform
-    // edit has to invalidate the cache on the count alone, or the scene extent
-    // keeps describing the scene as it was one object ago.
     scene.createInstance(Instance::Type::eMesh, meshId, matId,
                          glm::translate(glm::mat4(1.0f), glm::float3(9.0f, 0.0f, 0.0f)));
     REQUIRE(scene.worldBounds(lo, hi));

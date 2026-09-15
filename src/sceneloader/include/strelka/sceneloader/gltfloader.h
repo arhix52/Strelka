@@ -17,10 +17,6 @@ private:
 public:
     explicit GltfLoader() = default;
 
-    /// Where to report progress and where to read cancellation from. Optional:
-    /// nothing here reports if it is left unset, which is what the headless path
-    /// wants. The object must outlive the load -- the editor owns one for the
-    /// lifetime of the app for exactly that reason.
     void setProgress(LoadProgress* progress)
     {
         mProgress = progress;

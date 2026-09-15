@@ -2,10 +2,6 @@
 
 #include <OptixRenderParams.h>
 
-// samplerBlueNoiseEnabled() is declared in <random.h> and defined here, where
-// params is in scope. hasBlueNoise is a bound value, so a module compiled
-// without the mask has the sampler's blue-noise path folded away rather than
-// branching over it on every draw.
 extern "C"
 {
     __constant__ Params params;
@@ -25,7 +21,6 @@ static __device__ bool samplerBlueNoiseEnabled()
 #include <env_light.h>
 
 #include "optix_device_utils.h"
-
 
 // Concentric disk mapping (Shirley & Chiu 1997)
 __device__ float2 concentricDiskSample(float u1, float u2)
@@ -127,11 +122,6 @@ __device__ void generateCameraRay(
 
     if (params.projectionType == PROJECTION_ORTHOGRAPHIC)
     {
-        // No centre of projection: every ray runs down the view axis and the pixel
-        // picks where on the film it starts. clipToView is deliberately unused --
-        // for an orthographic frame it is a scale, and going through it would only
-        // re-derive the half-extents that are already here. Same derivation as the
-        // Metal path in shading_common.h, so the two backends frame identically.
         const float3 filmPos =
             make_float3(pixelNDC.x * params.orthoHalfWidth, pixelNDC.y * params.orthoHalfHeight, 0.0f);
         origin = make_float3(viewToWorld * make_float4(filmPos.x, filmPos.y, filmPos.z, 1.0f));
@@ -185,10 +175,6 @@ __device__ float4 accumulate(float4* history,
     return make_float4(accumColor, 1.0f);
 }
 
-/// The guide views, drawn from the record the shading programs wrote.
-///
-/// A denoiser fed a broken guide degrades quietly, so every guide has to be
-/// something you can look at. Same encodings as the Metal resolve pass.
 __device__ float3 visualiseGuide(const AovSample& a, const uint32_t debugMode)
 {
     switch ((DebugMode)debugMode)
@@ -218,23 +204,6 @@ __device__ float3 visualiseGuide(const AovSample& a, const uint32_t debugMode)
         return make_float3(0.0f);
     }
 }
-// The coherence key handed to optixReorder, read off the hit object between
-// traversal and shading.
-//
-// What it sorts on, least significant bit first, because that is the order the
-// sorting unit weights them in:
-//
-//   bit 0    hit / miss. The largest divergence in the loop: a miss runs an
-//            environment lookup and ends the path, a hit runs a BSDF.
-//   bit 1    the hit is an emitter. Light geometry has its own hit group, adds
-//            emission and stops; it shares no code with a surface.
-//   bits 2-4 MaterialType. Diffuse, conductor, dielectric, standard PBR and
-//            hair are five different sets of lobes, and which one a warp is
-//            running is what decides how much of it is idle.
-//
-// Instance or primitive identity is deliberately not in here. It sorts rays
-// that shade identically into different buckets, and the hardware has only a
-// few bits to spend.
 static __forceinline__ __device__ unsigned int reorderCoherenceHint()
 {
     if (!optixHitObjectIsHit())
@@ -265,22 +234,9 @@ extern "C" __global__ void __raygen__rg()
     float3 specular = make_float3(0.0f);
     float4 specularOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
     uint32_t specularSamples = 0;
-    /// Bounces actually traced, summed over this launch's samples, for
-    /// DebugMode::eSharcBounces. A raygen local rather than a PerRayData field
-    /// because that struct sizes the continuation stack byte for byte
-    /// (docs/open-perf.md), and this is wanted by one debug view.
-    ///
-    /// It cannot be read back from prd.depth: a cache hit sets that to
-    /// max_depth to stop the loop, which is exactly the case the view exists to
-    /// show, and it would show it as the deepest possible path.
     uint32_t bounceSum = 0;
     const uint32_t linearPixelIndex = launch_index.y * params.image_width + launch_index.x;
 
-    // DebugMode::eSharcRadiance is written by the closest hit, at the primary
-    // surface, while the rest of the path carries on filling the cache it reads
-    // -- see there. Nothing else writes this pixel, so it is cleared here: a
-    // camera ray that reaches no surface at all must leave black rather than
-    // whatever the last frame put there.
     if (params.debug == (uint32_t)DebugMode::eSharcRadiance)
     {
         params.image[linearPixelIndex] = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -294,11 +250,6 @@ extern "C" __global__ void __raygen__rg()
         prd.setFirstEventType(EventType::eUndef);
         const uint32_t sampleIndex = params.subframe_index + sampleIdx;
 
-        // Launch coordinates as they are. The Morton code only decides which block
-        // of the sequence this pixel draws from, so a flipped y was never wrong
-        // here -- but it passed `height` for row 0, and having one expression for
-        // "this pixel" is what keeps the film flip in generateCameraRay, where it
-        // has to take the jitter with it.
         prd.sampler = initSampler(launch_index.x, launch_index.y, linearPixelIndex, sampleIndex, params.maxSampleCount,
                                     params.mortonLevels, params.blueNoiseSwitch);
 
@@ -316,10 +267,6 @@ extern "C" __global__ void __raygen__rg()
         // different jitter and pay the memory traffic for nothing.
         prd.writeAov = params.writeAov && sampleIdx == 0;
         prd.aovDone = false;
-        // Not zero: zero is a valid slot, so a record left zeroed would have
-        // every path claiming to have visited entry 0. Written to the per-pixel
-        // side buffer rather than into the payload -- see SharcPathState -- and
-        // only when the cache exists, which is a compile-time constant.
         if (params.sharcCapacity != 0u)
         {
             params.sharcPath[linearPixelIndex].index = SHARC_NO_ENTRY;
@@ -336,10 +283,6 @@ extern "C" __global__ void __raygen__rg()
 
         if (prd.writeAov && params.aov != nullptr)
         {
-            // Start from a complete record, so that a path which never reaches a
-            // surface it can describe leaves defined values in every field
-            // rather than last frame's. The shading and miss programs overwrite
-            // whichever parts they can speak for.
             AovSample a;
             a.diffuseAlbedo = make_float3(0.0f);
             a.specularAlbedo = make_float3(0.0f);
@@ -362,17 +305,6 @@ extern "C" __global__ void __raygen__rg()
         float time = params.enableMotionBlur ? random<SampleDimension::eTime>(prd.sampler) : 0.0f;
         if (params.enableMotionBlur && !params.isMotionBlurVisible) time = 1.0f;
 
-        // Segments, not bounces. A cutout the path slips through, a medium
-        // boundary it crosses and a step of a subsurface walk each take a
-        // traversal and deliberately spend no depth, so `max_depth` alone does
-        // not bound this loop.
-        //
-        // The budget is Metal's, arrived at from the other side: the wavefront
-        // encodes `maxDepth + PATH_PASSTHROUGH_MAX + subsurfaceIterations`
-        // dispatch iterations and drops whatever paths are still alive when they
-        // run out. A per-path cap of the same size drops exactly the same paths,
-        // and it is the difference between a dim pixel and a GPU hang if a walk
-        // ever fails to terminate.
         const uint32_t maxSegments =
             params.max_depth + PATH_PASSTHROUGH_MAX + min(params.subsurfaceIterations, MEDIUM_MAX_STEPS);
         uint32_t segments = 0;
@@ -382,24 +314,10 @@ extern "C" __global__ void __raygen__rg()
         while (prd.depth < params.max_depth && segments < maxSegments)
         {
             ++segments;
-            // Traversal and shading are split so that the warp can be sorted
-            // between them. optixTraverse leaves a hit object behind without
-            // running a program; optixReorder regroups the threads by what that
-            // hit object says they are about to shade; optixInvoke then runs the
-            // closest-hit or miss program on a warp whose threads mostly agree.
-            //
-            // Together they are exactly equivalent to the optixTrace this
-            // replaces -- same payloads, same programs, same results. The payload
-            // pair is a packed pointer to PerRayData in local memory, so nothing
-            // rides in the registers that the split could drop.
             optixTraverse(params.handle, ray_origin, ray_direction,
                           params.materialRayTmin, // Min intersection distance
                           1e16f, // Max intersection distance
                           time, // rayTime -- used for motion blur
-                          // Camera rays see what the camera should see; every
-                          // bounce after also sees the emitters marked hidden, so
-                          // a light authored out of frame still balances the MIS
-                          // estimate it is deducted for.
                           OptixVisibilityMask(prd.depth == 0 ? RAY_MASK_PRIMARY : RAY_MASK_SECONDARY),
                           OPTIX_RAY_FLAG_NONE,
                           RAY_TYPE_RADIANCE, // SBT offset   -- See SBT discussion
@@ -415,13 +333,6 @@ extern "C" __global__ void __raygen__rg()
             ray_origin = prd.origin;
             ray_direction = prd.dir;
 
-            // A cutout the path slipped through is coverage, not scattering: the
-            // segment carries on in the same direction with the same throughput.
-            // It deliberately does not spend a bounce -- a hedge of alpha-tested
-            // leaves would otherwise exhaust max_depth before any light
-            // transport happened -- and is bounded instead by
-            // PATH_PASSTHROUGH_MAX, which radiance any-hit enforces for triangles
-            // and closest hit enforces for curves and medium boundaries.
             if (prd.passedThrough)
             {
                 prd.passedThrough = false;
@@ -458,34 +369,16 @@ extern "C" __global__ void __raygen__rg()
             samplerAdvanceDepth(prd.sampler);
         }
 
-        // The path is over, so what it gathered after the cache visit is known.
-        // Divided by the throughput it carried there, that is the outgoing
-        // radiance of the visited point -- which is what the cache stores.
-        //
-        // Here rather than at each of the half-dozen places a path can end,
-        // which is the same reason Metal spends a whole dispatch on it: the
-        // alternative is six scattered edits that would each have to stay
-        // correct.
         if (params.sharcCapacity != 0u)
         {
             const SharcPathState visit = params.sharcPath[linearPixelIndex];
             if (visit.index != SHARC_NO_ENTRY)
             {
                 const float3 gathered = (prd.radiance - visit.radianceAtVisit) * visit.invThroughput;
-                // A negative component means the difference is not what it
-                // claims -- a clamp or a NaN guard fired between the visit and
-                // here -- and a negative deposit would wrap the unsigned
-                // accumulator.
                 if (gathered.x >= 0.0f && gathered.y >= 0.0f && gathered.z >= 0.0f)
                 {
                     if (params.sharcResponsive != 0u && visit.responsiveIndex != SHARC_NO_ENTRY)
                     {
-                        // Split, additively: what came from lights on the fast
-                        // clock goes to the short-window entry, the remainder to
-                        // the long-window one, and a reader adds them back.
-                        // Both are written even when one of them is zero -- see
-                        // the note at the visit for why that is required and not
-                        // merely tidy.
                         const float3 responsive = visit.responsiveRadiance * visit.invThroughput;
                         const float3 steady = make_float3(fmaxf(gathered.x - responsive.x, 0.0f),
                                                           fmaxf(gathered.y - responsive.y, 0.0f),
@@ -521,12 +414,6 @@ extern "C" __global__ void __raygen__rg()
 
     result /= static_cast<float>(params.samples_per_launch);
 
-    // The diffuse/specular split of the first event. Four scattered records per
-    // pixel per launch, and nothing on the host reads them back -- so they are
-    // written only when asked for, and the buffers do not exist otherwise. The
-    // split no longer owns debug slots 2 and 3 either; those are
-    // DebugMode::eMotionBlur and the first guide view, which is what the editor's
-    // menu and the headless `render.debug` key have always meant by them.
     if (params.writeSplitAov)
     {
         if (diffuseSamples > 0)
@@ -586,15 +473,6 @@ extern "C" __global__ void __raygen__rg()
     // where the surface is.
     if (params.debug == (uint32_t)DebugMode::eSharcBounces)
     {
-        // The SDK's efficiency view: how deep paths actually went. Comparing it
-        // with the cache off and on is the direct measurement of what the cache
-        // buys, and it is the one that says *where* -- a scene whose heatmap
-        // does not cool when the cache is switched on is not being cached,
-        // whatever the frame time says.
-        //
-        // Blue, green, yellow, red at zero, one, two, three or more bounces,
-        // matching the SDK's green-is-one, red-is-two-or-more reading with two
-        // more steps of resolution.
         const float mean = (float)bounceSum / (float)params.samples_per_launch;
         const float t = fminf(mean, 3.0f);
         float3 heat;
@@ -644,19 +522,6 @@ extern "C" __global__ void __raygen__rg()
     }
 }
 
-// __miss__ms lives in OptixRender_closest_hit.cu.
-//
-// Not for tidiness: a ray that reaches the environment has still travelled a
-// segment, and with an atmosphere that segment can scatter before the sky is
-// ever seen. Handling that needs next-event estimation, and connectToLight and
-// its shadow ray are defined in that translation unit -- OptiX modules do not
-// share device functions, so the program has to be where the light machinery is.
-// createProgramGroups() points the miss group at `closest_hit_module`.
-
-// Reached only for a hit the any-hit program accepted, which is an opaque one:
-// nothing gets through, so the surviving fraction of the light is zero. The
-// payload carries that fraction as a float, not a boolean, because a shadow ray
-// can now cross several cutout surfaces and arrive dimmed rather than blocked.
 extern "C" __global__ void __closesthit__occlusion()
 {
     optixSetPayload_0(__float_as_uint(0.0f));

@@ -10,10 +10,6 @@
 
 using namespace metal;
 
-// Production Metal environment mapping. The random dimensions are generated on
-// a 23-bit [0, 1) lattice, so adding half a lattice step already places them in
-// the open interval. Do not pay for the cross-backend audit path's boundary
-// retries or pole reconstruction here.
 static inline float envOpenRandom(float xi)
 {
     return xi + 0x1p-24f;
@@ -56,12 +52,6 @@ static inline uint32_t metalEnvAliasTexel(device const uint2* aliasTable,
     return discreteAliasSelect(texelCount, bucket, coinWord, entry.x, entry.y);
 }
 
-// Sample the environment map with an alias table (Walker/Vose).
-//
-// The alias table avoids the serial dependent loads of a two-dimensional CDF search.
-//
-// The two full-width words select the alias bucket and branch. The two floats
-// independently jitter within the selected texel.
 static inline float3 sampleEnvMap(const uint2 aliasWords,
                                   const float2 jitter,
                                   device const uint2* aliasTable,

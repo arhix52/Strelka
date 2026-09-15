@@ -11,7 +11,6 @@
 #include <utility>
 #include <vector>
 
-
 namespace oka::metal
 {
 
@@ -49,10 +48,6 @@ public:
     // Does not upload lights or frame uniforms (those are other domains).
     void buildBuffers(Scene* scene);
 
-    // Build only the per-primitive records that at least one BLAS descriptor
-    // will consume. Metal copies these records into the AS during its build;
-    // keeping a scene-wide sparse source buffer wastes hundreds of megabytes on
-    // meshes whose materials still require the regular vertex path.
     void buildPrimitiveData(const Scene* scene, std::span<const uint8_t> enabledMeshes);
     static constexpr size_t kNoPrimitiveDataOffset = std::numeric_limits<size_t>::max();
     size_t primitiveDataOffset(size_t meshIndex, uint32_t firstTriangle = 0u) const;

@@ -35,10 +35,6 @@ void holdBack(Camera& cam, float seconds)
 
 } // namespace
 
-// The bug this pins: W and S on an orthographic camera translated it along the
-// view direction, which is the one direction a parallel projection cannot see. The
-// camera moved, the pose changed, nothing about the image did, and it read as dead
-// input rather than as a projection doing what a projection does.
 TEST_CASE("Forward and back zoom an orthographic camera instead of moving it")
 {
     Camera cam = orthoCamera();
@@ -81,10 +77,6 @@ TEST_CASE("Forward still moves a perspective camera")
     CHECK(cam.xmag == startMag);
 }
 
-// A field changing is not the same as the frame changing. What an orthographic
-// camera sees is the film rectangle, which reaches both the shader (as
-// orthoHalfWidth/Height) and picking through updateAspectRatio -- so the zoom is
-// only real if it comes out the other end of that.
 TEST_CASE("Orthographic zoom changes the film extents rays are built from")
 {
     Camera cam = orthoCamera();

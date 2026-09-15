@@ -83,13 +83,6 @@ inline uint32_t aliasThreshold(double probability)
     return static_cast<uint32_t>(std::clamp<uint64_t>(rounded, 1u, uint64_t{ 0xffffffffu }));
 }
 
-// The area an infinite light throws its irradiance across: the projected disc of
-// a sphere drawn around the scene. An environment map, a distant light and a
-// dome all carry an irradiance rather than a power -- there is no emitter area
-// to integrate -- so this is what makes them comparable with a rect or a point,
-// whose proxies are already fluxes. A scene with no usable bounds keeps the bare
-// irradiance, which still compares like for like because every infinite light
-// then loses the same factor.
 inline double infiniteLightCrossSection(double sceneExtent)
 {
     constexpr double pi = std::numbers::pi_v<double>;
@@ -145,13 +138,6 @@ inline EmitterSelectionProbabilities emitterSelectionProbabilities(
     return result;
 }
 
-// Scene-wide emitted-power proxy. It need not know the shading point: RIS still
-// makes the point-dependent choice. This proposal only stops spending equal
-// probability on lights whose total output differs by orders of magnitude.
-//
-// `sceneExtent` is the world bounds' diagonal, and only the infinite types read
-// it -- see infiniteLightCrossSection(). Passing nothing leaves those types with
-// the bare irradiance, which is what a caller with no scene to bound means.
 inline double analyticLightPower(const Scene::Light& light, double sceneExtent = 0.0)
 {
     const double luminance =
@@ -260,11 +246,6 @@ inline double analyticLightPower(const Scene::Light& light, double sceneExtent =
         {
             measure = distantLightUsesDeltaMeasure(light.halfAngle) ? 1.0 : distantLightSolidAngle(light.halfAngle);
         }
-        // Both infinite types have an irradiance here, not a flux: without the
-        // scene's cross-section a sun sat ~1e5 below an environment map of the
-        // same brightness, the proposal never picked it, and the few draws that
-        // did arrived divided by 2^-22 -- sun-coloured fireflies on a darker
-        // image.
         measure *= infiniteLightCrossSection(sceneExtent);
         break;
     case LIGHT_TYPE_DOME:
@@ -317,14 +298,6 @@ inline LightSelectionTable buildLightSelectionAlias(const std::vector<double>& p
                            powerScale * scaledTotal;
 
     const size_t count = powers.size();
-    // A positive input must remain a positive float PMF even after division by
-    // N in the alias representation. This floor is many orders below any
-    // meaningful scene-light probability, changes only the proposal, and the
-    // represented (post-rounding) PMF below is what the estimator actually uses.
-    // The shipped samplers expose at least 23 useful fractional bits. Keep a
-    // non-empty alias branch wider than one such step so strict `u < q` can
-    // actually take it, rather than preserving a merely symbolic float mass
-    // that no generated variate can reach.
     constexpr double minimumAliasProbability = 0x1p-22;
     const double minimumProbability =
         std::max(static_cast<double>(std::numeric_limits<float>::min()) * static_cast<double>(count),

@@ -11,23 +11,6 @@
 
 #include <cmath>
 
-// ---------------------------------------------------------------------------
-// A ray leaving a dielectric.
-//
-// This is the case that makes glass glass, and it is easy to lose: the ray is
-// *inside* the medium and hits the far wall from behind, so the shading normal
-// points away from it and dot(N, wo) is negative. Treating that as a degenerate
-// hit and absorbing the path means light can enter a closed transmissive volume
-// and never leave it -- the object renders as a dark shell of Fresnel highlights
-// with no refraction at all, and, more insidiously, any volume absorption
-// applied along the interior segment becomes invisible, because the throughput
-// it scales is discarded one step later.
-//
-// The transmission lobe already knows how to handle this: it flips the normal
-// into Nf and picks eta by direction. The only thing that has to hold is that
-// the lobe is actually reached.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 
@@ -143,21 +126,6 @@ TEST_CASE("total internal reflection still reflects rather than absorbing")
 
 TEST_CASE("an opaque material takes a back face as its own underside, not as an exit")
 {
-    // This case used to assert the opposite -- that an opaque back hit absorbs --
-    // and it was written to stop the dielectric loosening above from leaking
-    // into every material. The scoping is still the point; the expectation is
-    // not, and it was inverted deliberately rather than worked around.
-    //
-    // A back-face hit on an opaque material is not a ray on its way out of
-    // anything: nothing culls back faces here, so it is a leaf card seen from
-    // underneath, an inverted winding, or a normal map tipped past the viewer.
-    // Absorbing it cost 13.2% of a pine forest frame, and cost it as exactly
-    // black pixels rather than dark ones, because the closest-hit program
-    // terminated on absorb before next-event estimation could run.
-    //
-    // What must still hold is the distinction this file exists for: the same
-    // negative dot(N, wo) means "flip me" here and "refract me" for glass. The
-    // opaque side of that is owned by tests/material/test_opaque_back_face.cpp.
     SurfaceInteraction si = exiting_si(0.3f);
     si.transmission = 0.0f;
 
@@ -203,11 +171,6 @@ TEST_CASE("eval accepts a sampled entering rough transmission")
 
 TEST_CASE("a fully transmissive material has no separate specular lobe")
 {
-    // The transmission lobe does its own Fresnel reflection. A specular lobe
-    // alongside it makes the reflected direction reachable two ways, and since
-    // neither strategy's pdf accounts for the other, the two together
-    // over-estimate. Diffuse has always been scaled by (1 - transmission);
-    // specular has to be as well.
     SurfaceInteraction si = exiting_si(0.35f);
     si.wo = safe_normalize(make_float3(0.25f, 1.0f, 0.0f));
     si.front_face = true;

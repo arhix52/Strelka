@@ -40,10 +40,6 @@ __global__ void sharcResolveKernel(SharcEntry* entries, SharcResolveParams param
 
     if (output.evict)
     {
-        // Order matters. The key is what a path probes on, so it is cleared
-        // last: a slot whose key is already gone but whose payload still holds
-        // the old voxel's radiance would be inserted into by another voxel and
-        // answer with the evicted one's numbers.
         entry.accum[0] = 0u;
         entry.accum[1] = 0u;
         entry.accum[2] = 0u;
@@ -56,23 +52,6 @@ __global__ void sharcResolveKernel(SharcEntry* entries, SharcResolveParams param
         return;
     }
 
-    // Reprojection across grid levels.
-    //
-    // The level under a point follows its distance to the eye, so moving the eye
-    // re-quantises a world that has not moved: the point lands in a different
-    // voxel, its new entry starts from nothing, and everything the cache learned
-    // about it sits one level away waiting to be evicted unread. This finds that
-    // entry and blends it in, which is the difference between a camera movement
-    // costing the cache a few frames and costing it everything it knew.
-    //
-    // Only for an entry young enough that the camera's movement is the likely
-    // reason it is young -- kReprojectFrameNumMax, the SDK's rule.
-    //
-    // The adjacent entry's resolved half is read while another thread may be
-    // writing it, and that race is deliberate and the SDK's: taking a lock, or a
-    // second pass, to make a two-frame-old blend exact would cost more than the
-    // blend is worth. The worst outcome is one voxel blended against a value one
-    // frame out of date.
     if (params.reproject)
     {
         uint32_t accumFrames = 0u;
@@ -103,17 +82,6 @@ __global__ void sharcResolveKernel(SharcEntry* entries, SharcResolveParams param
     entry.resolvedHi = output.resolvedHi;
     entry.frameData = output.frameData;
 
-    // Clear this frame's accumulator now that it has been folded in. The next
-    // launch's atomics start from zero, which is what makes `accum` mean "this
-    // frame" rather than "since the last clear".
-    //
-    // The SDK cannot do this when responsive lighting is on -- its responsive
-    // entries read the *main* entry's accumulation during resolve, and one
-    // thread per entry gives no ordering between the two -- so it makes the host
-    // clear the buffer before every update instead. That does not apply here:
-    // the split is made on the path, both entries are deposited into together
-    // and by the same paths, so a responsive entry's own sample count is already
-    // the right one and it never has to look at its neighbour's.
     entry.accum[0] = 0u;
     entry.accum[1] = 0u;
     entry.accum[2] = 0u;
@@ -127,10 +95,6 @@ __global__ void sharcCountOccupancyKernel(const SharcEntry* entries, uint32_t ca
     {
         return;
     }
-    // One atomic per occupied slot rather than a reduction: this runs for a
-    // debug readout, not in the frame's critical path, and a warp-level scan
-    // here would be code to maintain for a number nobody reads unless a panel
-    // is open.
     if (entries[index].key != 0ull)
     {
         atomicAdd(counter, 1u);

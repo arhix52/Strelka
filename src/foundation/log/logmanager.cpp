@@ -18,9 +18,6 @@ std::vector<std::filesystem::path> logFileCandidates()
     std::vector<std::filesystem::path> candidates;
     candidates.emplace_back("strelka.log");
 
-    // $XDG_STATE_HOME, or the default the spec gives for it. State is the right
-    // category for a log: not configuration, not a cache, and not something the
-    // user opens.
     // NOLINTNEXTLINE(concurrency-mt-unsafe)
     if (const char* stateHome = std::getenv("XDG_STATE_HOME"); stateHome != nullptr && *stateHome != '\0')
     {
@@ -55,21 +52,6 @@ void oka::Logmanager::initialize()
         auto consolesink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         std::vector<spdlog::sink_ptr> sinks = { consolesink };
 
-        // The working directory first, because that is where every harness and
-        // every note in the docs looks for strelka.log, and where a developer
-        // running from build/Release expects it.
-        //
-        // It is not always writable. Launched from a desktop entry the working
-        // directory is whatever the session manager had -- "/" here -- and the
-        // constructor below throws. That threw out of Logmanager's constructor,
-        // out of main, and terminated: the editor could not be started from its
-        // own menu entry at all, with "Failed opening file strelka.log for
-        // writing: Permission denied" on a console nobody sees.
-        //
-        // So: the working directory if it takes the file, the XDG state
-        // directory if it does not, and the console alone if neither does. A log
-        // file is a convenience; refusing to start is not a proportionate answer
-        // to not having one.
         for (const std::filesystem::path& candidate : logFileCandidates())
         {
             try

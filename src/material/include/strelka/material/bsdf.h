@@ -1,33 +1,6 @@
 #ifndef STRELKA_BSDF_H
 #define STRELKA_BSDF_H
 
-// ============================================================================
-// bsdf.h -- Top-level BSDF dispatch
-//
-// Provides four entry points for the path tracer:
-//   bsdf_init()   -- Resolve textures into SurfaceInteraction fields
-//   bsdf_sample() -- Importance-sample an incoming direction
-//   bsdf_eval()   -- Evaluate f(wo, wi) and the sampling PDF
-//   bsdf_pdf()    -- Return only the PDF for a given direction pair
-//
-// The material_type field in SurfaceInteraction selects the appropriate BxDF.
-//
-// MATERIAL_TYPE_OPENPBR is deliberately absent from every switch below, and
-// lands on the standard_pbr `default:` arm. Two reasons, both intentional:
-//
-//   - OpenPBR's parameters are not in SurfaceInteraction. They are a separate
-//     OpenPBRParams block, and its evaluator wants a prepared state built once
-//     per hit rather than rebuilt inside sample, eval and pdf separately. So the
-//     shading kernels call openpbr/openpbr_bridge.h directly, and this header
-//     stays unaware of it -- which also keeps openpbr.h's ~264 KB of lookup
-//     tables out of every translation unit that only wants a Lambert lobe.
-//
-//   - Falling through to standard_pbr is the wanted behaviour when the OpenPBR
-//     path is compiled out (see the feature bit in
-//     src/render/metal/integrator_features.h): the material shades as a plain
-//     PBR surface instead of going black or NaN.
-// ============================================================================
-
 #include "material_math.h"
 #include "bsdf_types.h"
 #include "material_params.h"
@@ -43,17 +16,6 @@
 #include "bxdfs/dielectric.h"
 #include "bxdfs/standard_pbr.h"
 #include "bxdfs/hair_chiang.h"
-
-// ---------------------------------------------------------------------------
-// bsdf_init -- Resolve material parameters and textures into the
-//              SurfaceInteraction.  Call this once per hit before sampling
-//              or evaluation.
-//
-// CUDA overload: textures is a cudaTextureObject_t* array
-// CPU overload:  textures can be nullptr (stubs return white)
-// Metal: caller resolves textures before calling; this function still clamps
-//        and prepares derived values.
-// ---------------------------------------------------------------------------
 
 #if defined(__CUDA_ARCH__)
 DEVICE_FUNC void bsdf_init(SurfaceInteraction& si, const MaterialParams& params, const cudaTextureObject_t* textures)
@@ -198,20 +160,6 @@ DEVICE_FUNC void bsdf_init(SurfaceInteraction& si, const MaterialParams& params,
 }
 #endif
 
-// ---------------------------------------------------------------------------
-// bsdf_sample -- Importance-sample the BSDF
-//
-// xi = float4 of uniform random numbers:
-//   xi.x, xi.y  -- microfacet / hemisphere sampling
-//   xi.z         -- lobe selection  (standard_pbr)
-//   xi.w         -- Fresnel coin-flip (dielectric, transmission)
-// ---------------------------------------------------------------------------
-// The `prep` overloads take the per-vertex preparation of the glTF lobe stack
-// (pbr_prepare, standard_pbr.h) so that a vertex builds it once and spends it on
-// bsdf_has_smooth_lobe, bsdf_eval and bsdf_sample. Every other material model
-// ignores it -- their state is small enough that there is nothing to cache --
-// and the overloads without it prepare on the spot, which is what a caller that
-// does one thing per vertex should keep doing.
 DEVICE_FUNC BsdfSampleResult bsdf_sample(const THREAD_REF SurfaceInteraction& si,
                                          float4 xi,
                                          unsigned int lobeWord,
@@ -280,26 +228,6 @@ DEVICE_FUNC BsdfEvalResult bsdf_eval(const THREAD_REF SurfaceInteraction& si, fl
     return bsdf_eval(si, wi, pbr_prepare_for(si));
 }
 
-// ---------------------------------------------------------------------------
-// bsdf_has_smooth_lobe -- is there anything here for a light connection to reach?
-//
-// True when the material carries at least one lobe with a density with respect
-// to solid angle, so that bsdf_eval() can return a non-zero pdf and next-event
-// estimation has a second strategy to be weighed against.
-//
-// The integrators call this to decide whether to run next-event estimation at a
-// vertex. They used to ask the *sample* instead -- "did this draw come back
-// non-delta" -- which makes the decision depend on a coin flip the light
-// connection has nothing to do with, and loses the smooth lobe's direct light in
-// proportion to how often the delta lobe wins the draw. See neeRunsAtVertex() in
-// shaders/common/nee_pairing.h for the measurements.
-//
-// Erring towards true is free and erring towards false is not: an unnecessary
-// connection is evaluated, finds bsdf_eval().pdf == 0 and is discarded, whereas
-// a missing one is light that is never delivered. The transmission lobe is
-// therefore admitted when either its own alpha or the thin-walled one is above
-// the delta threshold.
-// ---------------------------------------------------------------------------
 DEVICE_FUNC bool bsdf_has_smooth_lobe(const THREAD_REF SurfaceInteraction& si, const THREAD_REF PbrPrepared& prep)
 {
     const float alpha = alpha_from_roughness(si.roughness);

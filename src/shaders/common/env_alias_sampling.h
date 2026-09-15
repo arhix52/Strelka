@@ -1,21 +1,4 @@
 #pragma once
-// Alias-table draw for environment importance sampling.
-//
-// One copy, compiled three times: as a __device__ function into the OptiX
-// modules, as an inline function into the Metal kernels, and as a plain inline
-// function into the host, where tests/render/test_env_alias_sampling.cpp
-// exercises it without a GPU.
-//
-// Metal used to carry its own transcription of these thirty lines inside
-// env_light_metal.h. It was not identical -- it lacked the NaN and
-// negative-variate guards below -- which is the ordinary way two copies of a
-// sampler drift: not by someone rewriting one, but by a fix landing on the
-// other. The file moved from src/render/optix/ to src/shaders/common/ so that
-// the Metal compiler can reach it at all.
-//
-// Deliberately free of CUDA and Metal headers, and of any math beyond compare
-// and divide, so that "the test passes" says something about the code the GPU
-// actually runs.
 
 #ifndef __METAL_VERSION__
 #    include <stdint.h>
@@ -39,11 +22,6 @@
 #    define STRELKA_ENV_SAMPLING_FN inline
 #endif
 
-/// One bucket of a Walker/Vose alias table over the environment map's texels.
-///
-/// Layout must stay identical to oka::metal::EnvAliasEntry in
-/// src/render/host/ibl_alias_table.h, which provides both backends' tables;
-/// OptixRender.cpp static_asserts that the uploaded layout agrees with this one.
 struct EnvAliasEntry
 {
     uint32_t threshold;

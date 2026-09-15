@@ -382,11 +382,6 @@ TEST_CASE("analytic light power accounts for emitting measure")
 
 TEST_CASE("an infinite light is weighed over the scene it lights")
 {
-    // A sun and an environment map of the same integrated radiance, over a
-    // forest-sized scene. Both are irradiances, so the split has to come out
-    // even: with the sun's proxy left unscaled it was ~1e5 below the map's, the
-    // proposal stopped picking it, and the draws that did arrive carried the
-    // whole sun divided by a 2^-22 probability.
     constexpr double extent = 314.0;
     constexpr double radiance = 4.0;
 

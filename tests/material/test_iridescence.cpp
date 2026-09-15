@@ -1,25 +1,3 @@
-// ============================================================================
-// test_iridescence.cpp
-//
-// KHR_materials_iridescence: a film thinner than a wavelength over the specular
-// lobe. Light reflects off both of its faces, the two paths interfere, and which
-// wavelengths survive depends on the film's optical thickness -- so a soap
-// bubble is coloured without anything about it being coloured, and the colour
-// turns as you move around it.
-//
-// That last part is the whole test. A thin film is easy to fake with a fixed
-// tint, and a fixed tint passes every check except the one that matters: the hue
-// has to depend on the angle and on the thickness, because the quantity that
-// sets it is the optical path difference and nothing else.
-//
-// Pinned here:
-//   1. factor 0 leaves the material bit-identical to before the film existed
-//   2. a grey F0 under a film reflects a colour -- the film, not the base, is
-//      what is being seen
-//   3. the hue turns with the viewing angle, and with the thickness
-//   4. the reflectance stays a reflectance: within [0, 1] at every angle
-//   5. sample and eval agree
-// ============================================================================
 
 #include <doctest/doctest.h>
 

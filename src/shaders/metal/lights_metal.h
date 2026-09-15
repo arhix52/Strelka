@@ -38,10 +38,6 @@ struct PackedAnalyticHit
     bool hit;
 };
 
-// Hot intersection for a rectangle that MetalLights::upload has validated and
-// packed. All shape-only work is on the CPU: normal.xyz is the unit plane
-// normal and points[2].xyz is the inverse edge Gram matrix. Ordered range
-// comparisons reject NaN/Inf ray results without separate finite checks.
 static __inline__ PackedAnalyticHit intersectPackedRectangle(
     device const UniformLight& light, float3 rayOrigin, float3 rayDirection, float minDistance, float maxDistance)
 {
@@ -158,11 +154,6 @@ static void fillLightData(device const UniformLight& l,
     lightSampleData.normal = calcLightNormal(l, lightSampleData.pointOnLight);
 }
 
-// Rectangles are validated and packed on the host: pad0 is their reciprocal
-// area and normal.xyz is their unit emission normal. Do not route the
-// all-rectangle function-constant variant back through fillLightData(), whose
-// dynamic l.type switch keeps the sphere/ellipsoid solver and its robust
-// exponent-scaling machinery alive in the hottest NEE shader.
 static __inline__ void fillRectLightData(device const UniformLight& l,
                                          thread const float3 hitPoint,
                                          thread LightSampleData& lightSampleData)
@@ -315,12 +306,6 @@ static __inline__ LightSampleData SampleSphereLight(device const UniformLight& l
     return lightSampleData;
 }
 
-/// An infinitely distant, uniform-radiance dome.
-///
-/// Uniform over the whole sphere rather than the upper hemisphere: a dome is the
-/// analytic form of an environment, and an environment lights a surface from
-/// below as well as above once anything reflects. `color` is radiance, so there
-/// is no distance falloff and no area.
 static __inline__ LightSampleData SampleDomeLight(device const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
@@ -337,11 +322,6 @@ static __inline__ LightSampleData SampleDomeLight(device const UniformLight& l, 
     return lightSampleData;
 }
 
-
-// Point and spot lights store radiant intensity in colour. connectLight turns
-// that into what the surface receives, differently for the two cases -- see the
-// note there. A soft radius falls back to sphere sampling so the light has a
-// visible size and a penumbra.
 static __inline__ LightSampleData SamplePointLight(device const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     const float radius = l.points[0].x;
@@ -385,18 +365,6 @@ static __inline__ float spotAttenuation(device const UniformLight& l, const floa
     return saturate((cosTheta - cosOuter) / (cosInner - cosOuter));
 }
 
-
-/// Where a direction leaving a projector lands on the image it throws.
-///
-/// The light's own frame is rebuilt from points[2..3] and normal, exactly as
-/// sampleIesCandela does below -- a projector is the same lamp with a different
-/// angular profile, and it inherits that packing rather than a second one.
-/// halfAngle is half the horizontal field of view, points[0].w the frame's
-/// aspect, pad0 the edge feather.
-///
-/// The fetch is the caller's: on this backend the image handle rides in the
-/// light struct itself (see ShaderTypes.h), because the shade kernel has no
-/// binding slot left for a table -- all 31 are spoken for.
 static __inline__ ProjectorSample projectorSampleForLight(device const UniformLight& l, const float3 dirFromLight)
 {
     const OrthonormalLightFrame frame =
@@ -411,21 +379,6 @@ static __inline__ ProjectorSample projectorSampleForLight(device const UniformLi
     return projectorProject(dot(d, frame.x), dot(d, frame.y), dot(d, frame.emissionAxis), tanX, tanY, l.pad0);
 }
 
-/// What a projector emits in a direction, as a multiplier on its intensity.
-///
-/// The image, faded at the frame's edge, and black outside the frame -- so the
-/// caller can multiply unconditionally the way it does with an IES table. A
-/// projector with no image throws a plain white rectangle, which is a usable
-/// light in its own right and is what an unresolved path degrades to rather than
-/// darkness.
-///
-/// Level 0, deliberately. A compute kernel has no derivatives, and the footprint
-/// that would set the level here is the *camera's* on the receiving surface, not
-/// anything this function can see -- the same reason the material fetches take
-/// an explicitly computed level. Sampling the top level makes a projector as
-/// sharp as its image and leaves minification aliasing to be resolved by the
-/// pixel samples, which converge on the right answer because they are jittered
-/// across the pixel.
 static __inline__ float3 projectorEmission(device const UniformLight& l, const float3 dirFromLight)
 {
     const ProjectorSample p = projectorSampleForLight(l, dirFromLight);
@@ -495,11 +448,6 @@ static __inline__ float rangeWindow(device const UniformLight& l, float dist)
     return y * y;
 }
 
-// Blender's "controlled falloff" for area lights: a Light Path "Ray Length"
-// divided by a cutoff distance, run through a smootherstep Map Range, fades the
-// emission out with a Mix Shader. pad1 carries that cutoff distance (0 = none),
-// and only area lights read it -- punctual lights use pad1 as the KHR range in
-// rangeWindow() above, so scaling them here as well would apply two windows.
 static __inline__ float areaFalloff(device const UniformLight& l, float dist, int lightType)
 {
     if (l.pad1 <= 0.0f)
@@ -521,10 +469,6 @@ static __inline__ float areaFalloff(device const UniformLight& l, float dist)
     return areaFalloff(l, dist, l.type);
 }
 
-/// Unpack one light into the scalars lightSolidAnglePdf() needs.
-///
-/// `radius` is only read for punctual types; every area light carries its local
-/// world-area density in `d.areaPdf`.
 static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l,
                                                    thread const LightSampleData& d,
                                                    int lightType)
@@ -542,19 +486,11 @@ static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l,
     return q;
 }
 
-
 static __inline__ LightPdfQuery buildLightPdfQuery(device const UniformLight& l, thread const LightSampleData& d)
 {
     return buildLightPdfQuery(l, d, l.type);
 }
 
-/// The light-sampling density for a direction that arrived at `lightHitPoint`
-/// from `surfaceHitPoint`. This is the number the BSDF half of the MIS estimate
-/// weighs itself against, and it has to be the one the samplers above drew from.
-///
-/// For rectangles that depends on rectLightSamplingMethod: solid-angle sampling
-/// gives 1/S, area sampling gives d^2/(cos A). Answering with the wrong one
-/// silently breaks the MIS weight on every BSDF hit of a rect light.
 static __inline__ float getLightPdf(device const UniformLight& l,
                                     const float3 lightHitPoint,
                                     const float3 surfaceHitPoint,

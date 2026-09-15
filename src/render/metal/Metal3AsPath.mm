@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <vector>
 
-
 namespace oka::metal
 {
 namespace
@@ -405,16 +404,6 @@ public:
     }
 
 private:
-    /// Order this command buffer behind every acceleration-structure build
-    /// already committed on this queue.
-    ///
-    /// Metal schedules command buffers in commit order but does not make one
-    /// wait for the previous to *complete*. The top level reads every bottom
-    /// level its instance buffer names, so without this it traced structures
-    /// that were still being written and whole meshes vanished. A GPU wait
-    /// rather than waitUntilCompleted: a CPU round trip per structure costs
-    /// real time on scenes with thousands. Measurement and elimination in
-    /// docs/open-defects.md, Closed.
     void waitForPriorBuilds(MTL::CommandBuffer* commandBuffer)
     {
         if (mBuildEvent && mBuildValue != 0)

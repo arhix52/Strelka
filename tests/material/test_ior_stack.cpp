@@ -3,22 +3,6 @@
 #include <strelka/material/material_math.h>
 #include <strelka/material/ior_stack.h>
 
-// ---------------------------------------------------------------------------
-// The nested-dielectric stack.
-//
-// A path inside glass carries what it is inside of, so that the far wall knows
-// which index ratio to refract by and the segment before it knows whose
-// absorption to apply. Entering pushes, leaving pops -- and "leaving" has to
-// remove the entry for the surface actually being left.
-//
-// Priority cannot do that on its own. It answers a different question: which
-// dielectric wins where two of them overlap. glTF has no way to author it, so
-// the loader gives one value to everything transmissive -- the Isometric
-// Bathroom has twelve materials all at 10, from the bath water to the lotion in
-// a bottle to the shower glass. Popping by priority in that scene removes
-// whichever of them is topmost, which is a different object almost every time.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 
@@ -63,10 +47,6 @@ TEST_CASE("leaving the innermost medium still works")
 
 TEST_CASE("popping by priority alone would take the wrong one")
 {
-    // The behaviour this replaces, stated so the test says what it is for: with
-    // both entries at the same priority a top-down priority search finds the
-    // bubble, and a ray leaving the water would come out believing it is inside
-    // a bubble at IOR 1.6 rather than in air.
     const IorStack s = with(3u, 1.33f, 7u, 1.60f);
     int topmost_by_priority = -1;
     for (int i = s.top; i >= 0; --i)
@@ -111,10 +91,6 @@ TEST_CASE("an exit with nothing on the stack leaves it empty rather than negativ
 
 TEST_CASE("an exit for a material never entered falls back to the priority")
 {
-    // The case the priority search was written for, and the one an open mesh
-    // produces: the path is inside something it has no record of entering.
-    // Removing an equal-priority entry is the best available answer and is what
-    // keeps a stack from growing without bound.
     IorStack s{};
     ior_stack_init(s);
     ior_stack_push(s, kShared, 1.5f, /*glass*/ 4u);
@@ -139,12 +115,6 @@ TEST_CASE("a full stack drops the innermost push rather than corrupting itself")
     CHECK(ior_stack_current_material(s) == IOR_STACK_SIZE - 1u);
 }
 
-// The stack is carried per path on both backends -- inside OptiX's PerRayData,
-// where every byte is a byte of per-thread continuation stack, and in Metal's
-// per-pixel side table, which is sized from sizeof(IorStack) at run time. The
-// packing that makes an entry eight bytes instead of twelve is therefore a
-// layout contract, not an implementation detail, and these are the two things it
-// has to keep true.
 TEST_CASE("packed entries are eight bytes and round-trip both fields")
 {
     CHECK(sizeof(IorStackEntry) == 8u);

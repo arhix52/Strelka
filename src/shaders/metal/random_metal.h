@@ -49,10 +49,6 @@ enum class SampleDimension : uint32_t
     eOpacity,
     eLensU,
     eLensV,
-    // Atmospheric scattering: the free-flight distance, and the two draws that
-    // pick a direction out of the phase function. Their own dimensions for the
-    // same reason eOpacity has one -- a scattering event must not correlate with
-    // the BSDF draws of the surface the ray was heading for.
     eFogDistance,
     eFogPhaseU,
     eFogPhaseV,
@@ -60,17 +56,6 @@ enum class SampleDimension : uint32_t
     // dimension so that killing a ray that is already almost blocked does not
     // correlate with which light was chosen or where on it the point landed.
     eShadowRR,
-    // The subsurface random walk: which colour channel drives free flight, how far
-    // it goes, and the phase-function draw at the scattering event.
-    //
-    // Distinct from the fog dimensions even though the two never scatter at the
-    // same vertex, because the channel choice happens in `extend` and the phase
-    // draw in `shade` at the same walk step -- sharing eFogPhaseU between them
-    // would tie which channel was picked to which way the walk turned.
-    //
-    // Adding dimensions changes the stride in random<>(), so every scene's noise
-    // is realised differently from here on. That moves the noise, not the image
-    // the samples converge to.
     eSssChannel,
     eSssDistance,
     eSssPhaseU,
@@ -200,10 +185,6 @@ static SamplerState initSampler(uint32_t linearPixelIndex,
     const bool blueNoisePrefix = samplerType == 3u || (samplerType == 4u && pixelSampleIndex < bnSwitch);
     if (samplerType >= 2u && samplerType <= 4u && !blueNoisePrefix)
     {
-        // One global sequence, split into per-pixel blocks along a Z-curve. A
-        // complete block is stratified jointly with its neighbours; a per-pixel
-        // seed loses that anti-correlation and measured much noisier on
-        // kids_room after the sampler was padded to two dimensions.
         const uint2 pixel = pixelFromLinearIndex(linearPixelIndex, width, widthDivMultiplier, widthDivShiftAdd);
         const uint32_t tailIndex = samplerType == 4u ? pixelSampleIndex - bnSwitch : pixelSampleIndex;
         const uint32_t blockMask = (1u << sampleBlockBits) - 1u;
@@ -260,10 +241,6 @@ static float randomHalton(thread SamplerState& state)
 {
     const uint32_t dimension = uint32_t(Dim) + state.depth * uint32_t(SampleDimension::eNUM_DIMENSIONS);
     const uint32_t base = primeNumbers[dimension & 31u];
-    // Only 32 bases exist, so dimension 32 reuses base(0), 33 reuses base(1), etc.
-    // With a shared sequence index that made e.g. eBSDF0@depth2 return exactly the
-    // same number as ePixelX@depth0, correlating the pixel filter with a BSDF
-    // lobe choice. Offsetting the sequence index per dimension breaks the tie.
     return halton(state.seed + state.sampleIdx + hash(dimension), base);
 }
 
@@ -503,26 +480,6 @@ static uint32_t randomSobolNoTableBits(thread SamplerState& state)
     return sobol_scramble_bits_notable(state.sampleIdx, dimension % 256u, dimension, state.seed + state.depth);
 }
 
-// ── Sobol with a blue-noise screen-space error distribution ─────────────────
-//
-// randomSobol gives every pixel its own scramble, so the error at neighbouring
-// pixels is independent: white noise. Total error is right, but white noise is
-// the *worst* spectrum to look at and the worst for any reconstruction filter to
-// remove, because it puts as much energy at low frequencies -- where the eye is
-// sensitive and where blurring cannot reach -- as at high ones.
-//
-// The alternative (Georgiev & Fajardo 2016; Heitz & Belcour 2019): let every
-// pixel draw the *same* point set, and give each pixel a toroidal shift of it.
-// The error is then a smooth function of that pixel's shift, so the error field
-// inherits the spectrum of the shift field. A blue-noise shift field therefore
-// buys a blue-noise error field -- the same total error, moved into the high
-// frequencies that a filter and the eye both discard.
-//
-// This is a low-sample-count technique and does not pretend otherwise: the shift
-// is a rotation, and a rotation is a weaker randomisation than a scramble for
-// the discontinuous integrands a path tracer actually has. Past a few dozen
-// samples per pixel randomSobol converges faster. See randomHybrid.
-
 constant constexpr float kGoldenRatioConjugate = 0.61803398875f;
 // One sequence for the whole screen: the construction depends on the pixels
 // sharing it, so this seed must not vary per pixel.
@@ -530,11 +487,6 @@ constant constexpr uint32_t kBlueNoiseGlobalSeed = 0x9e3779b9u;
 
 inline float blueNoiseShift(float bn, uint32_t dimension)
 {
-    // One mask, advanced per dimension along an additive recurrence. The golden
-    // ratio's continued fraction makes it the slowest-approximated irrational,
-    // so successive dimensions are as far apart as an additive step can put
-    // them -- and an additive step, unlike a hash, leaves the mask's spatial
-    // spectrum intact, which is the whole point of using the mask.
     return fract(bn + float(dimension) * kGoldenRatioConjugate);
 }
 
@@ -566,12 +518,6 @@ static uint32_t randomSobolBlueNoiseBits(thread SamplerState& state)
     return word + shift;
 }
 
-// Blue noise while the frame is young, per-pixel scrambling once it is not.
-//
-// The two are unbiased estimates of the same integral, so an accumulator can
-// average across the handover without correcting anything. The second stage
-// restarts its sequence index at zero rather than continuing from bnSwitch, so
-// it gets a whole stratified block instead of the tail of one.
 template <SampleDimension Dim>
 static float randomHybrid(thread SamplerState& state)
 {

@@ -26,11 +26,6 @@ TEST_CASE("EDR tone mappers retain their SDR curves at unit headroom")
 
 TEST_CASE("EDR headroom leaves shadows and midtones on the SDR curve")
 {
-    // The defect this pins down: scaling both of the curve's axes to the display
-    // peak rebuilt the whole tone, and ACES at 3.54x took middle grey from 0.106
-    // to 0.050 -- picking an HDR display mode darkened the picture by a stop and
-    // a half. Everything the SDR curve maps below the knee must come back
-    // untouched, at any headroom.
     for (const float headroom : { 1.5f, 3.54f, 16.0f })
     {
         for (const float level : { 0.02f, 0.05f, 0.18f, 0.35f })
@@ -60,12 +55,6 @@ TEST_CASE("EDR headroom lifts what the SDR curve was clipping")
 
 TEST_CASE("EDR headroom never returns less than the SDR curve")
 {
-    // The first attempt at this blended toward `f(x / headroom) * headroom`, which
-    // is above the SDR curve only for a curve concave through the origin. ACES has
-    // an S-curve toe, so at 16x that reference falls *below* the SDR curve from a
-    // third of a stop under white to half a stop over it, and the blend darkened
-    // exactly the pixels it was supposed to be lifting -- a mean lift of x0.97 on
-    // the iso_bathroom frame. More headroom must never mean a darker pixel.
     for (const float headroom : { 1.5f, 3.54f, 16.0f })
     {
         for (int step = 0; step <= 400; ++step)
@@ -96,12 +85,6 @@ TEST_CASE("EDR headroom is a ceiling the curve approaches but never passes")
 
 TEST_CASE("EDR headroom respects the peak a saturated pixel can already reach")
 {
-    // Found on a Cornell box frame, not on a grey ramp. Reinhard divides by the
-    // pixel's luminance, so a channel far brighter than that luminance comes out
-    // above 1 from the SDR curve alone -- thousands of pixels on that frame. A
-    // lift budgeted from white rather than from where the curve actually landed
-    // pushed them past the display peak, where the window server clips per
-    // channel and shifts the hue on the way.
     const oka::tonemap::float3 saturated = oka::tonemap::make_float3(40.0f, 0.5f, 0.5f);
 
     for (const float headroom : { 1.5f, 3.54f, 16.0f })

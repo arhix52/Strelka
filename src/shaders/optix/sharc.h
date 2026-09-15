@@ -1,10 +1,5 @@
 #pragma once
 
-// Spatially hashed radiance cache after NVIDIA SHARC. Entries split per-frame
-// atomic deposits from temporally resolved radiance; sharc_grid.h owns the
-// host-testable grid arithmetic. OptiX deposits inline when each path completes,
-// while Metal's wavefront backend uses a separate pass.
-
 #include <sharc_grid.h>
 
 #if defined(__CUDACC__)
@@ -16,11 +11,6 @@
 /// voxel across its three buffers.
 struct SharcEntry
 {
-    /// The voxel this slot holds: coordinates, level, normal bucket and the
-    /// responsive flag, packed by oka::sharc::voxelKey. Zero means empty, which
-    /// is also what eviction writes -- and the key layout guarantees no real
-    /// voxel packs to zero. First in the struct so the 64-bit atomic that
-    /// claims it is aligned.
     unsigned long long key;
 
     /// This frame's deposits. Written by atomicAdd from many paths at once,
@@ -46,12 +36,6 @@ static_assert(sizeof(((SharcEntry*)nullptr)->key) == 8, "the key is claimed by a
 
 #if defined(__CUDACC__)
 
-/// The key of the voxel a point belongs to.
-///
-/// `responsive` selects between the two entries a voxel can have: the ordinary
-/// one, and the one holding the part of its signal that is expected to change
-/// fast. They are different keys, so they are different slots and different
-/// probe runs -- see sharcFind.
 static __forceinline__ __device__ uint64_t sharcVoxel(
     float3 position, float3 normal, float3 cameraPosition, float baseSize, bool responsive)
 {
@@ -68,13 +52,6 @@ static __forceinline__ __device__ uint64_t sharcVoxel(
     return oka::sharc::voxelKey(x, y, z, voxel.level, bucket, responsive);
 }
 
-/// Find the slot for a voxel, inserting it when `insert` and there is room.
-///
-/// Returns false when the probe run is exhausted, which means the table is
-/// over-subscribed and the caller should simply carry on tracing.
-///
-/// Responsive lighting uses an independent key and probe run because OptiX does
-/// not carry the SDK's adjacent-entry offset in path state.
 static __forceinline__ __device__ bool sharcFind(
     SharcEntry* entries, uint32_t capacity, unsigned long long key, bool insert, uint32_t& outIndex)
 {
@@ -110,12 +87,6 @@ static __forceinline__ __device__ bool sharcFind(
     return false;
 }
 
-/// What a slot has resolved to, and how many deposits stand behind it.
-///
-/// Reads the resolved half only. A path must not read `accum`: those are this
-/// frame's partial sums, they are being written by other paths as this one
-/// reads, and early in a frame they are an average of a handful of samples.
-/// The resolved half is a whole frame behind and that is the point.
 static __forceinline__ __device__ float3 sharcRead(const SharcEntry* entries, uint32_t index, float& outSampleNum)
 {
     const SharcEntry* entry = &entries[index];
@@ -126,18 +97,6 @@ static __forceinline__ __device__ float3 sharcRead(const SharcEntry* entries, ui
     return make_float3(resolved.r, resolved.g, resolved.b);
 }
 
-/// The responsive half of a voxel's answer, or zero if it has none.
-///
-/// Responsive lighting stores the fast-changing part of a voxel's signal in a
-/// second entry with a shorter temporal window, so it can react in a handful of
-/// frames while the rest of the signal keeps averaging over dozens. The two are
-/// an additive decomposition of the same radiance -- what goes into one is
-/// subtracted from what goes into the other -- so a reader adds them, and a
-/// voxel with no responsive entry is simply the whole signal in the main one.
-///
-/// A second probe run, and worth gating: this is only called when responsive
-/// lighting is on, which is a launch-parameter constant the pipeline is
-/// specialised against, so a scene that does not use it pays nothing at all.
 static __forceinline__ __device__ float3 sharcReadResponsive(const SharcEntry* entries,
                                                              uint32_t capacity,
                                                              unsigned long long mainKey)
@@ -152,20 +111,9 @@ static __forceinline__ __device__ float3 sharcReadResponsive(const SharcEntry* e
     return sampleNum > 0.0f ? radiance : make_float3(0.0f, 0.0f, 0.0f);
 }
 
-/// Add one estimate of a voxel's outgoing radiance to this frame's accumulator.
-///
-/// Clamped on the way in. One firefly deposited into a voxel is then read back
-/// by every path that passes through it, which turns a single bright pixel into
-/// a bright region -- the one failure mode of a cache that is worse than the
-/// noise it replaces.
 static __forceinline__ __device__ void sharcWrite(SharcEntry* entries, uint32_t index, float3 radiance)
 {
     SharcEntry* entry = &entries[index];
-    // A slot that has taken its fill stops taking rather than wrapping: a
-    // wrapped sum reads back as a near-black voxel, which every path through it
-    // then believes. The resolve pass zeroes these every frame, so reaching the
-    // limit now takes a frame rather than a render -- but a 4K launch can put
-    // millions of paths through one voxel, so the guard stays.
     if (*(volatile unsigned int*)&entry->accumCount >= oka::sharc::kMaxCount)
     {
         return;
@@ -176,31 +124,12 @@ static __forceinline__ __device__ void sharcWrite(SharcEntry* entries, uint32_t 
     atomicAdd(&entry->accumCount, 1u);
 }
 
-// --- Debug visualisation ---------------------------------------------------
-//
-// Ported from the SDK's HashGridDebug* family, and here for the same reason it
-// is there: every parameter of a hash grid is invisible in the final image
-// until it is wrong, and then it is wrong in a way that looks like a shading
-// bug. Voxel size in particular cannot be chosen without seeing it.
-
-/// A stable colour per voxel, so the grid itself is visible.
-///
-/// Port of HashGridGetColorFromHash32. The bit ranges are the SDK's: they are
-/// chosen so that neighbouring hashes land far apart in colour, which is what
-/// makes a voxel boundary a visible edge rather than a gradient.
 static __forceinline__ __device__ float3 sharcDebugColour(uint32_t hash)
 {
     return make_float3((float)((hash >> 0) & 0x3FFu) / 1023.0f, (float)((hash >> 11) & 0x7FFu) / 2047.0f,
                        (float)((hash >> 22) & 0x7FFu) / 2047.0f);
 }
 
-/// The occupancy overlay: one small block per entry, lit where the entry is in
-/// use. Port of HashGridDebugOccupancy.
-///
-/// Returns false for pixels the overlay does not cover, so the caller can leave
-/// them alone. What to look for is in the SDK's own note: with a static camera
-/// roughly 10-20% of the table should be occupied. Much more than that and the
-/// table is thrashing -- either raise the capacity or evict harder.
 static __forceinline__ __device__ bool sharcDebugOccupancy(
     const SharcEntry* entries, uint32_t capacity, uint2 pixel, uint2 screenSize, float3& outColour)
 {
@@ -227,10 +156,6 @@ static __forceinline__ __device__ bool sharcDebugOccupancy(
         return true;
     }
 
-    // Green for an entry carrying resolved radiance, amber for one that has been
-    // inserted but has nothing to answer with yet. The difference matters: a
-    // table that is full of amber is being inserted into and evicted before it
-    // ever resolves, which reads as "occupied" but caches nothing.
     float sampleNum = 0.0f;
     sharcRead(entries, elementIndex, sampleNum);
     outColour = sampleNum > 0.0f ? make_float3(0.0f, 1.0f, 0.0f) : make_float3(1.0f, 0.75f, 0.0f);

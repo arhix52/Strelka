@@ -35,10 +35,6 @@ __global__ void resolveDenoiseGuidesKernel(const AovSample* __restrict__ aov,
     }
     outColor[i] = make_float4(c, 1.0f);
 
-    // One albedo layer, unlike MetalFX's separate diffuse and specular inputs.
-    // The sum is what the network demodulates against, and it is bounded by
-    // construction: the two lobes are complementary weights of the same base
-    // colour, so their sum cannot exceed it.
     const float3 albedo = a.diffuseAlbedo + a.specularAlbedo;
     outAlbedo[i] = make_float4(clamp(albedo, make_float3(0.0f), make_float3(1.0f)), 1.0f);
 
@@ -46,12 +42,6 @@ __global__ void resolveDenoiseGuidesKernel(const AovSample* __restrict__ aov,
     outNormal[i] = make_float4(a.normal, 0.0f);
     outFlow[i] = make_float2(a.motionX, a.motionY);
 
-    // The reactive mask, inverted, is exactly what OptiX calls flow
-    // trustworthiness: 0 means "do not believe the motion vector here". The mask
-    // is raised where the guides describe a surface other than the one the
-    // camera sees -- a mirror, a pane of glass -- which is precisely where the
-    // pixel's own motion says nothing about what is drawn in it. Without this
-    // the mask is produced, inspectable, and consumed by nothing.
     outFlowTrust[i] = 1.0f - clamp(a.reactive, 0.0f, 1.0f);
 }
 

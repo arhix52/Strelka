@@ -407,10 +407,6 @@ glm::float4 Scene::interpolate(const AnimationSampler& sampler,
     if (time >= sampler.inputs[n - 1])
         return sampler.outputsVec4[(n - 1) * stride + valueOffset];
 
-    // Find bracket: inputs[prevIdx] <= time < inputs[nextIdx].
-    // inputs is sorted by construction, so binary search it — the previous linear
-    // scan cost O(keyframes) per channel per frame (BrainStem has channels with
-    // 838 keys, evaluated 116 times per pass and twice per frame).
     const auto upper = std::ranges::upper_bound(sampler.inputs, time);
     int nextIdx = (int)std::distance(sampler.inputs.begin(), upper);
     nextIdx = std::clamp(nextIdx, 1, n - 1);
@@ -580,15 +576,6 @@ bool Scene::applyAnimation(const uint32_t animId)
 {
     ensureGlobalTransforms();
 
-    // Two phases instead of one update per channel. The legacy path recomputed each visited
-    // node's world transform by walking back up to the root — so a scene with C
-    // channels cost O(C * subtree * depth) matrix builds every frame, re-deriving
-    // the same ancestors again and again. BrainStem has 116 channels over a
-    // 30-node graph and paid that twice per frame (motion blur is a two-pass
-    // evaluation), which is what made playback stutter on a 34k-triangle scene.
-    //
-    // Phase 1 only writes local TRS; phase 2 derives every world transform in a
-    // single parent-before-child sweep.
     auto& animation = mAnimations[animId];
     std::ranges::fill(mNodeDirty, 0);
 
@@ -895,11 +882,6 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
 
         mLights[lightId].type = LIGHT_TYPE_RECT;
         mLights[lightId].halfAngle = 0.0f;
-        // The area density is a constant of the light, and the device was
-        // rebuilding it per next-event draw out of exponent-decomposed
-        // compensated arithmetic -- the same per-ray recomputation the ellipsoid
-        // representability check was. pad0 is written and never read for these
-        // two types, so the answer travels in it.
         mLights[lightId].pad0 =
             inverseFiniteCrossLength(glm::float3(mLights[lightId].points[1] - mLights[lightId].points[0]),
                                      glm::float3(mLights[lightId].points[3] - mLights[lightId].points[0]));
@@ -931,11 +913,6 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].normal = glm::float4(transformedAreaLightNormal(localTransform), 0.0f);
         mLights[lightId].type = LIGHT_TYPE_DISC;
         mLights[lightId].halfAngle = 0.0f;
-        // The area density is a constant of the light, and the device was
-        // rebuilding it per next-event draw out of exponent-decomposed
-        // compensated arithmetic -- the same per-ray recomputation the ellipsoid
-        // representability check was. pad0 is written and never read for these
-        // two types, so the answer travels in it.
         mLights[lightId].pad0 =
             analyticDiscAreaPdf(glm::float3(mLights[lightId].points[2]), glm::float3(mLights[lightId].points[3]));
         // Controlled-falloff cutoff distance for area lights, read by
@@ -972,15 +949,6 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
     else if (lightTypeIsPunctual(desc.type))
     {
         const glm::float4x4 localTransform = desc.useXform ? desc.xform : getTransform(desc);
-        // The three lamps share one packing -- see lightIsPunctual() in
-        // light_pdf.h. points[0] is (soft radius, IES profile, projector image,
-        // frame aspect); a light that has no use for a slot carries -1 or 0 in
-        // it rather than a stale value, because the shader decides what a light
-        // does from these numbers and not from its type alone.
-        //
-        // A projector's angular shape is its image, so it never also carries an
-        // IES profile: -1 goes in that slot even when the desc still remembers a
-        // file from before the type was switched.
         const bool isProjector = desc.type == LIGHT_TYPE_PROJECTOR;
         const float iesSlot = isProjector ? -1.0f : packedRegisteredIndex(desc.iesProfile, mIesProfiles.size());
         const float projectorSlot =
@@ -1007,11 +975,6 @@ void Scene::updateLight(const uint32_t lightId, const UniformLightDesc& desc)
         mLights[lightId].pad1 = desc.range;
         const bool positionValid = affineVectorIsFinite(glm::float3(mLights[lightId].points[1]));
         const bool needsEmissionAxis = desc.type != LIGHT_TYPE_POINT || needsProfileFrame;
-        // A soft radius makes this a sphere, and both backends intersect and
-        // sample it through the ellipsoid path -- which is entitled to assume
-        // the scene vetted the transform, exactly as a LIGHT_TYPE_SPHERE is.
-        // The axes are the ones intersectAnalyticLightSurface() builds from the
-        // radius, so this decides the same question the same way.
         const float softRadius = mLights[lightId].points[0].x;
         const bool ellipsoidValid = !punctualLightIsSoft(softRadius) ||
                                     analyticEllipsoidIsRepresentable(
@@ -1145,12 +1108,6 @@ void Scene::setLight(const uint32_t lightId, const UniformLightDesc& desc)
     mLightDesc[lightId] = desc;
     updateLight(lightId, desc);
 
-    // These tessellations exist only for editor picking. A headless backend may
-    // have released (or adopted) the host arrays after uploading them; appending
-    // a new proxy now would create a partial, offset-zero geometry stream that
-    // cannot replace the already-uploaded scene. Rendering and visibility use
-    // the packed analytic surface above, so keep the released scene topology
-    // immutable.
     if (mHostGeometryReleased)
     {
         return;
@@ -1274,10 +1231,6 @@ bool intersectTriangle(const glm::float3& orig,
         return false;
     const float invDet = 1.0f / det;
     const glm::float3 tvec = orig - v0;
-    // Barycentric bounds are tested with a tolerance: a ray through a point on an
-    // edge shared by two triangles would otherwise be rejected by both, so
-    // clicking along an interior edge of a mesh selects whatever is behind it.
-    // Counting such a hit twice is harmless, the closest one wins either way.
     constexpr float kEdgeTolerance = 1e-6f;
     const float u = glm::dot(tvec, pvec) * invDet;
     if (u < -kEdgeTolerance || u > 1.0f + kEdgeTolerance)
@@ -1542,10 +1495,6 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
 
     const glm::float3 dir = glm::normalize(direction);
 
-    // Slab test against a box. This is the whole reason picking is usable on a
-    // scattered scene: without it every one of 1.1 million instances has all of
-    // its triangles tested, and with it all but a handful stop at twelve
-    // compares.
     auto missesBounds = [](const glm::float3& o, const glm::float3& d, const glm::float3& bbMin,
                            const glm::float3& bbMax, float maxT, float* tEnter = nullptr) {
         float tMin = 0.0f;
@@ -1572,20 +1521,8 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         return false;
     };
 
-    // World boxes first, so the common rejection costs no matrix work at all.
-    // Built from the eight transformed corners of the mesh box, which is
-    // conservative -- looser than the oriented box, never tighter, so it cannot
-    // reject something the triangles would have hit.
     ensureInstanceWorldBounds();
 
-    // Candidates first, nearest box first.
-    //
-    // The box test throws out all but a handful, but that handful can still be
-    // tens of millions of triangles -- a ground plane and a canopy are one mesh
-    // each here. Testing them in instance order means the ray may walk the
-    // furthest one before it has any hit distance to prune with; in entry-point
-    // order the first hit usually makes every remaining candidate a single
-    // compare.
     struct Candidate
     {
         uint32_t instId;
@@ -1670,10 +1607,6 @@ Scene::PickHit Scene::pick(const glm::float3& origin, const glm::float3& directi
         const glm::float3 localOrig = glm::float3(invXform * glm::float4(origin, 1.0f));
         const glm::float3 localDir = glm::normalize(glm::float3(invXform * glm::float4(dir, 0.0f)));
 
-        // Skinning happens in the same space the instance transform maps to
-        // world, so only the vertex positions have to be posed: the ray stays in
-        // instance space. Only skeletal meshes have a pose to build; for the rest
-        // this was an allocation per instance for an empty vector.
         const std::vector<glm::mat4> palette = mesh.isSkeletal ? buildJointPalette(instId) : std::vector<glm::mat4>();
 
         trianglesTested += mesh.mCount / 3;
@@ -1780,6 +1713,5 @@ uint32_t Scene::createCurve(const Curve::Type type,
     mCurves.push_back(c);
     return res;
 }
-
 
 } // namespace oka

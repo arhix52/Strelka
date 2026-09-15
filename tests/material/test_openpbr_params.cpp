@@ -1,27 +1,3 @@
-// ============================================================================
-// test_openpbr_params.cpp
-//
-// OpenPBRParams is read out of a GPU buffer by three different compilers with
-// no per-backend mirror and no converter, which is the whole reason it is
-// spelled the way it is (see openpbr/openpbr_params.h). Two things have to stay
-// true for that to keep working, and neither of them fails loudly on its own:
-//
-//   1. The layout. A field added without keeping the 16-byte rows changes what
-//      the Metal shader reads at every offset after it, and the symptom is a
-//      material with plausible-looking wrong values -- not a crash. The
-//      static_asserts in the header cover the total size on each compiler;
-//      these cover the offsets, so that two compensating mistakes cannot pass.
-//
-//   2. The defaults. openpbr_make_default_params() duplicates the OpenPBR 1.1.1
-//      defaults rather than calling the vendored
-//      openpbr_make_default_resolved_inputs(), because the glTF loader includes
-//      the parameter header and must not compile a BSDF to do it. The
-//      duplication is only safe because this file compares the two, field by
-//      field. If Adobe changes a default in a version bump, this is what says so.
-//
-// A zero-initialised OpenPBRParams is deliberately NOT a valid material, and the
-// last case here pins that too: it is the mistake a caller makes once.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -33,10 +9,6 @@
 namespace
 {
 
-// The bridge builds these from the hit, so a comparison against the vendored
-// defaults needs a surface to hang them on. Its frame is the identity basis
-// openpbr_make_default_resolved_inputs() uses, so the two agree trivially and
-// the interesting fields are the ones actually compared.
 SurfaceInteraction identitySurface()
 {
     SurfaceInteraction si = {};
@@ -120,10 +92,6 @@ TEST_CASE("openpbr_make_default_params matches the vendored spec defaults")
     const OpenPBR_ResolvedInputs ref = openpbr_make_default_resolved_inputs();
     const OpenPBR_ResolvedInputs got = openpbr_resolve_inputs(p, identitySurface());
 
-    // Exact equality, not Approx: both sides are literals of the same constants,
-    // so any difference at all is a transcription error rather than arithmetic.
-    // A lambda rather than a macro with a do-while: the loop form is what
-    // clang-tidy flags, and there is nothing here a function cannot do.
     const auto checkColor = [](float3 a, float3 b) {
         CHECK(a.x == b.x);
         CHECK(a.y == b.y);

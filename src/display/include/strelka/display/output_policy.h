@@ -3,19 +3,9 @@
 #include <cstdint>
 #include <string>
 
-
 namespace oka::display_output
 {
 
-/// Which backend filled a DisplayCapabilities.
-///
-/// The two backends answer different questions. Vulkan reports swapchain
-/// formats, present modes and the compositor's VRR state; Metal reports the EDR
-/// headroom the window server currently grants and the CAMetalLayer
-/// configuration. Neither set of fields means anything while the other backend
-/// is running -- an all-zero PresentCapabilities on macOS says "this is not a
-/// Vulkan swapchain", not "this display cannot present" -- so the UI reads this
-/// to decide which half of the struct it is allowed to show.
 enum class DisplayBackend : uint32_t
 {
     Unknown = 0,
@@ -26,18 +16,8 @@ enum class DisplayBackend : uint32_t
 enum class OutputMode : uint32_t
 {
     Auto = 0,
-    /// The platform's high dynamic range path: an HDR10/ST 2084 swapchain on
-    /// Vulkan, extended-range EDR content on Metal. Deliberately not named HDR10
-    /// -- macOS has no HDR10 surface for an app to pick, and calling the mode
-    /// after the Windows encoding made the Metal UI describe something that does
-    /// not exist there.
     HDR,
     SDR,
-    /// Reference-white HDR. Metal only: an XDR panel in a reference preset
-    /// reports its own headroom over the 100-nit reference white, which is what
-    /// grading wants and is not the headroom the compositor hands an ordinary
-    /// window. Last in the enum on purpose, so the Vulkan path's clamp turns it
-    /// into SDR -- a safe mode -- rather than into an unknown one.
     ReferenceHDR,
 };
 
@@ -68,13 +48,6 @@ inline SurfaceEncoding selectSurfaceEncoding(OutputMode requested, const OutputC
     return SurfaceEncoding::SDR;
 }
 
-/// What the display the window currently sits on can do with values above SDR
-/// white.
-///
-/// All three headrooms are multipliers of SDR white, not nits. macOS never tells
-/// an application the panel's absolute luminance, because the user's brightness
-/// slider moves it: a paper-white-in-nits control, which is the right knob for
-/// an HDR10 swapchain, has nothing to configure here.
 struct EdrCapabilities
 {
     /// Granted right now. Falls when another window claims the backlight or the
@@ -104,14 +77,6 @@ inline bool outputModeSupported(OutputMode mode, const EdrCapabilities& capabili
     return true;
 }
 
-/// Headroom the tone curve should map its brightest output to.
-///
-/// Auto and HDR follow the *current* headroom rather than the potential one:
-/// rendering past what the compositor grants clips in the compositor, after the
-/// tone curve has already spent its range, instead of rolling off inside it.
-/// `headroomLimit` is the user's ceiling and is ignored below 1, which is how
-/// "no limit" is spelled -- a limit under 1 would be a request for less than SDR
-/// white, which no mode means.
 inline float selectEdrHeadroom(OutputMode requested, const EdrCapabilities& capabilities, float headroomLimit)
 {
     float headroom = 1.0f;
@@ -205,12 +170,6 @@ inline VrrStatus interpretVrrStatus(bool requested,
     return platformStatus;
 }
 
-/// Refresh range a display advertises, turned into a VRR verdict.
-///
-/// Deliberately never returns Active. macOS tells an app the interval range the
-/// panel supports, not the rate the window server is driving it at this instant;
-/// claiming the range as proof that VRR is engaged is the same overreach
-/// interpretVrrStatus() refuses to make for a Vulkan present mode.
 inline VrrStatus interpretRefreshRange(float minRefreshRateHz, float maxRefreshRateHz)
 {
     if (maxRefreshRateHz <= 0.0f)
@@ -228,10 +187,6 @@ inline VrrStatus interpretRefreshRange(float minRefreshRateHz, float maxRefreshR
 
 struct DisplayCapabilities
 {
-    // Braced even though both are aggregates that default-construct: the Vulkan
-    // backend builds this with a designated initializer naming only `backend`,
-    // and GCC's -Wmissing-field-initializers counts a member with no default
-    // member initializer as missing there, whatever the member's own type does.
     OutputCapabilities output{};
     PresentCapabilities present{};
     SurfaceEncoding surfaceEncoding = SurfaceEncoding::SDR;

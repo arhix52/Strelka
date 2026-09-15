@@ -21,13 +21,6 @@ public:
     };
     CameraType type = CameraType::firstperson;
 
-    /// Perspective or orthographic, matching glTF's two camera types.
-    ///
-    /// An orthographic camera is not a perspective one with a long lens: it has
-    /// no centre of projection, so the primary ray's origin varies across the
-    /// film and its direction does not. That is a branch in ray generation, not
-    /// a different projection matrix -- which is why this is carried to the GPU
-    /// as its own field rather than being left implicit in clipToView.
     enum class ProjectionType : uint32_t
     {
         perspective = 0,
@@ -41,11 +34,6 @@ public:
     // `ortho_scale` is the full extent of the fitted axis, so it is half of that.
     float xmag = 1.0f;
     float ymag = 1.0f;
-    // The frame aspect the fov was authored against, 0 when unknown. glTF's yfov
-    // means nothing without it: a camera authored for 16:9 and rendered at 4:3
-    // has to keep its *horizontal* angle, which is what every DCC does for a
-    // landscape frame and what a renderer that keeps the vertical angle instead
-    // gets wrong by exactly the ratio of the two aspects.
     float authoredAspect = 0.0f;
     float znear = 0.1f, zfar = 1000.0f;
 
@@ -74,33 +62,12 @@ public:
     float rotationSpeed = 0.025f;
     float movementSpeed = 5.0f;
 
-    // Time constant, in seconds, of the exponential ramp between "key not held"
-    // and "key held" -- 0 means the old instant behaviour and is the default, so
-    // a camera driven from a test or from animation still moves exactly as far as
-    // deltaTime * movementSpeed says.
-    //
-    // Interactive movement needs it because a path tracer's frame time is not
-    // stable: the frame that restarts accumulation is much dearer than the ones
-    // that follow it, so a step of deltaTime * speed lands the camera in a
-    // different place every frame for one unchanging key. Ramping the *input*
-    // rather than the step spreads that jitter over several frames, which is
-    // what the eye reads as smooth.
     float movementSmoothing = 0.0f;
-    // Smoothed key input, one component per axis in [-1, 1]: x right, y up,
-    // z forward. Not the camera's velocity in world units -- movementSpeed and
-    // deltaTime still scale it -- so changing speed mid-move does not have to
-    // rescale anything held here.
     glm::float3 mMoveInput{ 0.0f };
 
     bool updated = false;
     bool isDirty = true;
 
-    /// While set, animation leaves this camera's pose alone.
-    ///
-    /// A glTF camera is posed from its node, so playback and an editor that has
-    /// handed the camera to the user are two owners of one transform: the frame
-    /// gets rendered from the animated pose while the viewport overlay and
-    /// picking use the user's, and the two disagree on screen.
     bool manualControl = false;
 
     struct MouseButtons
@@ -114,10 +81,6 @@ public:
 
     struct Matrices
     {
-        // Identity, not uninitialised: these are read by picking, gizmos and the
-        // renderer, and a camera can reach any of them before setPerspective or
-        // updateViewMatrix has run. Garbage here turns into inf/NaN rays that fail
-        // silently instead of visibly.
         glm::float4x4 perspective{ 1.0f };
         glm::float4x4 invPerspective{ 1.0f };
         glm::float4x4 view{ 1.0f };
@@ -172,13 +135,6 @@ public:
     void update(float deltaTime);
 };
 
-/// Primary ray through a point of the rendered image, where uv is normalised
-/// image space with (0,0) at the top-left corner.
-///
-/// Kept next to the camera (and not in the editor) because it has to stay in
-/// lockstep with generateCameraRay in the shaders: a CPU pick that maps pixels
-/// differently than the renderer selects something other than what the user
-/// clicked, and the mismatch is invisible until it is off by a mirrored axis.
 void generatePickRay(const Camera& camera, const glm::float2& uv, glm::float3& origin, glm::float3& direction);
 
 } // namespace oka

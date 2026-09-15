@@ -23,13 +23,6 @@ void toEditBuffer(const std::string& src, char (&dst)[N])
     dst[n] = '\0';
 }
 
-/// A parameter that a texture may be driving.
-///
-/// When it is, the widget is disabled rather than hidden. MaterialX semantics are
-/// *replace*, not multiply -- a map on base_color leaves the constant beside it
-/// doing nothing -- so a live slider under a map would be a lie the user only
-/// discovers by dragging it and watching nothing happen. Disabled with the file
-/// named in the tooltip says the same thing truthfully.
 bool openpbrFloat(const char* label, float* value, float lo, float hi, const std::string& mapPath, const char* tip = nullptr)
 {
     const bool mapped = !mapPath.empty();
@@ -69,15 +62,6 @@ bool openpbrColor(const char* label, OpenPBRColor* c, const std::string& mapPath
     return changed;
 }
 
-/// A lobe: its weight, then everything the weight gates.
-///
-/// Returns whether the section is open *and* live. A layered model is hard to
-/// read as forty sliders in a row -- what a reader wants first is which of the
-/// eight lobes are switched on at all -- so the weight comes before the header's
-/// contents and greys them out at zero.
-/// "0.35", or "off". Two decimals by hand rather than a formatter: snprintf's
-/// return value is one this build refuses to let go unchecked, and a header
-/// label is not worth an <format> dependency.
 std::string weightText(float weight)
 {
     if (!(weight > 0.0f))
@@ -92,14 +76,6 @@ std::string weightText(float weight)
 
 bool openpbrLobeHeader(const char* label, float weight)
 {
-    // The weight goes *into* the header's text, not beside it. A CollapsingHeader
-    // spans the full width, so SameLine() after one puts the next item past the
-    // right edge -- the state has to be readable with the section shut, which is
-    // the whole reason it is here.
-    //
-    // The ### suffix pins the widget's identity to the label while the visible
-    // text changes with the weight; without it every drag would look like a new
-    // header to ImGui and the section would snap shut.
     const std::string title = std::string(label) + "  -  " + weightText(weight) + "###" + label;
     return ImGui::CollapsingHeader(title.c_str());
 }
@@ -180,12 +156,6 @@ bool drawOpenPBR(Scene::MaterialDescription& desc)
     {
         changed |= openpbrFloat("Weight##sss", &o.subsurface_weight, 0.0f, 1.0f, tex[OPENPBR_TEX_SUBSURFACE_WEIGHT]);
         changed |= openpbrColor("Color##sss", &o.subsurface_color, tex[OPENPBR_TEX_SUBSURFACE_COLOR]);
-        // Not down to zero. The random walk's extinction is 1/radius (sssSigmaT),
-        // saved from dividing by zero only by an internal clamp to 1e-5, so a
-        // radius of 0 means an extinction of 1e5: every subsurface path then
-        // spends the whole MEDIUM_MAX_STEPS budget on sub-micron flights and the
-        // image does not change for it. Measured on the Open Chess Set, radius
-        // 1.0 -> 0.0 costs 19.8 -> 50.7 ms/sample and looks the same.
         changed |= ImGui::DragFloat("Radius", &o.subsurface_radius, 0.001f, 1e-4f, 100.0f, "%.4f");
         if (ImGui::IsItemHovered())
         {

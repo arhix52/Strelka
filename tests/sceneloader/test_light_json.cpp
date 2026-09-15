@@ -26,10 +26,6 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     // A light that lights the scene without being in frame. Written only when
     // false, so this also pins that the sidecar stays quiet about the default.
     rect.visibleToCamera = false;
-    // Cached on the radiance cache's short clock. Written only when true, so
-    // this pins both halves of that: it survives the round trip, and the light
-    // below -- which never asks for it -- comes back false rather than picking
-    // up whatever the previous entry set.
     rect.responsive = true;
     scene.createLight(rect);
 
@@ -85,16 +81,6 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     CHECK(sky.intensity == doctest::Approx(2.0f));
     CHECK(sky.color == dome.color);
 
-    // Bound once rather than re-fetched: getEnvLight() returns by value, so
-    // each `->` was a fresh optional the has_value() above had never seen --
-    // which is what bugprone-unchecked-optional-access was reporting, and it
-    // was right that the guard did not guard these three.
-    // Bound once rather than re-fetched: getEnvLight() returns by value, so each
-    // `loaded.getEnvLight()->` was a fresh optional that the REQUIRE had never
-    // seen. The `if` is not redundant with the REQUIRE either -- REQUIRE is a
-    // macro the analyser cannot read as a guard, so without the branch every
-    // access below is an unchecked one. REQUIRE still owns the failure message;
-    // the branch only tells the analyser what REQUIRE already guarantees.
     const auto loadedEnv = loaded.getEnvLight();
     REQUIRE(loadedEnv.has_value());
     if (loadedEnv.has_value())
@@ -203,10 +189,6 @@ TEST_CASE("a projector round-trips its frame and its image through the sidecar")
 
 TEST_CASE("a sidecar names a projector's field of view, not half of it")
 {
-    // The one place the projector and the spot disagree about what an angle in
-    // the file means, so it is worth stating outright: a spot writes its outer
-    // *half* angle and a projector writes the full horizontal field, because
-    // nobody describes a beamer by half its throw angle.
     Scene scene;
     Scene::UniformLightDesc projector{};
     projector.type = LIGHT_TYPE_PROJECTOR;

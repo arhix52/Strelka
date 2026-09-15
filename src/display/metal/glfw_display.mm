@@ -41,14 +41,6 @@ bool readSourceFile(std::string& str, const std::string& filename)
     return false;
 }
 
-/// How often the AppKit probe runs, in frames.
-///
-/// Every field it reads can change while the editor is running -- the window is
-/// dragged to another monitor, the user switches the panel to a reference
-/// preset, the compositor lowers the granted headroom because another window
-/// wants the backlight -- so it cannot be read once at startup. It is also a
-/// dozen ObjC property reads and an NSString, which is not something to spend
-/// per frame for values that move on a human timescale.
 constexpr uint64_t kCapabilityPollFrames = 15;
 
 const char* outputModeName(oka::display_output::OutputMode mode)
@@ -117,11 +109,6 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     // would otherwise slide across the screen as the user works in it.
     io.ConfigWindowsMoveFromTitleBarOnly = true;
 
-    // ImGui defaults to a bare "imgui.ini" resolved against the *working
-    // directory*, so launching the editor from anywhere but the build root meant
-    // it neither found nor persisted a layout, and the dockspace came up empty
-    // every time. Anchor it to the executable instead, and seed it from the
-    // layout shipped in the source tree on first run.
     mIniPath = (oka::getExecutableDir() / "imgui.ini").string();
     std::error_code ec;
     if (!std::filesystem::exists(mIniPath, ec))
@@ -144,10 +131,6 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
         }
     }
     io.IniFilename = mIniPath.c_str(); // mIniPath must outlive the ImGui context
-    // Panels, menus and sliders reachable from the pad. The ImGui GLFW backend
-    // feeds it from the same joystick GLFW hands us, so this needs no wiring --
-    // but it is deliberately *only* nav: the pad does not move the pointer, so
-    // gizmo drags and viewport picking stay on the mouse.
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
     imgui_style::applyGraphiteBlue();
@@ -157,10 +140,6 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     ImGui_ImplMetal_Init((__bridge id<MTLDevice>)(_pDevice));
 
     NSWindow *const nswin = glfwGetCocoaWindow(mWindow);
-    // CA::MetalLayer::layer() and RenderPassDescriptor::renderPassDescriptor()
-    // below are autoreleased factories. Both are stored as members and used for
-    // the whole process lifetime, so they must be retained explicitly — they only
-    // survived before because nothing ever drained the enclosing pool.
     layer = CA::MetalLayer::layer()->retain();
     layer->setDevice(_pDevice);
     layer->setPixelFormat(MTL::PixelFormatRGBA16Float);
@@ -168,11 +147,6 @@ void GlfwDisplay::init(int width, int height, SettingsManager* settings)
     nswin.contentView.layer = l;
     nswin.contentView.wantsLayer = YES;
 
-    // Colour space, EDR request, vsync and drawable count are all user-visible
-    // choices that can change while the editor runs, so they are set from the
-    // settings in one place instead of half here and half in the frame loop.
-    // The probe runs before the first frame because EditorApp asks for the EDR
-    // headroom before it calls onBeginFrame().
     refreshDisplayCapabilities();
     applyDisplaySettings();
 
@@ -204,10 +178,6 @@ void GlfwDisplay::resetFrame()
 
 float GlfwDisplay::getMaxEDR()
 {
-    // The mode-adjusted headroom, not the raw NSScreen value. SDR output has to
-    // report 1.0 or the tone curve keeps mapping into range the layer no longer
-    // carries, and the user's headroom ceiling has to reach the tone curve to
-    // mean anything at all -- nothing else consumes it.
     return mOutputCapabilities.appliedHeadroom;
 }
 
@@ -276,10 +246,6 @@ void GlfwDisplay::refreshDisplayCapabilities()
             colorSpaceName = colorSpaceUtf8;
         }
 
-        // AppKit describes the refresh range as intervals, and the shortest
-        // interval is the *highest* rate -- the two names read backwards against
-        // the hertz they turn into. A fixed-rate panel reports the same interval
-        // twice, which is what tells ProMotion apart from a 60 Hz display.
         const NSTimeInterval shortestInterval = screen.minimumRefreshInterval;
         const NSTimeInterval longestInterval = screen.maximumRefreshInterval;
         if (shortestInterval > 0.0)
@@ -305,11 +271,6 @@ void GlfwDisplay::refreshDisplayCapabilities()
         mOutputCapabilities.displaySync = l.displaySyncEnabled == YES;
     }
 
-    // Fires on the first probe and again whenever the window is dragged to
-    // another monitor, which are the two moments the numbers below change
-    // wholesale. Logged rather than left to the panel because "the image looks
-    // wrong on the second screen" is a report that arrives without a screenshot
-    // of the settings.
     if (mOutputCapabilities.displayName != displayName)
     {
         STRELKA_INFO("Display \"{}\": EDR headroom {:.2f}x now, {:.2f}x potential, {:.2f}x reference; "
@@ -328,10 +289,6 @@ void GlfwDisplay::refreshDisplayCapabilities()
     mOutputCapabilities.currentRefreshRateHz = currentRefreshRateHz;
     mOutputCapabilities.vrrStatus = display_output::interpretRefreshRange(minRefreshRateHz, maxRefreshRateHz);
     mOutputCapabilities.present.vrr = mOutputCapabilities.vrrStatus == display_output::VrrStatus::Supported;
-    // Reported through the backend-neutral fields too, so a log line or a future
-    // headless probe reading those gets the same answer as the Metal block.
-    // Nothing sets surfaceEncoding: this path never produces an HDR10 surface,
-    // it hands extended-range values to the window server.
     mOutputCapabilities.output.hdr10 = edr.potentialHeadroom > 1.0f;
 }
 
@@ -372,16 +329,6 @@ void GlfwDisplay::applyDisplaySettings()
     CAMetalLayer* const l = (__bridge CAMetalLayer*)layer;
     const bool sdr = mode == static_cast<uint32_t>(display_output::OutputMode::SDR);
 
-    // The renderer and its ACES output matrix produce sRGB primaries. Let
-    // ColorSync convert those to the actual panel gamut instead of labelling
-    // them as Display P3, which would oversaturate the image. The extended
-    // transfer function carries encoded values above SDR white for EDR; the
-    // plain one clamps them, which is exactly what SDR output means.
-    //
-    // The pixel format stays RGBA16Float in SDR as well. An 8-bit layer would
-    // need the blit PSO and ImGui's Metal pipeline rebuilt for the new
-    // attachment format and buys nothing here -- the window server does the
-    // clamping either way.
     const CFStringRef colorSpaceName = sdr ? kCGColorSpaceSRGB : kCGColorSpaceExtendedSRGB;
     CGColorSpaceRef colorspace = CGColorSpaceCreateWithName(colorSpaceName);
     l.colorspace = colorspace;
@@ -412,13 +359,6 @@ void GlfwDisplay::drawFrame(ImageBuffer& result)
     // A renderer that produced a texture has already done this work.
     if (result.deviceTexture)
     {
-        // Retained, not borrowed. The renderer frees and recreates its display
-        // textures whenever the render resolution or the MetalFX usage flags
-        // change -- a window resize, an upscaler or the denoiser being switched on
-        // -- while this pointer stays live in ImGui's draw list until the frame is
-        // encoded, and getDisplayNativeTexure() keeps handing it out on any frame
-        // that lands no new one. Borrowing it meant that encode could retain freed
-        // memory: a segfault inside setFragmentTexture: with nothing in the log.
         MTL::Texture* incoming = (MTL::Texture*)result.deviceTexture;
         if (incoming != mTexture)
         {
@@ -585,10 +525,6 @@ void GlfwDisplay::destroy()
 
 void GlfwDisplay::onBeginFrame()
 {
-    // Before the semaphore wait and every early-out below it: a frame this
-    // display drops is still a frame in which the user may have changed the
-    // output mode, and skipping the apply would leave the layer stale until a
-    // frame happens to complete.
     if ((mFrameIndex % kCapabilityPollFrames) == 0)
     {
         refreshDisplayCapabilities();
@@ -638,16 +574,6 @@ void GlfwDisplay::onBeginFrame()
     const float clear_color[4] = {0.45f, 0.55f, 0.60f, 1.00f};
 
     mCommandBuffer = _pCommandQueue->commandBuffer();
-    // Wait for the frame the renderer produced, when it produced it on another
-    // queue. While a new trace is in flight the display still owns the other
-    // double-buffered slot, which is already complete and needs no wait. Waiting
-    // for the new slot here would put every UI command buffer behind a 500 ms
-    // trace, exhaust the display semaphore, and freeze the editor while showing
-    // pixels that did not depend on that trace.
-    //
-    // Once the renderer publishes the new slot, Metal orders its visibility
-    // across the Metal 4 render queue and this Metal 3 display queue with the
-    // completed frame event. Returns null when both share a queue.
     if (mRender && !mRender->isRenderBusy() && !mRender->deviceError())
     {
         if (auto* ev = (MTL::Event*)mRender->getNativeFrameEvent())
@@ -697,10 +623,6 @@ void GlfwDisplay::onEndFrame()
 
     mCommandBuffer->commit();
 
-    // commandBuffer(), nextDrawable() and renderCommandEncoder() all return
-    // autoreleased objects — they are owned by mFramePool, not by us. Releasing
-    // them explicitly (as the previous code did) was an over-release that only
-    // stayed latent because the pool was never drained.
     mRenderEncoder = nullptr;
     mCommandBuffer = nullptr;
     drawable = nullptr;

@@ -1,18 +1,3 @@
-// ============================================================================
-// test_materialx_loader.cpp
-//
-// Reads the Open Chess Set's own MaterialX document -- the one shipped in the
-// MaterialX repository, not a fixture written to pass -- and checks that every
-// input it drives from a nodegraph arrives in the slot the renderer will look
-// for it in.
-//
-// That last part is the whole point. A texture that lands in no slot is not an
-// error anywhere: the loader warns, the material still renders, and the missing
-// map reads as "this material is a bit flat" rather than as a defect. The chess
-// set is a good witness because it drives seven different inputs from images
-// across fifteen materials, including two -- subsurface weight and subsurface
-// radius -- that only got slots because this asset asked for them.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -107,21 +92,11 @@ TEST_CASE("standard_surface's subsurface scale and radius collapse into OpenPBR'
     const oka::mtlx::MaterialXMaterial* king = find(doc.materials, "M_King_B");
     REQUIRE(king != nullptr);
 
-    // The document says subsurface_scale = 0.003 and drives subsurface_radius
-    // from a map. OpenPBR keeps a scalar length and a normalised tint, so the
-    // scale has to end up in the length or the medium is a thousand times too
-    // thin -- and the map then modulates the tint, which is the slot above.
     CHECK(king->params.subsurface_radius == doctest::Approx(0.003f));
 }
 
 TEST_CASE("a look-assigned material carries its subsurface block into the scene")
 {
-    // applyMaterialXDocument() is the step between the document and the
-    // renderer, and the look path is a *second* one: it does not edit a glTF
-    // material, it adds one per assignment and repoints the instances. Anything
-    // it forgets to copy is a parameter the shader then reads at its OpenPBR
-    // default -- which for subsurface_color is bright, and turns dark marble
-    // white.
     oka::Scene scene;
     const int applied = oka::mtlx::applyMaterialXDocument(scene, chessDocument());
     // Nothing matched by name: the chess glTF calls both its materials
@@ -151,13 +126,6 @@ TEST_CASE("a mapped subsurface weight still says there is a medium")
     const oka::mtlx::MaterialXMaterial* king = find(doc.materials, "M_King_B");
     REQUIRE(king != nullptr);
 
-    // The document drives `subsurface` from king_shared_scattering.jpg, so the
-    // constant would otherwise stay at zero -- and the wavefront tracer's
-    // `extend` stage, which has no UV to sample that map with, derives the
-    // interior volume from the constant alone. Zero there is not a default but a
-    // statement that the object encloses nothing: the walk crossed the piece in
-    // one unscattered line and left at full throughput, which is what rendered
-    // the kings white.
     REQUIRE_FALSE(king->texPaths[OPENPBR_TEX_SUBSURFACE_WEIGHT].empty());
     CHECK(king->params.subsurface_weight == doctest::Approx(1.0f));
 

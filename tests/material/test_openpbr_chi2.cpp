@@ -1,31 +1,3 @@
-// ============================================================================
-// test_openpbr_chi2.cpp
-//
-// Does the sampler draw from the density it reports?
-//
-// test_openpbr_consistency.cpp already checks sample and eval against each other
-// at the directions the sampler produced. That is a sharp test and it has one
-// blind spot, which is the reason this file exists: it only ever looks where the
-// sampler chose to look. A sampler and a pdf that are wrong by the same factor,
-// or that agree pointwise while the sampler visits the wrong part of the
-// hemisphere, pass it and fail here.
-//
-// The test is the standard one: bin the sphere into equal-solid-angle cells,
-// draw many directions, and compare the histogram against the pdf integrated
-// over each cell. Bins are uniform in cos(theta) and in phi, so every cell
-// subtends the same solid angle and no Jacobian enters the comparison.
-//
-// Materials are deliberately rough. A near-delta lobe puts almost all of its
-// mass inside one cell, and the statistic then measures the binning rather than
-// the sampler; delta events are skipped outright for the same reason.
-//
-// Checked by re-introducing the defect it guards, which for a statistical test
-// is the only way to know it is doing anything: multiplying the reported pdf by
-// (1 + 0.25 * wi.x) -- a 25% skew across the azimuth, invisible to every other
-// test in the suite -- takes the reduced statistic from passing to 14.6 and 14.7
-// on two of the four materials, against a bound of 12. That is the sensitivity
-// this is worth: it will catch a sampler pointed the wrong way, not a percent.
-// ============================================================================
 
 #include <doctest/doctest.h>
 

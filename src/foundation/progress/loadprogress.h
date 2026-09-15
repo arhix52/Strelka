@@ -6,27 +6,8 @@
 namespace oka
 {
 
-/// Progress of a scene load, written by whoever is doing the work and read by
-/// the UI once a frame.
-///
-/// A load crosses two threads and does so in two different ways: the glTF parse
-/// runs on a worker, and the GPU-side build runs a chunk at a time on the main
-/// loop. Both report here, which is why the fields are atomic even though only
-/// one of the producers is actually concurrent -- one shared shape is easier to
-/// keep honest than two that agree by convention.
-///
-/// Nothing but scalars crosses the boundary. The stage is an index into a table
-/// the UI owns rather than a string, so there is nothing to allocate on a worker,
-/// nothing to lock while reading, and nothing whose lifetime has to outlive the
-/// load. A reader that catches `done` and `total` mid-update draws one frame with
-/// a slightly wrong bar, which is the whole cost of not having a mutex here.
 struct LoadProgress
 {
-    /// Listed in the order they actually run, because the UI turns this into a
-    /// fraction by summing the weights of the stages before the current one. A
-    /// declaration order that disagreed with the run order would make the bar
-    /// jump backwards, which is exactly the kind of thing nobody would think to
-    /// look for here.
     enum class Stage : uint32_t
     {
         Idle = 0,

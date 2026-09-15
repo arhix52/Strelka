@@ -12,23 +12,6 @@
 
 #include <cmath>
 
-// ---------------------------------------------------------------------------
-// A normal map that outruns the geometry.
-//
-// At a grazing angle the perturbed normal can end up pointing away from the
-// viewer on a triangle squarely facing the camera. Nothing downstream can shade
-// that: standard_pbr reads dot(N, wo) <= 0 as a dielectric exit, an opaque
-// material has no transmission lobe to answer with, and the sample comes back
-// BSDF_EVENT_ABSORB -- which the closest-hit program turns into an exactly black
-// pixel, because it terminates above next-event estimation.
-//
-// The correction is Cycles': rotate the normal the smallest amount that puts
-// the mirror direction back above the surface. The other half of Cycles' answer
-// is that the correction is for the glossy closures only -- its diffuse closure
-// keeps the map's own normal and evaluates to nothing behind the view ray --
-// and the second block of cases below is that half.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 

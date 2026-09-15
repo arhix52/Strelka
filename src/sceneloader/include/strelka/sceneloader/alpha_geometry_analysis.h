@@ -45,10 +45,6 @@ struct AlphaGeometryAnalysisOptions
     // subdivision that removes enough transparent children can have zero or
     // negative cost and is therefore still accepted at the limit.
     float growthLimit = 3.0f;
-    // The production heuristic avoids spending four triangles when the first
-    // split resolves nothing. Turning it off is useful as an offline upper
-    // bound: it shows whether another level could recover enough coverage to
-    // justify a contour-based implementation.
     bool stopWhenAllChildrenUnknown = true;
 };
 
@@ -80,12 +76,6 @@ struct AlphaGeometryAnalysis
     std::vector<AlphaGeometryLevelStats> levels;
 };
 
-// Conservatively classify transformed UV triangles against the alpha values
-// sampled by the renderer. `alpha` is row-major level-zero UNORM alpha. The
-// query includes every texel that the selected nearest/linear filter can touch
-// and applies repeat addressing, so a transparent/opaque answer is safe for
-// every point in the triangle; an axis-aligned UV bound can only turn a
-// resolvable triangle into unknown, never the reverse.
 AlphaGeometryAnalysis analyzeAlphaGeometry(std::span<const AlphaUvTriangle> triangles,
                                            std::span<const uint8_t> alpha,
                                            uint32_t width,

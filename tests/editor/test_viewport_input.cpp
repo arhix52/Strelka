@@ -8,10 +8,6 @@ using oka::test::HeadlessImGui;
 namespace
 {
 
-// The viewport frame is submitted as an item with no ID so the gizmo can grab the
-// mouse. Everything else the viewport does keys off that item being hovered:
-// picking fires on release, and camera input is gated on it, so the hover state
-// has to survive a button being held down.
 struct HoverTrace
 {
     bool onPress = false;

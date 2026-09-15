@@ -16,41 +16,6 @@
 
 using oka::test::stratum;
 
-// ---------------------------------------------------------------------------
-// A thin-walled surface hit from its far side.
-//
-// A soap bubble is a closed sphere of film with air on both sides. A ray that
-// passes through the front wall crosses the inside and meets the far wall from
-// behind, so the shading normal points away from it -- geometrically identical
-// to a ray leaving solid glass, and physically nothing like it. There is no
-// medium being left: the far wall is another air-to-film interface, and its
-// index ratio is the entering one.
-//
-// Deriving the ratio from the side instead made the far wall dense-to-thin,
-// where everything past the critical angle reflects with probability 1. At IOR
-// 1.6 the critical angle is 38.7 degrees, and the incidence angle at radius r
-// on a sphere is asin(r / R), so the entire annulus outside r / R = 1 / 1.6 =
-// 0.625 reflected every ray that reached it. Reflected, never absorbed -- so
-// Russian roulette never ended the path and maxDepth did, after the ray had
-// bounced between the two walls carrying full throughput and returning nothing.
-//
-// The rendered symptom was a black ring covering the outer 37.5% of every
-// bubble in the Isometric Bathroom scene, which is what that arithmetic says it
-// should be. tools/iso_bathroom/bubble_profile.py is what measured it: the
-// luminance across a bubble sat at 0.94 of the wall behind it out to r / R =
-// 0.6 and fell to 0.18 beyond it, and the break landed in the bin holding
-// 0.625.
-//
-// What is pinned here:
-//   1. the far wall really is a back-face hit, or the rest of the file is
-//      testing nothing
-//   2. it transmits past the solid critical angle, at every angle up to grazing
-//   3. its reflectance follows the entering-side Fresnel, not the exiting one
-//   4. neither wall creates or destroys energy
-//   5. solid glass still total-internally-reflects, i.e. the exemption did not
-//      leak into the case the critical angle is real for
-// ---------------------------------------------------------------------------
-
 namespace
 {
 
@@ -304,10 +269,6 @@ TEST_CASE("a rough thin wall is evaluable in transmission and agrees with sample
 
 TEST_CASE("solid glass still total-internally-reflects")
 {
-    // The exemption is for materials with no interior. A solid sphere has one,
-    // and past the critical angle its far wall must keep the light in -- this is
-    // what makes glass look like glass, and it is the case the thin-walled
-    // branch must not have leaked into.
     for (float deg : { 45.0f, 60.0f, 80.0f })
     {
         const SurfaceInteraction si = wall_si(deg, /*front=*/false, 0.0f, /*thin=*/false);

@@ -1,29 +1,3 @@
-// ============================================================================
-// test_sheen.cpp
-//
-// KHR_materials_sheen: the retroreflective fabric layer. Its whole reason to
-// exist is what happens at grazing angles -- a GGX lobe falls off exactly where
-// a towel or a rug gets brighter, so fabric rendered with roughness alone reads
-// as plastic no matter which roughness it is given.
-//
-// The layer is implemented on top of the existing lobes rather than beside them:
-// sheen shares the cosine-sampled lobe with diffuse, because the Charlie
-// distribution has no cheap invertible sampling routine. Sharing is what makes
-// the pdf stay a single cosine term, and it is also what could quietly break --
-// the shared lobe has to remain reachable on a fabric whose albedo is black, or
-// the sheen is simply never sampled and the material renders as if the extension
-// were not there.
-//
-// Pinned here:
-//   1. sheen 0 leaves the material bit-identical to before the lobe existed
-//   2. sheen brightens grazing angles far more than facing ones -- the property
-//      the lobe was added for, stated as a measurement rather than a look
-//   3. sample and eval agree, since MIS weighs each strategy by the other's
-//      density and a term present in one and missing from the other blends two
-//      different BRDFs
-//   4. a black-albedo fabric still scatters: the shared lobe must stay reachable
-//   5. the layer does not manufacture energy
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -174,11 +148,6 @@ TEST_CASE("sheen: brightens grazing angles more than facing ones")
     const float gainFacing = sheenFacing.bsdf.x / plainFacing.bsdf.x;
     const float gainGrazing = sheenGrazing.bsdf.x / plainGrazing.bsdf.x;
 
-    // Head-on, Charlie has almost nothing to add -- the distribution peaks at
-    // grazing -- while the base is scaled down by what the layer above it took.
-    // So the facing response should sit just under where it started, not above:
-    // a sheen that brightens a surface seen flat-on is a sheen that is really
-    // just a diffuse boost.
     CHECK(gainFacing == doctest::Approx(1.0f).epsilon(0.02));
     CHECK(gainGrazing > 2.0f);
 }
@@ -218,10 +187,6 @@ TEST_CASE("sheen: sample and eval agree")
 
 TEST_CASE("sheen: a black fabric still scatters")
 {
-    // Sheen shares the diffuse lobe's cosine sampling, and the share is weighted
-    // by the diffuse weight -- which is zero for a black base colour. Without the
-    // max in pbr_lobe_weights the lobe is then never selected and the sheen is
-    // silently absent on exactly the materials it is most visible on.
     MaterialParams fabric = cloth_params(1.0f, 0.3f);
     fabric.base_color = make_float3(0.0f, 0.0f, 0.0f);
 
@@ -245,10 +210,6 @@ TEST_CASE("sheen: a black fabric still scatters")
 
 TEST_CASE("sheen: does not manufacture energy")
 {
-    // The layer is additive over the base, like the existing clearcoat, so it is
-    // not energy-exact -- but it must not push a fabric past the light that fell
-    // on it, which is what a missing visibility term or a mis-normalised Charlie
-    // distribution would do.
     for (const float deg : { 20.0f, 50.0f, 78.0f })
     {
         const float3 wo = dir_at(deg);

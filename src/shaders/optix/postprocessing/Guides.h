@@ -1,18 +1,5 @@
 #pragma once
 
-// Device-side helpers for writing the denoiser guide record.
-//
-// Shared by the miss program and the closest-hit program, because both of them
-// can be the one that describes what the camera sees: a ray that escapes the
-// scene still needs a record, or the denoiser reads whatever the previous frame
-// left in the guides and smears the silhouette across the background.
-//
-// The *decisions* -- which surface is worth describing, what makes a pixel
-// reactive, how a motion vector is projected and clamped -- live in
-// src/render/optix/optix_denoise_plan.h, which has no CUDA in it and is covered
-// by tests/render/test_optix_denoise_plan.cpp. This header is only the part that
-// needs a Params and a matrix multiply.
-
 #include <OptixRenderParams.h>
 #include <optix_denoise_plan.h>
 
@@ -67,13 +54,6 @@ static __forceinline__ __device__ float2 guideCurrentSample(const Params& params
     return make_float2(params.aov[pixelIndex].motionX, params.aov[pixelIndex].motionY);
 }
 
-/// The record a ray that reached the environment leaves behind.
-///
-/// Not only at depth 0: a specular primary hit defers its guides, so if the
-/// reflected ray is the one that escapes, this is the only chance to write them.
-/// Depth and motion in that case stay whatever the primary hit put there --
-/// they belong to the surface the camera sees, and the sky several hundred
-/// pixels away is not it.
 static __forceinline__ __device__ void writeBackgroundGuide(const Params& params,
                                                             const uint32_t pixelIndex,
                                                             const float3 rayDir,
@@ -94,12 +74,6 @@ static __forceinline__ __device__ void writeBackgroundGuide(const Params& params
     if (depth == 0)
     {
         a.depth = oka::guides::backgroundDepth(params.denoiseDepthMode);
-        // The sky moves on screen when the camera turns, and leaving this at zero
-        // tells the denoiser it did not. A direction reprojects like a point at
-        // infinity -- w = 0 -- so the previous camera is all that is needed, and
-        // no depth. Only for a camera ray: past a bounce `rayDir` is the
-        // direction the path left a surface in, and projecting that answers a
-        // question about the bounce rather than about this pixel.
         const float2 motion = guideScreenMotion(params, make_float4(rayDir, 0.0f), currentSample);
         a.motionX = motion.x;
         a.motionY = motion.y;

@@ -1,10 +1,3 @@
-// Tests for src/scene/include/strelka/scene/vertex_packing.h
-//
-// The tangent handedness sign lives in bit 30 of the packed tangent. That only
-// works because packNormal fills bits 0..29 and nothing above, and because the
-// unpacked z mask is 0x3ff00000 (10 bits) rather than the older 0xfff00000
-// (12 bits). The same narrowing had to be repeated in the CUDA and Metal
-// device-side copies, so the invariants below are the contract all three share.
 
 #include <doctest/doctest.h>
 
@@ -255,10 +248,6 @@ TEST_CASE("packUV keeps the two components independent")
     const glm::float2 base(-10.0f, 10.0f);
     const uint32_t packed = packUV(base);
     CHECK((packed & 0x0000ffffu) == 0u); // x == -10 -> 0
-    // 16383.99999f rounds to exactly 16384.0f in single precision, so the top of
-    // the range packs to 16384, not 16383. Harmless -- the field is 16 bits wide
-    // and unpackUV divides by the same rounded constant, so 10.0 still
-    // round-trips exactly -- but it is load-bearing enough to pin down.
     CHECK(((packed >> 16) & 0xffffu) == 16384u);
 
     const glm::float2 swapped = unpackUV(packUV(glm::float2(10.0f, -10.0f)));

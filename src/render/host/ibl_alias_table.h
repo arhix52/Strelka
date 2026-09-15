@@ -108,15 +108,6 @@ inline IblMapStatistics measureIblMap(const float* pixelRgba, int width, int hei
 }
 } // namespace detail
 
-// Walker/Vose alias table for a piecewise-constant lat-long environment in the
-// continuous solid-angle measure. Texel i receives mass
-//
-//     P_i = envelope_i * DeltaOmega_i / sum_j(envelope_j * DeltaOmega_j)
-//
-// where envelope_i covers the bilinear reconstruction footprint and
-// DeltaOmega_i is the exact solid angle of its row segment. Both GPU samplers
-// draw cos(theta) uniformly inside the selected row, so the directional density
-// is its represented texel PMF divided by DeltaOmega_i.
 inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, int width, int height)
 {
     IblAliasTableResult out;
@@ -131,12 +122,6 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
     const detail::IblMapStatistics statistics = detail::measureIblMap(pixelRgba, width, height, &luminance);
     const double deltaPhi = 2.0 * std::numbers::pi_v<double> / (double)width;
 
-    // A normalized linear texture lookup from inside texel bin (x,y) can use
-    // x-1/x/x+1 and y-1/y/y+1 because texel centres are half a pixel from the
-    // bin edges. Use the maximum luminance over that exact footprint as a
-    // piecewise-constant proposal envelope. It leaves a constant map uniform
-    // and, unlike centre-only weights, cannot assign PDF zero to positive
-    // bilinear radiance.
     for (int y = 0; y < height; ++y)
     {
         const double theta0 = std::numbers::pi_v<double> * (double)y / (double)height;
@@ -195,11 +180,6 @@ inline IblAliasTableResult buildSolidAngleIblAliasTable(const float* pixelRgba, 
     return out;
 }
 
-// Build a smaller Metal sampling table without changing the environment
-// texture or its energy calibration. Each proposal texel stores the maximum
-// source luminance in its footprint; buildSolidAngleIblAliasTable then expands
-// that by the neighboring bilinear footprint. This keeps positive texture
-// reconstruction supported while reducing the random alias-table working set.
 inline IblAliasTableResult buildDownsampledSolidAngleIblAliasTable(
     const float* pixelRgba, int sourceWidth, int sourceHeight, int requestedWidth, int requestedHeight)
 {

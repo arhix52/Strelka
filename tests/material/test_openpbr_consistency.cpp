@@ -1,39 +1,3 @@
-// ============================================================================
-// test_openpbr_consistency.cpp
-//
-// The OpenPBR sibling of test_sample_eval_consistency.cpp, and it exists for a
-// narrower reason than that file does.
-//
-// The BSDF itself is Adobe's, vendored unmodified, so its internal
-// sample/eval/pdf agreement is not what is under test here -- upstream owns
-// that. What is under test is the bridge in openpbr/openpbr_bridge.h, which has
-// to reconcile two different cosine conventions:
-//
-//     Adobe   openpbr_eval()          returns  f * |cos|
-//     Adobe   openpbr_sample() weight returns  f * |cos| / pdf
-//     Strelka BsdfEvalResult::bsdf    is       f          (no cosine)
-//     Strelka BsdfSampleResult
-//             ::bsdf_over_pdf         is       f * |cos| / pdf
-//
-// So the sample path passes its weight straight through and the eval path
-// divides the cosine back out. Forget that divide and nothing looks broken: NEE
-// simply picks up a factor of cos, which reads as "the new material is a little
-// dark at grazing angles". Meanwhile the pdf stays right, so MIS keeps summing
-// to one and the image converges -- to the wrong answer. That is precisely the
-// class of bug the existing suite was written to refuse, and the invariant that
-// catches it is the same one:
-//
-//     bsdf_over_pdf * pdf == bsdf * |NdotL|
-//
-// Checked at directions the sampler actually produced, over a grid of materials
-// that turns each OpenPBR lobe on in turn, because a bridge that only handles
-// the diffuse lobe would pass any single-material test.
-//
-// Delta lobes (BSDF_EVENT_SPECULAR) are skipped: a smooth coat or smooth
-// specular has no density with respect to solid angle, openpbr_eval() correctly
-// returns zero for it, and comparing the two is meaningless rather than a
-// failure. Same rule, and same reason, as the standard_pbr suite.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -169,13 +133,6 @@ std::vector<NamedMaterial> lobeLadder()
     return out;
 }
 
-// Two view directions: near-normal and grazing. Grazing is where a missing
-// cosine divide is largest, so it is not optional.
-//
-// A function rather than a namespace-scope array: float3 is glm::vec3 on the
-// host and its constructor is not constexpr under GLM_FORCE_CTOR_INIT, which
-// makes a static-storage-duration array a bugprone-throwing-static-initialization
-// error in this build.
 std::array<float3, 2> views()
 {
     return { make_float3(0.15f, 0.05f, 1.0f), make_float3(0.94f, 0.10f, 0.32f) };

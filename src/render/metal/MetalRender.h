@@ -87,11 +87,6 @@ public:
         mResetRestirHistory = true;
         mFrameUniforms.requestSharcReset();
     }
-    /// Rebuilds the display image on the host from the linear frame the slot
-    /// holds, at the headroom the caller asks for and with no transfer encoding.
-    /// Mirrors what the OptiX backend does with a CUDA kernel, and for the same
-    /// reason: the readback has to be able to answer at a *different* headroom
-    /// than the one on screen, which a copy of the finished texture cannot.
     bool readDisplayReferred(std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput);
 
     bool readDisplayTexture(std::vector<float>& rgba, uint32_t& width, uint32_t& height) override;
@@ -147,10 +142,6 @@ private:
         int readyIndex, std::vector<float>& rgba, uint32_t& width, uint32_t& height, float maxOutput);
 
     MTL::Buffer* mAccumulationBuffer = nullptr;
-    // Metal validates every declared kernel binding even when an indirect
-    // dispatch has zero threadgroups. The streaming loader traces an empty TLAS
-    // before material and geometry tables exist, so bind a zero record until
-    // the real tables arrive rather than passing null GPU addresses.
     MTL::Buffer* mSceneTablePlaceholder = nullptr;
 
     // Domain-owned resources (see docs/metal-backend.md).
@@ -203,14 +194,6 @@ private:
     std::vector<float> mAnimTargetTimes;
     std::vector<bool> mAnimChanged;
 
-    // The previous frame's pose, for denoiser motion vectors.
-    //
-    // Deliberately not Geometry's prev VB: that one is a motion-blur shutter
-    // keyframe, and when motion blur is off it is forced equal to the current
-    // pose, which would make every motion vector describe a scene that never
-    // deforms. Vertices still need a snapshot before skinning. Instance
-    // descriptors do not: MetalAccelStructure swaps two fully initialized
-    // buffers when transforms change, leaving the old current as previous.
     MTL::Buffer* mPrevFrameVertexBuffer = nullptr;
     bool mHasPrevFramePose = false;
     /// Prepare previous-pose storage and snapshot deforming vertices.
@@ -225,11 +208,6 @@ private:
     /// a real interval and the frame has motion blur in it -- true across a pause.
     bool mShutterIntervalActive = false;
     bool mWasAnimationPlaying = false;
-    /// A freshly built scene has never been posed: the vertex buffer holds the
-    /// bind pose the loader uploaded, and the animation block only acts on a
-    /// change of time -- which a load does not produce, because the loader sets
-    /// each animation's current time to its start and the editor asks for that
-    /// same start. Raised by the build so the first frame past it poses once.
     bool mNeedsInitialPose = false;
     bool mPausedBlurRefine = false;
     void rebuildAccelerationStructures();
@@ -241,10 +219,6 @@ private:
     // rebuilt then and not every frame.
     uint32_t mMetal4ResidencyGeneration = 0;
     uint32_t mMetal4SharcResidencyGeneration = 0;
-    // Resources added by makeResourcesResidentForMetal4. A residency set retains
-    // its allocations independently of the C++ owner, so every replacement must
-    // remove the previous generation or resolution changes accumulate old GPU
-    // buffers indefinitely.
     std::unordered_set<MTL::Allocation*> mMetal4FrameResidents;
     // Still owned by MetalRender: residency spans every domain (geometry, lights,
     // textures, guides), not only wavefront queues. Integrator flags dirty when
@@ -266,10 +240,6 @@ private:
 
     // Async render (double-buffered output)
     Buffer* mAsyncOutputBuffers[2] = { nullptr, nullptr };
-    // How the linear frame in each slot becomes a display image. Filled from
-    // the tonemap uniforms the frame was encoded with, so a readback taken
-    // later reproduces that frame's transform rather than the current
-    // settings, which the user may have moved in the meantime.
     PresentationMetadata mPresentation[2]{};
     bool mResetDenoiseHistory = true;
     bool mResetRestirHistory = true;
@@ -285,11 +255,6 @@ private:
     /// scene and camera as they stand. What the sample budget freezes is that
     /// texture, so a post-only frame needs to know it exists.
     bool mHasDenoisedFrame = false;
-    /// Set by render() when the Metal4 spatial-upscale path ran: its result sits
-    /// in mPost.displayTexture() and still needs a CPU-side copy into the caller's
-    /// output buffer, done by renderSync() once the frame is known complete. See
-    /// the comment where this is set for why that copy is not just another
-    /// Metal4 encoder.
     bool mPendingSpatialUpscaleReadback = false;
     /// Force motion vectors back to camera-only, for measuring what the
     /// previous-frame pose is actually worth.

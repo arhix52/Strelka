@@ -1,18 +1,5 @@
 #pragma once
 
-// Guide-production and denoiser-configuration rules for the OptiX backend.
-//
-// Pure arithmetic and pure decisions, no CUDA and no OptiX headers, so the parts
-// of the denoiser that can be wrong without a GPU can be tested without one.
-// OptixRender.cpp static_asserts that the production struct sizes match what
-// this header is told, in the same way src/render/host/integrator_buffer_sizes.h
-// does for the Metal integrator.
-//
-// The device code includes this too, which is why the functions carry a
-// qualifier macro instead of plain `inline`: the alternative is a second copy of
-// the same rules living in a .cu, and a guide rule that exists twice is a guide
-// rule that will disagree with itself.
-
 #include <cstddef>
 #include <cstdint>
 
@@ -52,14 +39,6 @@ STRELKA_GUIDE_FN float backgroundDepth(uint32_t depthMode)
     return depthMode == kDepthDevice ? 0.0f : 1e7f;
 }
 
-/// Whether this surface is one the denoiser can be told about.
-///
-/// A mirror or a pane of glass has no albedo to demodulate against and a
-/// roughness of nothing, so guides taken there say a featureless black surface
-/// sits where a whole reflected world is. With `guidePrimaryHit` the
-/// camera-visible surface is the answer by definition, so the roughness floor --
-/// and the flicker it causes where a thin material sits on top of it -- does not
-/// enter into it.
 STRELKA_GUIDE_FN bool guideWorthy(bool guidePrimaryHit, uint32_t depth, float roughness)
 {
     return guidePrimaryHit ? (depth == 0u) : (roughness > kGuideRoughnessFloor);
@@ -76,14 +55,6 @@ STRELKA_GUIDE_FN bool shouldWriteGuide(
     return guideWorthy(guidePrimaryHit, depth, roughness) || depth >= kGuideLastChanceDepth;
 }
 
-/// "The history for this pixel is not valid." The one thing that makes it so is
-/// guides describing a surface other than the one the camera sees -- the
-/// deferred-guide case, a primary hit too smooth to describe. Water, glass, a
-/// mirror.
-///
-/// It deliberately does not scale with the motion vector: that marks the whole
-/// frame the moment the camera moves at all, and a pixel that moved is
-/// reprojectable rather than untrustworthy.
 STRELKA_GUIDE_FN float reactiveFor(uint32_t guideDepth)
 {
     return guideDepth > 0u ? 1.0f : 0.0f;
@@ -95,20 +66,9 @@ struct Vec2
     float y = 0.0f;
 };
 
-/// Where a point was on screen last frame, minus where it is now, in pixels,
-/// y down.
-///
-/// `prevClip*` is the point run through the previous frame's world-to-clip
-/// matrix; `curr*` is the *jittered* sample position the camera ray actually
-/// went through, not the pixel centre.
 STRELKA_GUIDE_FN Vec2 screenMotion(
     float prevClipX, float prevClipY, float prevClipW, float currX, float currY, uint32_t width, uint32_t height)
 {
-    // A w at or near zero is a point on the previous camera's plane, and dividing
-    // by it does not produce a large motion vector, it produces a meaningless
-    // one. Zero is the honest answer for a reprojection that has none: it says
-    // "this pixel did not move", and every caller that can reach this case
-    // already marks the pixel reactive.
     const float kMinW = 1e-4f;
     if (!(prevClipW > kMinW))
     {
@@ -130,12 +90,6 @@ STRELKA_GUIDE_FN Vec2 screenMotion(
     return Vec2{ mx, my };
 }
 
-/// Factor to multiply a colour by so its luminance does not exceed `threshold`.
-///
-/// A single unbounded sample is a bright dot that a temporal filter then smears
-/// across many frames, so it costs far more than the energy it carries. Scaled
-/// rather than dropped, so the pixel keeps its hue and most of its brightness.
-/// Off when the threshold is zero.
 STRELKA_GUIDE_FN float fireflyScale(float luminance, float threshold)
 {
     if (!(threshold > 0.0f) || !(luminance > threshold))
@@ -179,19 +133,6 @@ struct DenoisePlan
     }
 };
 
-/// Resolve the render.denoise / render.upscale / render.upscale_mode switches
-/// and the debug view into one plan.
-///
-/// `upscale` on its own selects the non-temporal 2x model, which is the closest
-/// OptiX has to MetalFX's spatial scaler; `upscaleMode == 1` ("temporal") or
-/// denoising with a valid history selects the temporal one. Upscaling implies
-/// denoising here, because unlike MetalFX there is no OptiX path that scales
-/// without also running the network.
-///
-/// Odd render sizes are the reason the 2x models take the *floor* of half the
-/// output and then produce an image that may be a pixel short: rather than
-/// silently returning a differently sized frame, upscaling is declined when the
-/// output dimensions are not even.
 inline DenoisePlan denoisePlan(
     bool denoise, bool upscale, uint32_t upscaleMode, uint32_t debugMode, uint32_t width, uint32_t height)
 {
@@ -208,10 +149,6 @@ inline DenoisePlan denoisePlan(
         return plan;
     }
 
-    // `render.upscale_mode = "temporal"` selects the temporally stable model,
-    // for denoising as well as for upscaling. Off by default: a temporal model
-    // asked to reuse a history it has no motion vectors for produces a smear,
-    // and a headless render of a still camera has nothing to gain from it.
     plan.temporal = (upscaleMode == 1u);
     plan.upscale = canUpscale;
     plan.writeAov = true;

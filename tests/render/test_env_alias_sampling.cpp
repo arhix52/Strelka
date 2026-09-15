@@ -1,15 +1,5 @@
 #include <doctest/doctest.h>
 
-// The two halves of environment importance sampling, checked against each other
-// on the host: the host builder in render/host/ibl_alias_table.h and the draw the GPU
-// actually runs, which env_alias_sampling.h compiles for both targets.
-//
-// What this pins is the property the whole scheme rests on and that no
-// individual line of either file states: the frequency with which a texel is
-// drawn has to equal the density MIS later divides by. If those two disagree the
-// image is still an image -- smooth, plausible, and wrong by whatever the
-// mismatch is -- which is why it is worth a test rather than an inspection.
-
 #include <env_alias_sampling.h>
 #include <env_map_math.h>
 #include <host/ibl_alias_table.h>
@@ -58,10 +48,6 @@ std::vector<float> makeMap(int w, int h)
     return px;
 }
 
-// The builder's entry and the device's entry are two declarations of one layout;
-// the backend uploads the former's bytes and the shader reads them as the latter.
-// Copying field by field here is the cheap way of saying so out loud -- the size
-// and alignment halves of the same claim are static_asserts in OptixRender.cpp.
 std::vector<EnvAliasEntry> toDeviceTable(const std::vector<oka::metal::EnvAliasEntry>& src)
 {
     std::vector<EnvAliasEntry> out(src.size());

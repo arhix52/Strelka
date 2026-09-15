@@ -122,15 +122,6 @@ void drawSwapchainOutputSettings(SettingsManager& settings,
     drawFactTable("##swapchainCapabilities", facts);
 }
 
-/// Metal output settings.
-///
-/// Deliberately not the swapchain panel above with the words changed. macOS
-/// gives an application no HDR10 surface to select and no absolute luminance to
-/// target: the window server grants a *headroom*, a multiplier over SDR white
-/// that moves with the brightness slider, the thermal state and what other
-/// windows are asking for. So there is nothing here to set in nits, and the
-/// choices that do exist -- how much of the granted headroom to use, and how the
-/// layer presents -- have no counterpart on the Vulkan side.
 void drawMetalOutputSettings(SettingsManager& settings,
                              const display_output::DisplayCapabilities& capabilities)
 {
@@ -210,11 +201,6 @@ void drawMetalOutputSettings(SettingsManager& settings,
         ImGui::EndCombo();
     }
 
-    // A ceiling, not a target: the display still decides what it grants, this
-    // only stops the tone curve from spending all of it. Worth having because a
-    // panel that grants 16x makes an ordinary interior render look like a
-    // lightbox, and because A/B against an SDR reference needs a fixed number
-    // rather than one the compositor keeps moving.
     headroomLimit = settings.getAs<float>("display/edr/headroomLimit");
     ImGui::BeginDisabled(storedMode == static_cast<uint32_t>(display_output::OutputMode::SDR));
     if (ImGui::DragFloat("Headroom limit", &headroomLimit, 0.05f, 0.0f,
@@ -304,10 +290,6 @@ void drawDisplayOutputSettings(SettingsManager& settings, const Display& display
         return;
     }
 
-    // Which controls exist is a property of the backend, not a preference. The
-    // swapchain panel used to be drawn on macOS too, where every row it reports
-    // reads "unavailable" -- not because the display cannot do it, but because
-    // none of it is a Metal concept.
     capabilities = display.getOutputCapabilities();
     if (capabilities.backend == display_output::DisplayBackend::Metal)
     {
@@ -521,30 +503,10 @@ void EditorApp::drawRenderSettingsPanel()
 
                 ImGui::SeparatorText("Denoiser");
 
-                // One choice, not two checkboxes -- and this backend's choices, not the
-                // other backend's.
-                //
-                // Denoising and upscaling are alternatives on both: MetalFX sends a frame
-                // through the spatial scaler or the temporal denoised one, and the OptiX
-                // plan has upscaling imply denoising because nothing in it scales without
-                // also running the network. As separate toggles they offered four states,
-                // two of which meant the same thing and none of which said so.
-                //
-                // Which states exist, what they are called, whether the render scale is a
-                // slider or follows from the mode, and what the fallback warning means
-                // are all the backend's answer to give -- see editor_denoiser_ui.h. This
-                // panel used to hard-code MetalFX's answers and show them over OptiX,
-                // where the name was wrong and the scale slider did nothing.
                 const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
                 const float requestedScale = m_settingsManager->getAs<float>("render/pt/upscaleFactor");
                 const bool denoiseSetting = m_settingsManager->getAs<bool>("render/pt/denoise");
                 const bool upscaleSetting = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
-                // Keep the remembered index and what is actually running in step, every
-                // frame rather than once. A mode index outliving the list it indexed is
-                // how the combo came to show one thing while the renderer ran another: it
-                // displayed whatever sat at that index, and the next click picked
-                // something nobody asked for. The settings move without the panel too --
-                // the frame-budget button, the benchmark drivers, STRELKA_DENOISE.
                 if (fx.modeCount > 0 && (!mDenoiseModeInitialized || mDenoiseModeIndex >= fx.modeCount ||
                                          !editor_denoiser::settingsMatchMode(
                                              fx, mDenoiseModeIndex, denoiseSetting, upscaleSetting, requestedScale)))
@@ -876,12 +838,6 @@ void EditorApp::drawRenderSettingsPanel()
             ImGui::EndTabItem();
         }
 
-        // --- Radiance cache ----------------------------------------------------
-        //
-        // Everything here changes what the image is, not just how fast it arrives,
-        // so every control restarts accumulation. Counting occupancy is a pass over
-        // the whole table, so it is asked for only while this node is open -- which
-        // is what the setting outside the `if` turns back off again.
         if (ImGui::BeginTabItem("Cache"))
         {
             const bool cachePanelOpen = ImGui::TreeNodeEx("Radiance cache (SHaRC)", ImGuiTreeNodeFlags_DefaultOpen);
@@ -1064,10 +1020,6 @@ void EditorApp::drawRenderSettingsPanel()
                     ImGui::EndTooltip();
                 }
 
-                // Responsive lighting. The controls are shown whether or not the
-                // scene has a responsive light, because the answer to "why is this
-                // doing nothing" is on the light's own panel and a control that is
-                // not there cannot say so.
                 ImGui::SeparatorText("Responsive lighting");
                 bool responsiveEnabled = m_settingsManager->getAs<bool>("render/pt/sharcResponsiveLighting");
                 if (ImGui::Checkbox("Enable##sharcResponsive", &responsiveEnabled))
@@ -1104,10 +1056,6 @@ void EditorApp::drawRenderSettingsPanel()
                     ImGui::EndTooltip();
                 }
 
-                // Metal-only cache internals. The controls above mean the same thing
-                // on both backends; what is below is the hash map this backend
-                // actually has -- a compact 32-bit key, a sparse update pass and an
-                // fp16 resolved half. See docs/sharc-metal.md.
                 const bool metalBackend = m_render->denoiserKind() == Render::DenoiserKind::eMetalFx;
                 if (metalBackend)
                 {

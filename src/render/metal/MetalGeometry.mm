@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <vector>
 
-
 namespace oka::metal
 {
 namespace
@@ -211,20 +210,6 @@ void MetalGeometry::buildBuffers(Scene* scene)
         anySkeletal = anySkeletal || mesh.isSkeletal;
     }
 
-    // Shared rather than managed, and this is not a preference.
-    //
-    // Metal 4 removes the managed storage mode outright -- it exists to keep a
-    // separate CPU and GPU copy in step on discrete memory, which is not the
-    // architecture Metal 4 targets -- and it removes didModifyRange with it. A
-    // managed buffer bound into an argument table by GPU address therefore has
-    // no defined behaviour, and the GPU writing one (which is exactly what the
-    // skinning kernel does to this buffer) has nowhere to publish the result.
-    //
-    // When the pointer is page-aligned and the allocation is large enough, wrap
-    // it instead of copying. On the pine forest that is 1.5 GB of vertices plus
-    // 0.56 GB of indices that otherwise exist twice in the same unified pool.
-    // Skeletal vertex buffers are copied: the skinning kernel rewrites them, and
-    // the host array has to keep the bind pose for picking.
     if (vertexDataSize > 0)
     {
         const size_t vertexCapacityBytes = anySkeletal ? 0 : vertices.capacity() * sizeof(Scene::Vertex);
@@ -238,12 +223,6 @@ void MetalGeometry::buildBuffers(Scene* scene)
     }
     mVertexBufferAliased = mWrappedVertices || mWrappedIndices;
 
-    // The previous shutter keyframe, for motion blur and for the denoiser's
-    // reprojection. It is a second copy of every vertex in the scene -- 1.66 GB
-    // on the pine forest -- and it only ever differs from the current one where
-    // something deforms. A scene with no skeletal geometry can share the buffer
-    // instead of duplicating it, which is the difference between that scene
-    // fitting in memory and not.
     if (vertexDataSize > 0 && anySkeletal)
     {
         mPrevVertexBuffer = mDevice->newBuffer(vertices.data(), vertexDataSize, MTL::ResourceStorageModeShared);

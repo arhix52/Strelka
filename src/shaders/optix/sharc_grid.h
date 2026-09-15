@@ -6,9 +6,6 @@
 #include <cstdint>
 
 // NOLINTBEGIN(cppcoreguidelines-init-variables)
-//
-// NVCC and host tests compile this header, while clang-tidy sees only the host
-// build. Initialising out-parameters or GPU-bound structs would add dead stores.
 
 #if defined(__CUDACC__)
 #    define STRELKA_SHARC_FN static __forceinline__ __device__
@@ -18,18 +15,9 @@
 #    define STRELKA_SHARC_FN inline
 #endif
 
-
 namespace oka::sharc
 {
 
-/// Fixed point rather than float atomics: a sum of a few hundred samples of
-/// radiance stays inside 32 bits at this scale, and integer atomics are
-/// available everywhere.
-///
-/// 64 rather than 1024 because the quantity stored is *outgoing* radiance --
-/// what a path gathered divided by its throughput at that point -- which in a
-/// lit interior is tens, not fractions. A finer scale would overflow the sum
-/// long before the count did.
 constexpr float kScale = 64.0f;
 
 /// The clamp rejects fireflies while preserving legitimate outgoing radiance.
@@ -43,10 +31,6 @@ constexpr uint32_t kProbeCount = 8u;
 /// config cannot turn the cache into a single contended slot.
 constexpr uint32_t kMinCapacity = 1u << 16;
 
-/// One in eight paths never reads the cache and always traces to the end, so the
-/// cache keeps converging instead of freezing at whatever the first paths
-/// through a voxel happened to find. SHARC proper gives this its own update
-/// pass; here it is the same paths, thinned.
 constexpr uint32_t kUpdateShare = 8u;
 
 /// Below this throughput, division at deposit produces excessive variance.
@@ -56,23 +40,6 @@ constexpr float kMinRecordThroughput = 0.05f;
 /// channel cannot turn a finite estimate into a huge one.
 constexpr float kThroughputFloor = 0.02f;
 
-/// Whether a path may read the cache at a hit it has just traced to.
-///
-/// The SDK eligibility test uses the lobe that launched the segment rather than
-/// a roughness gate on the surface it reached.
-///
-/// Two conditions, both from the SDK:
-///
-///  * the segment just traced has to be longer than a voxel's diagonal, or the
-///    hit is inside the same voxel the ray left and the cache would answer with
-///    an average that includes the very point being shaded;
-///  * the lobe that launched the segment has to have spread wider than a voxel
-///    by the time it arrived. A tight lobe still carries an image -- that is
-///    what a mirror is -- and a voxel average has no image in it. A wide one
-///    carries an average already, so reading one costs nothing.
-///
-/// `launchRoughness` is the roughness of the surface the segment left, not of
-/// the one it reached.
 STRELKA_SHARC_FN bool mayReadCache(float segmentLength, float launchRoughness, float voxelSize)
 {
     // sqrt(3) is the voxel diagonal: a segment shorter than that may not have
@@ -81,10 +48,6 @@ STRELKA_SHARC_FN bool mayReadCache(float segmentLength, float launchRoughness, f
     {
         return false;
     }
-    // alpha is the squared roughness, as everywhere else in this renderer, and
-    // the spread is the SDK's: hitDistance * sqrt(0.5 * a^2 / (1 - a^2)).
-    // Clamped below one so a perfectly smooth surface gives zero rather than a
-    // division by zero -- and zero is the right answer for it.
     const float clamped = launchRoughness < 0.99f ? launchRoughness : 0.99f;
     const float alpha = clamped * clamped;
     const float alpha2 = alpha * alpha;
@@ -109,20 +72,9 @@ STRELKA_SHARC_FN uint32_t hash(uint32_t x)
     return x;
 }
 
-/// The world size of a voxel at `distance` from the eye.
-///
-/// It follows the screen-space footprint: `baseSize` is the world size of one
-/// pixel at unit distance times the target voxel span in pixels.
-///
-/// Quantised to powers of two so that a point near a level boundary lands in one
-/// voxel or the other rather than smearing across both.
 struct Voxel
 {
     float size = 1.0f;
-    /// log2 of the size, which is the exponent the hash mixes in. Carried
-    /// rather than recovered with a second logarithm: the size is an exact power
-    /// of two, so the level is an exact integer, and taking log2 of it again is
-    /// one more chance for a value near a boundary to fall the other way.
     int32_t level = 0;
 };
 
@@ -167,10 +119,6 @@ STRELKA_SHARC_FN int32_t voxelCoordinate(float coordinate, float size)
     return (int32_t)cell;
 }
 
-/// Six buckets: the dominant axis of the normal and its sign.
-///
-/// Finer than that starts splitting a smooth surface into stripes; coarser lets
-/// the two sides of a leaf, or a floor and the ceiling below it, share radiance.
 STRELKA_SHARC_FN uint32_t normalBucket(float nx, float ny, float nz)
 {
 #if defined(__CUDACC__)
@@ -192,20 +140,6 @@ STRELKA_SHARC_FN uint32_t normalBucket(float nx, float ny, float nz)
     return axis * 2u + (component < 0.0f ? 1u : 0u);
 }
 
-// ---------------------------------------------------------------------------
-// The key: which voxel a slot holds
-// ---------------------------------------------------------------------------
-//
-// Sixty-four-bit keys preserve coordinates and level for reprojection plus a
-// responsive-lighting identity bit.
-
-/// 17 bits per axis, signed, which is the SDK's split and for the same reason.
-/// Coordinates are position/voxelSize and the voxel size follows the distance to
-/// the camera, so a point twice as far away has a voxel twice as large and lands
-/// at roughly the same coordinate: the range in play is hundreds, not millions.
-/// Out-of-range coordinates wrap rather than clamp, exactly as the SDK's do; two
-/// voxels 131072 cells apart at the same level then share a key, which needs a
-/// scene tens of thousands of voxels across to reach.
 constexpr uint32_t kPositionBits = 17u;
 constexpr uint32_t kLevelBits = 9u;
 constexpr uint32_t kNormalBits = 3u;
@@ -220,14 +154,6 @@ constexpr uint32_t kNormalOffset = kLevelOffset + kLevelBits;
 /// reserves the same bit for the same purpose.
 constexpr uint32_t kResponsiveBit = 63u;
 
-/// Our level is the exponent of a power-of-two voxel size and so is signed --
-/// negative wherever the footprint is under a metre, which is most of an
-/// interior. The field is unsigned, so it carries level + bias.
-///
-/// 256 leaves [-255, 255], against a level that in practice runs about [-20, 5].
-/// The clamp below keeps the biased value at least 1, which is what guarantees a
-/// key is never zero: zero is the empty slot, and a voxel that hashed to it
-/// would be invisible to every probe that walks past.
 constexpr int32_t kLevelBias = 256;
 constexpr int32_t kLevelMin = -kLevelBias + 1;
 constexpr int32_t kLevelMax = kLevelBias - 1;
@@ -276,10 +202,6 @@ STRELKA_SHARC_FN uint64_t responsiveKey(uint64_t key)
     return key | (1ull << kResponsiveBit);
 }
 
-/// The 32 bits of a key that choose its slot.
-///
-/// Both halves are mixed and combined, as the SDK's HashGridHash32 does: the low
-/// half alone is the coordinates, and neighbouring voxels differ only there.
 STRELKA_SHARC_FN uint32_t keyHash(uint64_t key)
 {
     return hash((uint32_t)key) ^ hash((uint32_t)(key >> 32));
@@ -302,18 +224,6 @@ STRELKA_SHARC_FN float voxelSizeForLevel(int32_t level)
 #endif
 }
 
-/// The key of the voxel one grid level away that covers the same place.
-///
-/// Port of the SDK's SharcGetAdjacentLevelHashKey, and the answer to the thing
-/// that makes a distance-driven grid awkward: the level follows the distance to
-/// the eye, so when the eye moves, a point that has not moved at all quantises
-/// into a different voxel. Everything the cache learned about it is still in the
-/// table, under the old level, and without this it simply ages out unread while
-/// the new voxel starts from nothing.
-///
-/// Which way to look is decided the SDK's way, by measuring the same voxel's
-/// distance to both cameras in its own grid units: if the eye is nearer now, the
-/// current level is the finer one and the history is one level coarser.
 STRELKA_SHARC_FN uint64_t adjacentLevelKey(
     uint64_t key, float cameraX, float cameraY, float cameraZ, float previousX, float previousY, float previousZ)
 {
@@ -341,11 +251,6 @@ STRELKA_SHARC_FN uint64_t adjacentLevelKey(
 
     if (distance < distancePrev)
     {
-        // The eye came closer, so this voxel is finer than the one that held the
-        // history. Halving the coordinate is the coarser level's cell, and it has
-        // to be a floor: an arithmetic shift is one on every compiler this
-        // builds under, where dividing by two truncates towards zero and would
-        // fold the two cells either side of the origin into one.
         x >>= 1;
         y >>= 1;
         z >>= 1;
@@ -386,11 +291,6 @@ STRELKA_SHARC_FN uint32_t encode(float radiance)
     {
         v = kClamp;
     }
-    // roundf, not a truncated v + 0.5f: the two agree for every non-negative
-    // value except the ones where v * kScale + 0.5f rounds up to the next
-    // representable float on its own, and there the truncation lands a quantum
-    // high. kClamp keeps v well below that, so this is the same number today --
-    // it is spelled this way so it stays the same number if kScale grows.
     return (uint32_t)roundf(v * kScale);
 }
 
@@ -404,44 +304,11 @@ STRELKA_SHARC_FN float decode(uint32_t sum, uint32_t count)
     return (float)sum / ((float)count * kScale);
 }
 
-/// How many deposits a slot can take before its sum could overflow.
-///
-/// One deposit is at most kClamp * kScale, so the sum stays inside 32 bits for
-/// twice this many of them. A wrapped sum reads back as a near-black voxel that
-/// every path through it then believes, so the write stops rather than wraps.
-///
-/// Half the arithmetic bound, and the half is the point: the guard is a plain
-/// read followed by four atomic adds, so every thread already past the read when
-/// the limit is reached still deposits. On this hardware that is a hundred
-/// thousand or so threads, which against a bound sitting exactly at UINT32_MAX
-/// would wrap the very sum the guard exists to protect. Halving it costs
-/// nothing -- the accumulator is cleared every frame by the resolve pass, so
-/// even the reduced bound is a hundred thousand deposits into one voxel in one
-/// frame.
 constexpr uint32_t kMaxCount = (uint32_t)(4294967295.0 / (double)(kClamp * kScale) / 2.0);
 
-// ---------------------------------------------------------------------------
-// Resolve: what a voxel keeps between frames
-// ---------------------------------------------------------------------------
-//
-// Resolve follows the SDK's window normalisation, staleness, fp16 packing and
-// adjacent-level reprojection. SH-directional storage remains omitted, and
-// responsive entries use independent keys.
-//   * no linear-probe re-find, which needs a whole entry's neighbours and so
-//     cannot live in a pure function of one entry.
-
-/// Bounds on the temporal window, matching SHARC_ACCUMULATED_FRAME_NUM_MIN/MAX.
-///
-/// The window is what trades quality against response: a voxel that averages
-/// over more frames is quieter and slower to notice that the lighting changed.
 constexpr uint32_t kAccumFrameNumMin = 1u;
 constexpr uint32_t kAccumFrameNumMax = 1024u;
 
-/// Bounds on how long an unvisited entry survives, matching
-/// SHARC_STALE_FRAME_NUM_MIN/MAX.
-///
-/// The minimum is not politeness: evicting aggressively means re-inserting
-/// constantly, and the SDK's own note is that a small value costs performance.
 constexpr uint32_t kStaleFrameNumMin = 8u;
 constexpr uint32_t kStaleFrameNumMax = 1024u;
 
@@ -476,13 +343,6 @@ STRELKA_SHARC_FN float bitsToFloat(uint32_t bits)
 #endif
 }
 
-/// Encode a non-negative, finite value as IEEE binary16.
-///
-/// Spelled out rather than taken from `__half`, because this header has to give
-/// the same answer on the host -- which is where its tests run -- as on the
-/// device, and a host build has no CUDA half type. Every quantity stored this
-/// way is a radiance or a sample count, so negatives and NaN are folded to
-/// zero at the door rather than encoded.
 STRELKA_SHARC_FN uint32_t packHalf(float value)
 {
     if (!(value > 0.0f))
@@ -527,10 +387,6 @@ STRELKA_SHARC_FN float unpackHalf(uint32_t half)
     return bitsToFloat(((exponent - 15u + 127u) << 23) | (mantissa << 13));
 }
 
-/// The half of an entry that survives the frame: a voxel's mean radiance and
-/// the sample count behind it, in eight bytes.
-///
-/// Same four-component fp16 packing as the SDK's `SharcPackedData::radianceData`.
 struct Resolved
 {
     float r = 0.0f;
@@ -570,17 +426,6 @@ STRELKA_SHARC_FN void unpackFrameData(uint32_t packed, uint32_t& outAccumFrames,
     outStaleFrames = packed >> 16;
 }
 
-/// Fold a voxel's data from the adjacent grid level into its own.
-///
-/// Port of the SDK's SHARC_BLEND_ADJACENT_LEVELS arm. Weighted by the sample
-/// counts behind each, which is the same rule the temporal merge uses and for
-/// the same reason: the two are estimates of the same quantity, so the one with
-/// more samples behind it should weigh more.
-///
-/// Reached only for an entry that is new -- a couple of frames old at most --
-/// because that is the situation it exists for: the camera moved, the level
-/// under a point changed, and everything the cache knew about that point is
-/// sitting one level away about to age out unread.
 STRELKA_SHARC_FN Resolved blendAdjacentLevel(const Resolved& own, const Resolved& adjacent)
 {
     const float total = own.sampleNum + adjacent.sampleNum;
@@ -600,12 +445,6 @@ STRELKA_SHARC_FN Resolved blendAdjacentLevel(const Resolved& own, const Resolved
     return blended;
 }
 
-/// How many frames an entry may be old and still take a reprojected blend.
-///
-/// The SDK's constant, and the reasoning is that reprojection answers "this
-/// entry is new *because* the camera moved". An entry that has been accumulating
-/// for longer is not that entry, and blending a coarser level into it would only
-/// smear it.
 constexpr uint32_t kReprojectFrameNumMax = 2u;
 
 /// One entry as the resolve pass sees it.
@@ -630,14 +469,6 @@ struct ResolveOutput
     uint32_t frameData = 0u;
 };
 
-/// Merge one frame of deposits into what a voxel already knows.
-///
-/// A pure function of a single entry, so it can be tested on the host without a
-/// GPU -- which is the whole premise of this header, and matters more here than
-/// anywhere else in it, because every one of these rules is a silent failure:
-/// a window that does not normalise freezes the cache at its first answer, a
-/// staleness rule that never fires leaks the table, and one that fires too
-/// eagerly re-inserts every entry every frame.
 STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input, uint32_t accumFrameNumMax, uint32_t staleFrameNumMax)
 {
     ResolveOutput output;
@@ -684,10 +515,6 @@ STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input, uint32_t 
 
     if (accumFrames > window)
     {
-        // The window is what keeps the cache able to change its mind. Without
-        // this, the weight of the history grows without bound and a voxel that
-        // has been averaging for a thousand frames cannot notice that somebody
-        // turned a light on.
         sampleNumPrev *= (float)window / (float)accumFrames;
         accumFrames = window;
     }
@@ -708,6 +535,5 @@ STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input, uint32_t 
 }
 
 } // namespace oka::sharc
-
 
 // NOLINTEND(cppcoreguidelines-init-variables)

@@ -25,16 +25,6 @@ struct RenderConfig
     // Kept so harness tomls with integrator = "pt"|"bdpt"|"vcm" still parse.
     uint32_t integrator = 0;
     uint32_t spp = 256;
-    // One launch per sample means one synchronise per sample, and with the
-    // blocking wait OptiXRender::createContext() asks for, each of those costs a
-    // wake-up in the serial chain of the render -- 10% of a 4096 spp run. A
-    // batch amortises it: the same run measures 25.3 s at 1 sample per launch
-    // and 23.9 s at 16, with the CPU it burns down from 25 s to 0.8 s. The
-    // accumulated image differs by 1.3e-7 relative, which is the order the
-    // sample sums land in and nothing else.
-    //
-    // The progress bar and its ms/sample now step by this much at a time, which
-    // is the only thing a reader sees change.
     uint32_t sppPerLaunch = 16;
     // Periodically publish the accumulated image through an atomic replacement
     // of <stem>.checkpoint.<ext>. Boundaries are observed between launches so
@@ -45,24 +35,6 @@ struct RenderConfig
     // conservative default preserves the reference image; performance runs can
     // measure a shorter tail explicitly.
     uint32_t subsurfaceIterations = 64;
-    // 0=Halton, 1=PCG, 2=Sobol, 3=Sobol+BN, 4=Hybrid (BN→Sobol)
-    //
-    // The same value EditorApp::loadSettings() sets, because the two
-    // applications rendering one config two different ways is a defect rather
-    // than a preference. It used to be plain Sobol here on the reasoning that a
-    // headless still frame runs past the count where a toroidal shift pays --
-    // which is true, and is what the hybrid's handover already expresses: the
-    // mask covers the first blueNoiseSwitchSpp samples and everything after is
-    // the plain sequence, so a long render is the old default with four samples
-    // drawn differently at the start.
-    //
-    // Not Halton, which this used to be. Its dimensions are told apart only by
-    // an offset into a table of 32 bases, and a depth-8 path draws 117, so
-    // dimensions 32 apart are one sequence read from two places. Measured on
-    // vespa at 320x240: its post-filter error is 38% above Sobol's at 128 spp
-    // -- roughly twice the samples for the same picture -- and worse than the
-    // plain PCG white noise at every count, with a convergence slope that
-    // stalls near zero and then jumps as the correlated dimensions come apart.
     uint32_t samplerType = 4;
     // MetalFX denoising. Off by default: it is a temporal filter and a still
     // frame gives it one frame to work with, so whether it helps is a question
@@ -80,28 +52,15 @@ struct RenderConfig
     std::optional<uint32_t> auditMovingNode;
     std::string auditFramePrefix;
     std::string capturePath; // --capture: one steady-state frame to a .gputrace
-    // Render below the output resolution and let MetalFX scale up. Off by
-    // default because it changes what the image *is*, which an offline render
-    // should not do silently; for a realtime budget it is the largest lever
-    // there is, since cost is per traced pixel.
     bool upscale = false;
     float upscaleFactor = 0.5f;
     // Retained for config compatibility. No backend currently consumes it; the
     // CLI warns instead of silently claiming that ray sorting is enabled.
     bool sortRays = false;
-    // Ray-cone texture level of detail. Off by default -- not because it costs
-    // anything, but because it changes the image and buys no time, so turning it
-    // on is a decision about filtering rather than about performance. See the
-    // note in wavefront.metal for the measurement.
     bool textureLod = false;
     // Take the denoiser's material guides at the primary hit instead of walking
     // to the first rough surface. See Uniforms::guidePrimaryHit.
     bool guidePrimaryHit = false;
-    /// Luminance ceiling on what the denoiser is handed, in exposed units; 0
-    /// disables it. Configurable because it is a truncation, and a scene bright
-    /// enough to be clipped by it measures the clamp rather than the denoiser --
-    /// which is what a mirror facing a light does. See docs/open-defects.md
-    /// entry 7.
     float denoiseFireflyClamp = 8.0f;
     // 0 = spatial scaler, 1 = temporal scaler (ignored when denoise is on).
     uint32_t upscaleMode = 0;
@@ -118,19 +77,11 @@ struct RenderConfig
     uint32_t restirFinalVisibilityReuse = 0; // 0 = off, 1 = conservative
     uint32_t restirFinalVisibilityMaxAge = 4;
     uint32_t estimatorMode = 0; // 0 = NEE + MIS, 1 = BSDF sampling only
-    /// Accumulate the diffuse/specular split of the first event into two extra
-    /// images. Off because nothing reads them: the raygen wrote four scattered
-    /// records per pixel per launch for an output no caller ever asked the
-    /// backend for. See docs/open-perf.md.
     bool splitAov = false;
     bool sharc = false;
     uint32_t sharcCapacity = 1u << 22;
     uint32_t sharcDepth = 1;
     uint32_t sharcMinSamples = 8;
-    /// Accumulated samples after which cache reads stop; 0 never stops. The
-    /// cache's error is correlated and therefore a floor, so past the crossover
-    /// it is the only thing keeping the render from converging. See
-    /// Params::sharcReadMaxSubframe for the measurement.
     uint32_t sharcReadFrames = 128;
     /// Sample count a Metal voxel needs before a query may read it. The legacy
     /// `sharc_min_samples` sets both backends; this overrides it for Metal,
@@ -151,10 +102,6 @@ struct RenderConfig
     /// Lets a headless A/B turn the split off on a scene that has responsive
     /// lights, which is the only way to measure what it costs and buys.
     bool sharcResponsiveLighting = true;
-    /// Metal's own responsive switch, and not the same setting: its compact key
-    /// has no spare bit for a per-light tag, so the companion entries hold the
-    /// whole lighting signal and come out of the configured capacity. Off by
-    /// default for that reason. See docs/sharc-metal.md.
     bool sharcMetalResponsive = false;
     float sharcRoughnessThreshold = 0.4f;
     /// Quantization factor for the atomic radiance accumulator. Reduce it if the
@@ -172,21 +119,9 @@ struct RenderConfig
     bool sharcCacheResampling = true;
     bool sharcBlendAdjacentLevels = true;
     bool sharcFadeAcceleration = false;
-    /// Resolve alpha cutouts in the traversal hardware where the answer is
-    /// uniform, and enter the shader only where it is not. Off by default: it is
-    /// an acceleration, and one that has to be measured on a machine that can
-    /// build it before it becomes anybody's default.
     bool opacityMicromaps = false;
     // 0 = glTF (-ln(C)/d), 1 = Cycles ((1-C)/d)
     uint32_t volumeModel = 0;
-    /// Which BSDF the scene's materials shade with: 0 = the glTF
-    /// metallic-roughness model that has always shipped, 1 = OpenPBR Surface.
-    ///
-    /// A render setting rather than a scene property, so that one asset can be
-    /// rendered both ways and the two compared. That comparison is the only
-    /// external check on the OpenPBR integration available: Blender has no
-    /// OpenPBR, so Cycles cannot referee it. Default 0 -- every existing scene
-    /// renders exactly as before, and the OpenPBR code is compiled out.
     uint32_t materialModel = 0;
     // Longest side a texture is allowed on load; 0 = no limit.
     uint32_t textureMaxDim = 0;
@@ -194,11 +129,6 @@ struct RenderConfig
     uint32_t textureDownscale = 1;
     // Debug visualisation; 0 renders normally.
     uint32_t debugMode = 0;
-    // Matches EditorApp::loadSettings(). The two applications have to agree on
-    // the sampler or the same config renders two different images, and the
-    // editor's pair is the one with a measurement behind it: blue noise wins on
-    // post-filter error up to four samples and loses past it, so the hybrid
-    // hands over at four and everything after is the plain sequence.
     uint32_t blueNoiseSwitchSpp = 4;
     // Upper bound on one indirect path's contribution; 0 = unclamped, which is
     // the default because clamping is a bias the caller has to ask for.
@@ -218,18 +148,10 @@ struct RenderConfig
     std::optional<float> cameraFocalDistance;
     float cameraFStopDof = 2.8f;
     float cameraFocalLengthMm = 50.0f;
-    // Normalised time in every clip: 0 = start, 1 = end. Unset leaves each
-    // animation at its start. A value other than the loader's initial current
-    // is what makes the first frame dirty the skeleton and run skinning — a
-    // still at t=start never does, which is why the validation scene pins 0.5.
     std::optional<float> animationTime;
 
     // 0=None, 1=Reinhard, 2=ACES, 3=Filmic
     uint32_t tonemapType = 2;
-    /// Whether the caller stated an exposure. A scene can carry its own in the
-    /// light sidecar, and it should win over these defaults -- but not over a
-    /// value the caller asked for, which is the only way to pin exposure for a
-    /// measurement (see tools/feature_tests, which needs exactly 1.0).
     bool exposureOverridden = false;
     float gamma = 2.4f;
     float filmIso = 100.0f;

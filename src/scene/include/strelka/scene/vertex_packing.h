@@ -24,10 +24,6 @@ inline uint32_t packNormal(const glm::float3& normal)
     return (z << 20) | (y << 10) | x;
 }
 
-// Unpack normal from uint32_t.
-//
-// The z mask is 10 bits, not 12: bits 30..31 are RGB10A2's alpha field and bit
-// 30 carries tangent handedness (see packTangent).
 inline glm::float3 unpackNormal(uint32_t val)
 {
     constexpr float scale = 2.0f / 1023.0f;
@@ -53,10 +49,6 @@ inline float unpackTangentSign(uint32_t val)
     return (val & kTangentSignBit) ? -1.0f : 1.0f;
 }
 
-// glTF COLOR_0, packed RGBA8. The values are LINEAR -- COLOR_0 carries no
-// transfer function, unlike a base-colour texture -- so nothing here decodes.
-// 8 bits is ample: COLOR_0 is a multiplier on base colour, and a quarter-percent
-// quantisation step is far below anything the surface it modulates can show.
 inline uint32_t packColor(const glm::float4& c)
 {
     auto q = [](float v) -> uint32_t {

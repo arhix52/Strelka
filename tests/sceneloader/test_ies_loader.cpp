@@ -9,24 +9,6 @@
 #include <string>
 #include <numbers>
 
-// ============================================================================
-// test_ies_loader.cpp -- reading an actual LM-63 file.
-//
-// The suite already had one IES case, and it wrote the smallest file that could
-// possibly parse: a version line, TILT=NONE, three angles and three numbers. A
-// real photometric file is not that. It carries a block of [KEYWORD] lines whose
-// text is arbitrary, a candela multiplier and a ballast factor that both scale
-// the table, values wrapped across lines wherever the exporter felt like it, and
-// one of three different TILT specifications. Every one of those was a code path
-// nothing exercised.
-//
-// Four of them were broken, and each fails the same way -- loadIesProfile()
-// returns false or reads garbage, so the luminaire silently becomes an
-// isotropic point light with whatever intensity the sidecar gave it. That is
-// what makes them worth a test rather than a look: the failure does not look
-// like a failure, it looks like a plain lamp.
-// ============================================================================
-
 namespace fs = std::filesystem;
 
 namespace
@@ -112,10 +94,6 @@ TEST_CASE("a realistic LM-63-2002 file parses, multipliers and all")
     CHECK(oka::sampleIesCandela(p, atVertical(0.0f)) == doctest::Approx(1020.0f));
     CHECK(oka::sampleIesCandela(p, atVertical(90.0f)) == doctest::Approx(0.0f));
 
-    // And this is a beam, not a bare point: it has a shape between the tabulated
-    // angles and it falls off. A profile that came back constant would mean the
-    // table was read as a single value and the luminaire had quietly become a
-    // point light.
     const float onAxis = oka::sampleIesCandela(p, atVertical(0.0f));
     const float at45 = oka::sampleIesCandela(p, atVertical(45.0f));
     const float at67 = oka::sampleIesCandela(p, atVertical(67.5f));
@@ -183,11 +161,6 @@ TEST_CASE("TILT=INCLUDE steps over its embedded block")
 
 TEST_CASE("TILT naming an external file is not read as an embedded block")
 {
-    // The third legal form, and the one that used to break the parse outright:
-    // the file name was treated as INCLUDE, so the lamp count was consumed as a
-    // tilt-pair count and everything after it was thrown away. The tilt data
-    // lives in ACME.TLT, which this renderer does not need -- but the photometry
-    // below it does have to be read.
     const TempIes f("tilt_file", "IESNA:LM-63-1995\nTILT=ACME.TLT\n" + std::string(kSimplePhotometry));
 
     oka::Scene::IesProfile p;
@@ -201,10 +174,6 @@ TEST_CASE("TILT naming an external file is not read as an embedded block")
 // ---------------------------------------------------------------------------
 TEST_CASE("a keyword whose text begins with TILT is not the TILT line")
 {
-    // "[TESTLAB] TILTON Photometrics" is a perfectly ordinary keyword line. The
-    // reader used to scan for a *token* starting with those four letters and
-    // took this one, then failed to match it against TILT=NONE and tried to read
-    // an embedded tilt block out of the laboratory's name.
     const TempIes f("tilty",
                     "IESNA:LM-63-2002\n"
                     "[TESTLAB] TILTON Photometrics\n"

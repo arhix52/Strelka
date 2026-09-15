@@ -38,10 +38,6 @@ Scene::PickHit EditorApp::pickAtScreenPos(const ImVec2& screenPos)
     return m_scene->pick(origin, dir);
 }
 
-// Wireframe box around geometry, given bounds and the transform that maps them to
-// world. DrawCubes() would only ever draw a unit cube at the instance origin,
-// which for anything but a unit-sized mesh sits in the wrong place or inside the
-// geometry.
 void EditorApp::drawBoundsWireframe(const glm::float3& bbMin,
                                     const glm::float3& bbMax,
                                     const glm::mat4& worldFromLocal,
@@ -87,11 +83,6 @@ void EditorApp::drawBoundsWireframe(const glm::float3& bbMin,
     }
 }
 
-// Box enclosing every instance of a node, in the space of the first one's
-// transform. A glTF mesh with several primitives becomes one instance per
-// primitive -- the BrainStem figure alone has 59 -- so boxing only the instance
-// under the cursor outlines a fragment of what the user thinks is selected, and
-// boxing each of them separately is a cage, not a highlight.
 bool EditorApp::computeNodeBounds(const Scene::Node& node,
                                   glm::float3& outMin,
                                   glm::float3& outMax,
@@ -103,16 +94,6 @@ bool EditorApp::computeNodeBounds(const Scene::Node& node,
     outMin = glm::float3(std::numeric_limits<float>::max());
     outMax = glm::float3(std::numeric_limits<float>::lowest());
 
-    // Only the placements that share the picked one's transform.
-    //
-    // The union used to run over every instance of the node, which is right for
-    // the case it was written for -- a glTF mesh split into primitives by
-    // material, all at one transform. EXT_mesh_gpu_instancing breaks that: one
-    // node there carries up to a million placements scattered across the scene,
-    // so the union was a box around the whole forest rather than around the tree
-    // under the cursor, and it cost a pass over every placement to draw. Sibling
-    // primitives of the clicked placement still share its transform, so they are
-    // still boxed together.
     const bool haveSelected = m_selectedInstanceId != kInvalidIndex && m_selectedInstanceId < instances.size();
     const glm::mat4* selectedXform = haveSelected ? &instances[m_selectedInstanceId].transform : nullptr;
 
@@ -277,10 +258,6 @@ void EditorApp::drawViewportPanel()
         ImGui::PushStyleVar(ImGuiStyleVar_ImageBorderSize, 0.0f);
         ImGui::SetCursorScreenPos(m_viewportRectMin);
 
-        // The frame is shown through items that claim no ID. ImGuizmo starts a
-        // drag only while ImGui reports nothing hovered and nothing active, so an
-        // ImageButton spanning the viewport leaves the handles drawn but dead:
-        // the cursor is always over it whenever it is over a handle.
         const void* viewportTexture = m_display->getDisplayNativeTexure();
         const ImVec2 topLeft = ImGui::GetCursorScreenPos();
         if (viewportTexture != nullptr)
@@ -303,10 +280,6 @@ void EditorApp::drawViewportPanel()
             cam.updateAspectRatio(static_cast<float>(presentationWidth) / static_cast<float>(presentationHeight));
         }
 
-        // ImGuizmo derives the facing of the rotation rings from the projection,
-        // and drops the whole gizmo when it reads the object as behind the eye.
-        // Both of those assume perspective, so an orthographic camera needs to say
-        // so or its gizmo comes out mirrored or missing.
         ImGuizmo::SetOrthographic(cam.projection == Camera::ProjectionType::orthographic);
         ImGuizmo::SetDrawlist();
         ImGuizmo::SetRect(m_viewportRectMin.x, m_viewportRectMin.y, m_viewportRectMax.x - m_viewportRectMin.x,

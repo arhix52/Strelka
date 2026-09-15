@@ -126,14 +126,6 @@ TEST_CASE("hair Chiang is brighter in transmission than a dielectric cylinder")
 
 TEST_CASE("hair Chiang scatters over the whole sphere, not a hemisphere")
 {
-    // Why this is worth asserting: a renderer that treats hair as a surface BRDF
-    // will test the shading hemisphere before connecting to a light, and will
-    // offset a transmitted bounce into the strand's interior. Both are wrong here
-    // and neither is visible in an aggregate image metric -- they cancel, one
-    // darkening the groom and the other adding a second whole-fibre event on the
-    // far wall. What makes them wrong is the property below: most of this lobe's
-    // energy leaves on the far side of the shading normal, because TT is the
-    // dominant term of a bright fibre. See docs/open-defects.md entry 3.
     SurfaceInteraction si = hair_si(20.0f, 0.35f);
     si.albedo = make_float3(0.42f, 0.22f, 0.10f);
 

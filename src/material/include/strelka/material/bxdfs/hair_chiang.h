@@ -1,41 +1,12 @@
 #ifndef STRELKA_BXDF_HAIR_CHIANG_H
 #define STRELKA_BXDF_HAIR_CHIANG_H
 
-// ============================================================================
-// bxdfs/hair_chiang.h -- Chiang et al. 2016 hair / fur BSDF
-//
-// Port of Cycles' bsdf_principled_hair_chiang.h (Apache-2.0 / Blender Foundation)
-// into Strelka's three-compiler material headers. R / TT / TRT / TRRT+ lobes with
-// longitudinal (Mp) and azimuthal (Np) factors. What a rough dielectric cylinder
-// cannot do -- light entering a strand and leaving through another path -- is
-// exactly what these lobes carry, and why the kids-bedroom monster came out 42%
-// darker than the reference with geometry alone.
-//
-// Parameter mapping onto MaterialParams (no struct growth):
-//   albedo      -> reflectance colour (Direct Coloring -> sigma_a)
-//   roughness   -> longitudinal roughness
-//   anisotropy  -> radial roughness (0 falls back to roughness)
-//   clearcoat   -> coat weight (scales primary roughness)
-//   ior         -> eta (default 1.55 keratin)
-// Cuticle tilt is fixed at 2 degrees, Cycles' Principled Hair default.
-// ============================================================================
-
 #include "../material_math.h"
 #include "../bsdf_types.h"
 #include "../surface_interaction.h"
 #include "../fresnel.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
-//
-// Device-shared header: NVCC and the Metal compiler read this too, and
-// clang-tidy only ever sees the host build, so these two suggestions cannot be
-// taken here. Initialising the locals means a dead store in a BSDF inner loop --
-// they are out-parameters written on the next line -- and the fixer spells the
-// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
-// member initialisers do the same to structs that are memcpy'd to the GPU.
-// Suppressed rather than left to warn because these repeat in every translation
-// unit that includes the header, and 700 lines of unactionable output per build
-// is how the handful that matter get skipped.
 
 #    if defined(__METAL_VERSION__)
 #        define hair_sinhf(x) metal::sinh(x)

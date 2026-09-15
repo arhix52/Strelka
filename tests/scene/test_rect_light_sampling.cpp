@@ -330,10 +330,6 @@ TEST_CASE("Solid-angle sampling estimates its own measure with near-zero varianc
     CHECK(area.variance > solid.variance);
 }
 
-// Classic stress case from the paper: shading point close to a large light.
-// Area sampling's pdf ~ r²/(cos θ A) blows up near the surface; solid-angle
-// stays flat. Estimating irradiance ∫ cosθ_surface dω should therefore be much
-// quieter with SphQuad.
 TEST_CASE("Solid-angle sampling beats area sampling on a close large light")
 {
     const RectCorners c = ceilingLight(4.0f, 4.0f, 0.5f);

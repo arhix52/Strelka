@@ -146,17 +146,6 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
                 scenePath = tomlDir / scenePath;
             }
         }
-        // Absolute and lexically normalised, *not* weakly_canonical: that
-        // resolves symlinks, and every sidecar this renderer reads is found by
-        // the scene's stem -- <stem>_light.json, <stem>_curves.bin,
-        // <stem>_camera.json, <stem>_openpbr.json, <stem>.mtlx. Following the
-        // link moves the whole search to the link's target directory, so a scene
-        // that symlinks a large .glb from elsewhere silently loses its lights,
-        // its curves, its camera and its materials -- and the only symptom is
-        // "No light in scene, adding default distant light".
-        //
-        // scenes/materialx is exactly that shape: the geometry is 35 MB in the
-        // MaterialX submodule and the sidecars are ours.
         cfg.scenePath = fs::absolute(scenePath).lexically_normal().string();
     }
 
@@ -583,11 +572,6 @@ void HeadlessApp::populateSettings()
     // cost: publish nothing until the scene is complete.
     m_settings->setAs<float>("render/stream/publishIntervalMs", 0.0f);
 
-    // A scene may state its own exposure in the light sidecar, and when it does
-    // it wins over the defaults here -- an exposure is a property of the shot,
-    // not of the renderer. It does not win over an exposure the caller asked for:
-    // tools/feature_tests pins all three to hold the factor at exactly 1.0, and a
-    // scene quietly overriding that would make every row measure its exposure.
     float filmIso = m_config.filmIso;
     float fStop = m_config.fStop;
     float shutterSpeed = m_config.shutterSpeed;
@@ -652,26 +636,6 @@ bool HeadlessApp::saveOutput(Buffer* buf, const std::string& path)
     }
     else if (ext == ".png")
     {
-        // A PNG is a display image and has to go through the tone curve; the EXR
-        // above is data and must not. The renderer's own tonemap pass writes to a
-        // texture rather than back into this buffer -- deliberately, so the
-        // buffer keeps linear radiance -- which left this writer emitting the
-        // same file whatever `--tonemap` said. Byte-identical, measured on the
-        // Cornell box with `none` against `aces`.
-        //
-        // The curve comes from the same header the shader uses, so the two
-        // cannot drift.
-        // A diagnostic view is data wearing an image's clothes: its colours mean
-        // one thing each and none of them is a quantity of light. The renderer
-        // already bypasses exposure and the tone curve for these (see
-        // MetalFrameUniforms), but this writer computes its own, and applying a
-        // photographic exposure of about 1/140 to a debug colour of 0.2 is how
-        // every SHaRC and single-hit view came out of the CLI black.
-        // Mirrors SHARC_DEBUG_* in src/shaders/metal/ShaderTypes.h, duplicated
-        // rather than included: that header is Metal-only and brings metal-cpp
-        // with it. Every mode but "counters in the log" draws an image.
-        // The radiance view is the exception: it holds radiance, so it wants the
-        // render's own exposure and curve to be comparable with the render.
         constexpr uint32_t kSharcDebugCounters = 4u;
         constexpr uint32_t kSharcDebugRadiance = 7u;
         constexpr uint32_t kSharcDebugLastVisualization = 7u;
@@ -1026,11 +990,6 @@ int HeadlessApp::run()
     }
     else
     {
-        // Headroom sweep. Every variant is measured inside one process and one
-        // thermal state, cycling round-robin, because the alternative -- a run per
-        // variant -- puts a scene load and a fresh clock ramp between the numbers
-        // being compared. Measured sequentially, this probe reported that adding
-        // dependent loads made the frame *faster*, which is drift and not headroom.
         uint32_t nextCheckpoint = m_config.checkpointSpp;
         while (m_sharedCtx->mSubframeIndex < m_config.spp)
         {
@@ -1039,22 +998,6 @@ int HeadlessApp::run()
 
             if (!announced && !m_config.capturePath.empty())
             {
-                // One frame, in steady state: the point of the capture is the
-                // shading kernels, and starting it at launch would record the
-                // acceleration structure build instead.
-                //
-                // It writes every resource the frame reads, so the document is the
-                // size of the scene on the device: the pine forest produces 7.7 GB.
-                // Register allocation depends on the shader and its function
-                // constants, not on how much geometry it traverses, so a small
-                // scene with the same constants answers the same question for a few
-                // megabytes.
-                //
-                // The render above consumed sample 0. With --spp 1, another call
-                // would therefore be a post-only frame and the trace would contain
-                // nothing but the tonemapper. Rewind the accumulation index so the
-                // captured frame executes exactly one real sample and overwrites the
-                // warm-up result instead of accumulating it twice.
                 m_sharedCtx->mSubframeIndex = 0;
                 m_render->beginGpuCapture(m_config.capturePath);
                 m_render->renderSync(outputBuf.get());
@@ -1063,16 +1006,6 @@ int HeadlessApp::run()
             }
             if (!announced)
             {
-                // A marker for anything sampling the GPU from outside.
-                //
-                // Hardware counters are a time average, and on a heavy scene the
-                // loading, the texture cache and the acceleration structure build
-                // are most of a short run -- sample across them and the numbers
-                // describe a BVH build rather than a render. This is printed after
-                // the *first* sample has completed, so everything expensive and
-                // one-off is already behind it, and flushed because stdout is block
-                // buffered when redirected: without the flush a profiler waiting on
-                // this line waits forever.
                 announced = true;
                 std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
             }

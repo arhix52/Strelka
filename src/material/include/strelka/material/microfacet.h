@@ -1,14 +1,6 @@
 #ifndef STRELKA_MICROFACET_H
 #define STRELKA_MICROFACET_H
 
-// ============================================================================
-// microfacet.h -- GGX (Trowbridge-Reitz) microfacet distribution and sampling
-//
-// All directions are in the local shading frame where Z = surface normal.
-// Roughness "alpha" is the squared roughness (alpha = roughness^2) unless
-// noted otherwise.
-// ============================================================================
-
 #include "material_math.h"
 #include "fresnel.h"
 // build_onb / world_to_local, for the subsurface entry frame. sampling.h includes
@@ -22,25 +14,9 @@
 
 DEVICE_FUNC bool refraction_is_delta(float interiorIor, float exteriorIor)
 {
-    // Only an exactly index-matched represented interface collapses every
-    // microfacet refraction to -V. Near matches remain continuous: at internal
-    // grazing their H-dependent Fresnel can still differ by O(1) from the
-    // macroscopic interface, so a numeric eta cutoff is not a valid delta
-    // approximation.
     return interiorIor == exteriorIor;
 }
 
-// ---------------------------------------------------------------------------
-// Clamp and square roughness
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Charlie sheen -- Estevez & Kulla, "Production Friendly Microfacet Sheen BRDF",
-// which is the distribution KHR_materials_sheen is specified against.
-//
-// The whole point of it is retroreflection at grazing angles. A GGX lobe falls
-// off exactly where fabric gets brighter, which is why a towel or a rug rendered
-// with roughness alone reads as plastic no matter what roughness it is given.
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float sheen_d_charlie(float alpha, float n_dot_h)
 {
     alpha = fmaxf(alpha, 1e-3f);
@@ -67,27 +43,6 @@ DEVICE_FUNC float alpha_from_roughness(float roughness)
     return r * r;
 }
 
-// ---------------------------------------------------------------------------
-// Multiple-scattering energy compensation
-//
-// A single-scattering GGX lobe only carries the light that leaves the
-// microsurface after one bounce. The rest -- everything that hits a second
-// microfacet -- is discarded, and the loss grows with roughness: measured
-// against Cycles, a white metal keeps 95% of its energy at roughness 0.33 but
-// only 47% at roughness 1.0. Conductors show it starkly because they have no
-// diffuse lobe to hide it.
-//
-// Turquin's compensation restores it multiplicatively:
-//     f_ms = f_ss * (1 + F0 * (1/E - 1))
-// where E is the directional albedo of the single-scattering lobe with F = 1.
-// At F0 = 1 the factor is 1/E (all the energy comes back); at F0 = 0 it is 1.
-//
-// ggx_energy_term() is that (1/E - 1), fitted to a VNDF-sampled reference
-// (E = mean of G2/G1) over roughness and cos(theta) in [0,1]. RMS error on the
-// resulting factor is 1%, worst case 2.2% away from extreme grazing. The fit
-// dips very slightly negative where the true term is already ~0, hence the
-// clamp.
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_energy_term(float roughness, float NdotV)
 {
     const float r = roughness;
@@ -111,20 +66,6 @@ DEVICE_FUNC float3 ggx_energy_compensation(float3 F0, float roughness, float Ndo
     return make_float3(1.0f + F0.x * t, 1.0f + F0.y * t, 1.0f + F0.z * t);
 }
 
-// ---------------------------------------------------------------------------
-// ggx_specular_albedo -- what the specular lobe takes, so the base can be told.
-//
-// Derived, not fitted: integrating the lobe over F0 shows it is exactly
-// (A * F0 + B) * (1 + F0 * t), the split-sum form times the factor
-// ggx_energy_compensation() applies, and A is the single-scatter white albedo
-// 1 / (1 + t). Accurate to under 1%; the numbers are in docs/open-defects.md.
-//
-// B is dropped deliberately. It is what the lobe reflects at F0 = 0 -- Schlick's
-// (1-F0)(1-cos)^5 tail, which reaches one at grazing whatever the interface is --
-// so subtracting it would take energy from a material whose specular weight is
-// zero. It is a defect of its own, still open, and test_standard_pbr_furnace.cpp
-// pins the two apart so a fix to either can be graded. B is zero head on.
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float3 ggx_specular_albedo(float3 F0, float roughness, float NdotV)
 {
     const float t = ggx_energy_term(roughness, NdotV);
@@ -136,11 +77,6 @@ DEVICE_FUNC float3 ggx_specular_albedo(float3 F0, float roughness, float NdotV)
                        fminf(F0.z * singleScatter * (1.0f + F0.z * t), 1.0f));
 }
 
-// ---------------------------------------------------------------------------
-// GGX (Trowbridge-Reitz) Normal Distribution Function
-//   alpha  = roughness^2
-//   NdotH  = dot(N, H)
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_ndf_from_cos_sin(float alpha, float NdotH, float sinThetaSquared)
 {
     const float a2 = alpha * alpha;
@@ -163,11 +99,6 @@ DEVICE_FUNC float ggx_ndf(float alpha, float3 N, float3 H)
     return ggx_ndf_from_cos_sin(alpha, dot(N, H), dot(tangent, tangent));
 }
 
-// ---------------------------------------------------------------------------
-// Smith G1 for GGX (height-correlated)
-//   alpha  = roughness^2
-//   NdotV  = abs(dot(N, V))
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_smith_g1(float alpha, float NdotV)
 {
     if (!(NdotV > 0.0f))
@@ -178,12 +109,6 @@ DEVICE_FUNC float ggx_smith_g1(float alpha, float NdotV)
     return 2.0f * NdotV / (NdotV + root);
 }
 
-// ---------------------------------------------------------------------------
-// Smith G2 height-correlated masking-shadowing for GGX
-//   alpha  = roughness^2
-//   NdotV  = abs(dot(N, V))
-//   NdotL  = abs(dot(N, L))
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_smith_g2(float alpha, float NdotV, float NdotL)
 {
     if (!(NdotV > 0.0f) || !(NdotL > 0.0f))
@@ -197,11 +122,6 @@ DEVICE_FUNC float ggx_smith_g2(float alpha, float NdotV, float NdotL)
     return (2.0f * scaledV * NdotL) / (scaledL * rootV + scaledV * rootL);
 }
 
-// ---------------------------------------------------------------------------
-// Smith G2 / (4 * NdotV * NdotL) -- the "visibility" term V used in many
-// rendering equations (combined masking-shadowing divided by the denominator
-// of the Cook-Torrance specular BRDF).
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_smith_visibility(float alpha, float NdotV, float NdotL)
 {
     if (!(NdotV > 0.0f) || !(NdotL > 0.0f))
@@ -256,15 +176,6 @@ DEVICE_FUNC float ggx_ndf_visibility(float alpha, float3 N, float3 H, float Ndot
     return saturating_nonnegative_product(ggx_ndf(alpha, N, H), ggx_smith_visibility(alpha, NdotV, NdotL));
 }
 
-// ---------------------------------------------------------------------------
-// GGX VNDF (Visible Normal Distribution Function) sampling
-//   Heitz 2018 -- "Sampling the GGX Distribution of Visible Normals"
-//
-//   wo_local = outgoing direction in local space (Z = up)
-//   alpha    = roughness^2
-//   u1, u2   = uniform random numbers in [0,1)
-//   Returns: sampled half-vector in local space
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float3 ggx_vndf_sample(float3 wo_local, float alpha, float u1, float u2)
 {
     // 1. Stretch wo
@@ -291,17 +202,6 @@ DEVICE_FUNC float3 ggx_vndf_sample(float3 wo_local, float alpha, float u1, float
     return H;
 }
 
-// ---------------------------------------------------------------------------
-// PDF of the VNDF sample (in terms of the half-vector H)
-//   D_visible(H) = G1(wo) * D(H) * max(dot(wo, H), 0) / (NdotV)
-//   But we need the PDF with respect to the reflected direction wi, which
-//   introduces a Jacobian of 1 / (4 * dot(wo, H)).
-//
-//   alpha   = roughness^2
-//   NdotH   = dot(N, H)
-//   NdotV   = dot(N, wo)     (clamped positive)
-//   VdotH   = dot(wo, H)     (clamped positive)
-// ---------------------------------------------------------------------------
 DEVICE_FUNC float ggx_vndf_pdf(float alpha, float NdotH, float NdotV, float VdotH)
 {
     if (!(NdotV > 0.0f) || !(VdotH > 0.0f) || !(NdotH > 0.0f))
@@ -322,25 +222,8 @@ DEVICE_FUNC float ggx_vndf_pdf(float alpha, float3 N, float3 H, float NdotV, flo
     return ggx_ndf(alpha, N, H) / (2.0f * (NdotV + root));
 }
 
-// The density of the half vector itself, before any change of variables.
-//
-// ggx_vndf_pdf() above already divides by the 4 * VdotH that turns a half-vector
-// density into a *reflected direction* density, which is what a reflection lobe
-// wants and is why it is spelled that way. A refraction lobe needs the other
-// Jacobian, so it needs the half-vector density back: multiplying the reflection
-// form by 4 * VdotH is exactly that, and cheaper than a second D * G1.
-//
-// Getting this wrong is not a subtle error. Both transmission lobes used the
-// reflection form directly and then applied the refraction Jacobian on top, so
-// their reported density was short by a factor of 4 * VdotH -- around four at
-// normal incidence. Integrating the pdf over the lower hemisphere gave 0.24
-// where the sampler refracts 0.96 of the time.
 DEVICE_FUNC float ggx_vndf_pdf_half(float alpha, float NdotH, float NdotV, float VdotH)
 {
-    // The tangent boundary NdotH==0 has zero continuous measure, but a finite
-    // float refraction endpoint can inverse-map exactly onto it. GGX has a
-    // finite boundary density, so rejecting that represented cell loses
-    // support for near-index-matched interfaces.
     if (!(NdotV > 0.0f) || !(VdotH > 0.0f) || !(NdotH >= 0.0f))
         return 0.0f;
     const float a2 = alpha * alpha;
@@ -358,33 +241,6 @@ DEVICE_FUNC float ggx_vndf_pdf_half(float alpha, float3 N, float3 H, float NdotV
     return ggx_ndf(alpha, N, H) * (2.0f * VdotH / (NdotV + root));
 }
 
-// The direction a path takes on entering a subsurface medium.
-//
-// Refraction through the interface, about a GGX microfacet normal -- the port of
-// Cycles' subsurface_entry_bounce(). This walk used to enter along the glTF
-// diffuse-transmission lobe, a cosine hemisphere, and a path entering a slab of
-// thickness d at angle theta crosses it along d / cos(theta), so a cosine entry
-// transmits 2 * E3(tau) rather than exp(-tau): measurably steeper, and not even
-// exponential. See docs/open-defects.md entry 16 and tools/feature_tests/sss_slab.py,
-// which grades this against algebra rather than against a reference.
-//
-// The microfacet matters as much as the refraction, and a smooth interface was
-// tried first and is wrong. Snell alone compresses the cone so hard -- at an index
-// of 1.4 even a grazing ray bends to 45.6 degrees -- that every path dives almost
-// radially, crosses the whole body and is absorbed instead of turning round near
-// the surface. The slab, which only measures what crosses, was correct; the lit
-// half of a sphere fell to 0.36 of the reference, because what lights it is
-// scattering close to the entry and nothing was landing there.
-//
-// Neither the index nor the interface roughness is a parameter: the extension
-// carries no index, 1.4 is Cycles' skin default and the value the ladder is
-// graded against, and the roughness is measured to be 1 rather than the
-// material's -- see the note at the sample below. Give either an argument when a
-// scene needs to author it.
-//
-// `wo` points away from the surface toward where the light came from, and `n` is
-// the shading normal on that side. Entering from the outside cannot reach total
-// internal reflection, since eta < 1 leaves the radicand above 1 - eta^2.
 DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float u1, float u2)
 {
     const float eta = 1.0f / 1.4f;
@@ -395,32 +251,9 @@ DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float u1, flo
     const float3 woLocal = world_to_local(wo, T, B, n);
     if (woLocal.z <= 0.0f)
     {
-        // Cycles returns false here and the caller gives up on the bounce. The
-        // zero vector is how that is spelled across a function that has to
-        // return a direction; the two call sites reject it with the same test
-        // they use on the geometric normal.
         return make_float3(0.0f);
     }
 
-    // Fully rough, and a fixed index -- neither of which is what Cycles does.
-    //
-    // Cycles is explicit: `bssrdf->alpha = sqr(roughness)` and `bssrdf->ior = eta`,
-    // the material's own index, with a separate `subsurface_ior` only for its skin
-    // walk. Both were ported exactly and measured, and the exact port is 40% dark:
-    // `32_subsurface_roughness` reads 0.600, 0.520, 0.576, 0.553, 0.821 across a
-    // roughness ramp, and the half-space row's departure from Chandrasekhar goes
-    // from 0.0131 to 0.0160. A narrow entry sends every path straight through the
-    // body instead of letting it turn round near the surface, and at roughness 0
-    // Cycles has the same alpha of zero and does not go dark.
-    //
-    // So the same formula behaves differently in the two renderers, and what is
-    // here is the compensation that measures best rather than the port: alpha 1
-    // and index 1.4. Against 1.5, the index the glTF actually carries, the ramp
-    // reads 1.125, 1.126, 1.227, 1.108, 1.061 and Chandrasekhar 0.0160; at 1.4 it
-    // reads 1.094, 1.087, 1.164, 1.068, 1.031 and 0.0131.
-    //
-    // That difference is unlocated and it is docs/open-defects.md entry 16. Do not
-    // read these two constants as a description of Cycles.
     const float3 h = local_to_world(ggx_vndf_sample(woLocal, 1.0f, u1, u2), T, B, n);
 
     const float cosHI = fmaxf(dot(h, wo), 0.0f);
@@ -429,15 +262,6 @@ DEVICE_FUNC float3 subsurface_entry_direction(float3 wo, float3 n, float u1, flo
     return safe_normalize(-eta * wo + (eta * cosHI - cosT) * h);
 }
 
-// The half vector a refraction through an interface of relative index `eta`
-// bends around, and the Jacobian of the map from it to the outgoing direction.
-//
-// eta is the shader's convention throughout: the ratio of the medium the view
-// vector is in to the medium the transmitted ray enters. Walter et al. 2007
-// build the half vector from eta_i * wi + eta_t * wt, which in that convention
-// is V + wt / eta -- NOT V + eta * wt, which is what both eval paths were using.
-// The difference is a half vector 0.2 radians away from the one the sampler
-// bent around, and pdfs three orders of magnitude apart at grazing angles.
 DEVICE_FUNC float3 refraction_residual(float3 V, float3 wt, float eta)
 {
     const float etaSafe = fmaxf(eta, 1e-6f);
@@ -550,10 +374,6 @@ DEVICE_FUNC float refraction_residual_length(float3 V, float3 wt, float eta)
 
 DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3 Nf, THREAD_REF CompensatedFloat& robustVdotH)
 {
-    // Multiplying V + wt/eta by eta gives eta*V + wt. FMA evaluates that
-    // cancellation with one rounding instead of first rounding wt/eta and then
-    // subtracting two nearly equal unit vectors. This is essential for
-    // non-equal indices close to one, where the residual is the half vector.
     const float etaSafe = fmaxf(eta, 1e-6f);
     float3 residual = refraction_residual(V, wt, etaSafe);
 #    if defined(STRELKA_FAST_FINITE_GPU_MATH)
@@ -583,11 +403,6 @@ DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3
         return Nf;
     }
 
-    // A float direction represents the real-valued cell that rounded to it.
-    // Bound how far eta*V+wt could move inside that cell. This certificate lets
-    // us repair support lost by endpoint rounding without accepting an
-    // unrelated direction whose exact inverse is genuinely below the VNDF
-    // tangent plane.
     const float roundoffBound = 9.5367431640625e-7f * (etaSafe * (fabsf(V.x) + fabsf(V.y) + fabsf(V.z)) + fabsf(wt.x) +
                                                        fabsf(wt.y) + fabsf(wt.z));
     if (compensatedValue(signedVdotH) < 0.0f)
@@ -609,11 +424,6 @@ DEVICE_FUNC float3 refraction_half_vector(float3 V, float3 wt, float eta, float3
         robustVdotH = compensatedSum(saturate(accurateDot(V, Nf)), 0.0f);
         return Nf;
     }
-    // The rounded direction denotes a float cell, not one exact real endpoint.
-    // Pick the orientation visible from V, then project a roundoff-sized normal
-    // sign violation to the nearest point in the closed VNDF support. Near
-    // eta=1, endpoint rounding can otherwise put eta*V+wt on the wrong side of
-    // the tangent plane even though the latent sampled H was valid.
     robustVdotH = adjustedRepresentative ? compensatedSum(saturate(accurateDot(V, H)), 0.0f) : signedVdotH;
     const float robustVdotHValue = saturate(compensatedValue(robustVdotH));
     if (etaSafe != 1.0f && robustVdotHValue > 0.0f && fresnel_dielectric(robustVdotH, etaSafe) == 1.0f)
@@ -690,23 +500,6 @@ DEVICE_FUNC float refraction_jacobian(float3 V, float3 L, float eta, float LdotH
     return fminf(fabsf(LdotH) / denominatorSquared, 3.402823466e+38f);
 }
 
-// ---------------------------------------------------------------------------
-// Anisotropic GGX
-//
-// The two axes are aligned with the surface's tangent frame, so unlike the
-// isotropic form these take vectors in that frame rather than scalars: an
-// anisotropic lobe is not a function of the angle to the normal alone.
-//
-// Every one of them reduces exactly to its isotropic counterpart when
-// alpha_x == alpha_y, which is what lets the specular sites call only these and
-// still render an isotropic material identically to before.
-// ---------------------------------------------------------------------------
-// The aspect ratio is driven by |anisotropy| and the sign only chooses which
-// axis is the long one. Feeding a signed value straight into sqrt(1 - 0.9a)
-// would make -a a *differently* elongated lobe rather than the same lobe turned
-// 90 degrees, which is what the sign is supposed to mean; glTF sidesteps this by
-// keeping anisotropyStrength in [0,1] and putting direction in a separate
-// rotation, but nothing stops a caller passing a negative value.
 DEVICE_FUNC void anisotropic_alpha(float roughness, float anisotropy, THREAD_REF float& alpha_x, THREAD_REF float& alpha_y)
 {
     const float r2 = roughness * roughness;

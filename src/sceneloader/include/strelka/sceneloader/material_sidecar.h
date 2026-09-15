@@ -1,42 +1,5 @@
 #pragma once
 
-// ============================================================================
-// material_sidecar.h -- <stem>_openpbr.json, an OpenPBR material per glTF one
-// ============================================================================
-//
-// glTF cannot express OpenPBR. Its material extensions stop at a clearcoat with
-// no darkening and a sheen that is a different lobe, and there is no ratified
-// MaterialX extension to point at either. This codebase has already answered
-// that question twice -- analytic lights live in <stem>_light.json and hair in
-// <stem>_curves.bin -- so this is the third instance of the same pattern rather
-// than a new idea.
-//
-// A material named here is authored, not translated: the whole OpenPBR parameter
-// set is written out and used as given. That is what makes coat_darkening,
-// dispersion, a fuzz layer and a per-channel subsurface radius reachable at all,
-// none of which survive a trip through glTF.
-//
-//   <stem>_openpbr.json:
-//
-//   {
-//     "version": 1,
-//     "materials": [
-//       { "gltfMaterial": "Ceramic",
-//         "openpbr": { "base_color": [0.9, 0.9, 0.88],
-//                      "specular_roughness": 0.08,
-//                      "coat_weight": 1.0,
-//                      "coat_darkening": 1.0 } }
-//     ]
-//   }
-//
-// Anything left out keeps its OpenPBR 1.1.1 default, so a file states only what
-// it changes. Unknown keys are a warning rather than silence: in a format where
-// a misspelt key simply does nothing, silence is the failure mode that costs an
-// afternoon.
-//
-// Materials not named here are untouched and keep shading through the glTF
-// model, so a sidecar can convert one object in a scene.
-
 #include <strelka/material/openpbr/openpbr_params.h>
 #include <strelka/scene/scene.h>
 
@@ -161,11 +124,6 @@ inline int parseOpenPBR(const nlohmann::json& j, OpenPBRParams& p)
     return unknown;
 }
 
-/// Slot name as written in the file -> OpenPBRTextureSlot, or -1.
-///
-/// Spelled out rather than derived from the parameter list because the two are
-/// not the same set: only sixteen inputs have a slot, and a map named for one of
-/// the others has to be reported rather than quietly dropped.
 inline int textureSlotFromName(const std::string& name)
 {
     static const std::unordered_map<std::string, int> kSlots = {
@@ -278,10 +236,6 @@ inline int loadMaterialsJson(Scene& scene, const std::string& path)
             {
                 continue;
             }
-            // Start from the spec defaults, not from whatever the glTF material
-            // happened to be: an authored material is a statement of the whole
-            // surface, and inheriting half of a different model would make the
-            // result depend on what the exporter wrote.
             desc.openpbr = openpbr_make_default_params();
             parseOpenPBR(entry["openpbr"], desc.openpbr);
             desc.openpbrTexPaths = {};
@@ -302,13 +256,6 @@ inline int loadMaterialsJson(Scene& scene, const std::string& path)
     return applied;
 }
 
-/// <stem>_openpbr.json beside the scene, or empty when there is none.
-///
-/// Not "_materials.json": that name is taken. The V-Ray converter already
-/// writes one beside every scene it produces, holding an array of
-/// {material, kind, extra} records -- iso_bathroom has one -- and reading it as
-/// this format threw an uncaught nlohmann type_error before the first frame.
-/// The name also says less than it should; this file is specifically OpenPBR.
 inline std::string findMaterialSidecar(const std::string& sceneFileNoExt)
 {
     const std::string candidate = sceneFileNoExt + "_openpbr.json";

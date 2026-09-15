@@ -5,11 +5,6 @@
 
 struct SharcEntry;
 
-/// Everything the resolve pass needs that is not the table itself.
-///
-/// A struct rather than a parameter list because it grew one: reprojection needs
-/// both cameras, and a signature of nine scalars is a signature where two of
-/// them get swapped.
 struct SharcResolveParams
 {
     uint32_t capacity = 0u;
@@ -34,12 +29,5 @@ struct SharcResolveParams
 /// stale slots.
 extern "C" void sharcResolve(SharcEntry* entries, const SharcResolveParams& params, cudaStream_t stream);
 
-/// Count entries in use, for the editor's occupancy readout.
-///
-/// Occupancy is the one number that says whether the cache is working: the SDK's
-/// guidance is 10-20% with a static camera, and a table pinned near full is
-/// thrashing -- inserting and evicting faster than entries ever resolve, which
-/// costs the atomics and returns nothing. Asynchronous, into a device counter
-/// the caller owns; nothing waits on it.
 extern "C" void sharcCountOccupancy(
     const SharcEntry* entries, uint32_t capacity, uint32_t* deviceCounter, cudaStream_t stream);

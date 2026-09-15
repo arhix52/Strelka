@@ -97,21 +97,6 @@ void GlfwDisplay::init(int width, int height, SettingsManager *settings)
     mSettings = settings;
 
 #if defined(__linux__)
-    // Point libxkbcommon at the system's compose tables before GLFW loads it.
-    //
-    // We link Conan's libxkbcommon, which has XLOCALEDIR compiled in as its own
-    // package prefix -- and that package ships no share/X11/locale at all. The
-    // first keyboard event then prints
-    //
-    //     xkbcommon: ERROR: couldn't find a Compose file for locale "en_US.UTF-8"
-    //
-    // on a machine that has the file, at the distribution's path, the whole
-    // time. It is not only a line of noise: without a compose table, dead keys
-    // and Multi_key sequences produce nothing, so an accented character cannot
-    // be typed into any of the editor's text fields.
-    //
-    // Only when the variable is unset, so anyone pointing it somewhere on
-    // purpose keeps their choice, and only when the directory is really there.
     if (std::getenv("XLOCALEDIR") == nullptr && std::filesystem::is_directory("/usr/share/X11/locale"))
     {
         setenv("XLOCALEDIR", "/usr/share/X11/locale", 0);
@@ -130,15 +115,6 @@ void GlfwDisplay::init(int width, int height, SettingsManager *settings)
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    // What the desktop calls this window in a task bar, an alt-tab list or a
-    // dock. Unset, GLFW leaves the Wayland app_id and the X11 WM_CLASS empty and
-    // the compositor has nothing to show but "unknown" and a placeholder icon.
-    //
-    // The window title is not that name: it carries the scene path and a dirty
-    // marker and changes as the session goes, which is exactly what an
-    // identifier must not do. Both spellings are set because which one is read
-    // depends on the platform GLFW picked, and it picks Wayland where there is
-    // one.
     glfwWindowHintString(GLFW_WAYLAND_APP_ID, "Strelka");
     glfwWindowHintString(GLFW_X11_CLASS_NAME, "Strelka");
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "Strelka");
@@ -170,10 +146,6 @@ void GlfwDisplay::init(int width, int height, SettingsManager *settings)
     io = &ImGui::GetIO();
     io->ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io->ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    // Panels, menus and sliders reachable from the pad. The ImGui GLFW backend
-    // feeds it from the same joystick GLFW hands us, so this needs no wiring --
-    // but it is deliberately *only* nav: the pad does not move the pointer, so
-    // gizmo drags and viewport picking stay on the mouse.
     io->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io->ConfigWindowsMoveFromTitleBarOnly = true;
     imgui_style::applyGraphiteBlue();
@@ -1685,10 +1657,6 @@ bool GlfwDisplay::prepareInteropFrame(ImageBuffer& result)
 
     slot = static_cast<size_t>(result.frameSerial % CudaVulkanInterop::SlotCount);
     stream = static_cast<cudaStream_t>(mRender->getNativeCudaStream());
-    // Wait for Vulkan's retirement from the previous use before reserving the
-    // next retire value. Waiting after reserveRetireValue() waits on the value
-    // that only the upcoming Vulkan submission can signal, deadlocking the
-    // first displayed frame.
     if (!mInterop.cudaWaitForRetire(slot, stream) ||
         !mInterop.reserveReadyValue(slot, &readyValue) ||
         !mInterop.reserveRetireValue(slot, &retireValue) ||

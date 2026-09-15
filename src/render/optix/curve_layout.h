@@ -1,19 +1,5 @@
 #pragma once
 
-// How a set of strands becomes a list of curve segments, and how a hit on one
-// of those segments becomes a position along its strand.
-//
-// Both are pure arithmetic over the sidecar's numbers, so they live here rather
-// than inside the acceleration-structure builder: the builder needs a GPU and a
-// context to run at all, while these two answers are exactly the ones that were
-// wrong -- the basis was hardcoded to cubic, and the strand coordinate did not
-// exist, so every curve hit read uv (0.5, 0.5). `tests/render/test_curve_layout.cpp`
-// pins them.
-//
-// No CUDA and no OptiX in here. The closest-hit shader includes it for the
-// strand coordinate so the host and the device cannot drift apart on where
-// along a strand a segment index lands.
-
 #include <cstdint>
 
 #if defined(__CUDACC__)
@@ -26,7 +12,6 @@
 #    include <vector>
 #endif
 
-
 namespace oka::curve_layout
 {
 
@@ -38,14 +23,6 @@ OKA_CURVE_FN uint32_t controlPointsPerSegment(bool isLinear)
     return isLinear ? 2u : 4u;
 }
 
-/// Where along its strand a hit landed, in [0, 1).
-///
-/// Segments are laid out strand after strand, so with a uniform segment count
-/// the index modulo that count is the segment's position within its strand and
-/// the curve parameter interpolates inside it. A set whose strands differ in
-/// length carries 0, and every hit reports the root -- a ramp with no gradient,
-/// which is a visible and explicable failure rather than an index into the
-/// wrong strand.
 OKA_CURVE_FN float strandCoordinate(uint32_t primitiveIndex, uint32_t segmentsPerStrand, float u)
 {
     if (segmentsPerStrand == 0u)
@@ -56,17 +33,6 @@ OKA_CURVE_FN float strandCoordinate(uint32_t primitiveIndex, uint32_t segmentsPe
 }
 
 #if !defined(__CUDACC__)
-/// The index buffer an OptiX curve build wants: one entry per segment, holding
-/// the index of that segment's first control point in the shared point buffer.
-///
-/// `pointsStart` is the set's offset into the scene-wide point buffer, because
-/// OptiX is handed the whole buffer and indexes into it globally.
-///
-/// A strand with fewer control points than one segment needs contributes
-/// nothing. The version this replaces computed `count - degree` as a signed
-/// int, which is the same answer for the cubic case it was hardcoded to and a
-/// negative one -- an empty loop by accident rather than by intent -- for a
-/// strand too short.
 inline std::vector<int> segmentIndices(const std::vector<uint32_t>& vertexCounts,
                                        uint32_t firstStrand,
                                        uint32_t strandCount,

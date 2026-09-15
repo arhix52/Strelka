@@ -6,12 +6,6 @@ using oka::metal::canTracePartial;
 using oka::metal::PublishClock;
 using oka::metal::StreamReadiness;
 
-// Two decisions govern what a half-loaded scene looks like: whether a frame can
-// be traced at all, and how often the picture is allowed to change while assets
-// keep arriving. Both fail quietly -- one as a black screen, the other as a
-// picture that never converges -- so they are pinned here rather than tuned by
-// watching a load.
-
 TEST_CASE("a frame needs somewhere to accumulate and something to intersect")
 {
     StreamReadiness r;

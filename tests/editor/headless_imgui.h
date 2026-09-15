@@ -5,10 +5,6 @@
 namespace oka::test
 {
 
-/// An ImGui context with no backend, sized like the editor's default window.
-///
-/// Enough for input and hit-testing behaviour: NewFrame/Render run, items get
-/// their rects, and mouse events go in through the normal event queue.
 struct HeadlessImGui
 {
     HeadlessImGui()

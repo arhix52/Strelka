@@ -1,21 +1,6 @@
 #ifndef STRELKA_BXDF_STANDARD_PBR_H
 #    define STRELKA_BXDF_STANDARD_PBR_H
 
-// ============================================================================
-// bxdfs/standard_pbr.h -- glTF metallic-roughness PBR material
-//
-// Implements the standard PBR model as described in the glTF 2.0 spec with
-// the following lobes:
-//
-//   1. Diffuse (Lambertian) -- weighted by (1 - metallic) * (1 - transmission)
-//   2. Specular reflection (GGX Cook-Torrance)
-//   3. Transmission (refraction through rough/smooth dielectric)
-//   4. Clearcoat (additional GGX layer with fixed IOR = 1.5)
-//
-// Lobe selection is done stochastically: we choose one lobe proportional to
-// its approximate weight and divide out the selection probability.
-// ============================================================================
-
 #    include "../material_math.h"
 #    include "../bsdf_types.h"
 #    include "../surface_interaction.h"
@@ -28,16 +13,6 @@
 #    include <discrete_sampling.h>
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
-//
-// Device-shared header: NVCC and the Metal compiler read this too, and
-// clang-tidy only ever sees the host build, so these two suggestions cannot be
-// taken here. Initialising the locals means a dead store in a BSDF inner loop --
-// they are out-parameters written on the next line -- and the fixer spells the
-// initialiser NAN, which needs <math.h>, which Metal rejects outright. Default
-// member initialisers do the same to structs that are memcpy'd to the GPU.
-// Suppressed rather than left to warn because these repeat in every translation
-// unit that includes the header, and 700 lines of unactionable output per build
-// is how the handful that matter get skipped.
 
 // ---------------------------------------------------------------------------
 // Internal: compute lobe weights for stochastic lobe selection
@@ -52,10 +27,6 @@ struct PbrLobeWeights
     float total;
 };
 
-// The specular lobe's Fresnel, with a thin film over it when the material has
-// one. Everything the film changes is here: it replaces the reflectance and
-// leaves the distribution and the shadowing alone, which is what makes it a
-// property of the interface rather than of the microsurface.
 DEVICE_FUNC float3 specular_fresnel(const THREAD_REF SurfaceInteraction& si, float3 F0, float v_dot_h)
 {
     const float3 base = fresnel_schlick(F0, v_dot_h);
@@ -63,60 +34,20 @@ DEVICE_FUNC float3 specular_fresnel(const THREAD_REF SurfaceInteraction& si, flo
     {
         return base;
     }
-    // At the microfacet, not at the shading normal. The glTF reference evaluates
-    // the film once per shading point against NdotV; inside a microfacet BRDF the
-    // angle the Fresnel is taken at is VdotH, and using anything else makes the
-    // film disagree with the lobe it is modifying.
     const float3 film = iridescence_fresnel(1.0f, si.iridescence_ior, v_dot_h, si.iridescence_thickness, F0);
     return mix(base, film, saturate(si.iridescence));
 }
 
-// How much of the separate specular lobe survives a transmissive material.
-//
-// Zero for glass, and the same factor pbr_lobe_weights uses to zero the lobe's
-// selection probability. The transmission lobe runs its own Fresnel and produces
-// reflection events itself, so a second specular lobe would double-count -- which
-// is why the weight was already scaled this way. The *BRDF* was not, and that is
-// worse than double-counting: a lobe evaluated into f_total whose selection
-// probability is zero is divided by a pdf that does not include it. On a smooth
-// coated bubble the coat lobe is the only one selected, and the specular term
-// rides along at 1/0.19 of its proper weight.
-//
-// What that looked like: soap bubbles that glowed instead of being transparent.
-// Adding thin-film interference did not cause it, it coloured it -- the same
-// over-count had been shipping as a white halo.
 DEVICE_FUNC float specular_lobe_scale(const THREAD_REF SurfaceInteraction& si)
 {
     return 1.0f - si.transmission * (1.0f - si.metallic);
 }
 
-// Whether the diffuse lobe has a response to give at all.
-//
-// Zero once the normal map has turned the shading normal past the viewer and
-// valid_reflection.h has corrected it: the correction exists for the lobes that
-// reflect, and the diffuse one is defined by the normal the map asked for, which
-// faces away. Cycles reaches the same place from the other side -- it corrects
-// its glossy closures only, and its diffuse closure returns nothing for a normal
-// behind the view ray.
-//
-// Exactly one on every hit that needed no correction, so this is a no-op for all
-// but a handful of grazing pixels, and the ladder does not move for it.
 DEVICE_FUNC float diffuse_lobe_scale(const THREAD_REF SurfaceInteraction& si)
 {
     return si.diffuse_faces_away ? 0.0f : 1.0f;
 }
 
-// Reflectance at a transmissive interface, coloured when a thin film sits on it.
-//
-// The film is applied in the specular lobe, and a transmissive material does not
-// have one: its reflection is the transmission lobe's own Fresnel coin flip. So
-// a soap bubble -- the thing thin-film interference exists to render -- got no
-// film at all, and came out with a black rim where the reference has a bright
-// iridescent one.
-//
-// Returned as a colour with the scalar the coin flip uses left alone, so the
-// sampling is unchanged and the tint rides on the throughput. With no film the
-// colour is that same scalar and both correction factors are exactly one.
 DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si, InterfaceCosine v_dot_h, float eta)
 {
     const float f = fresnel_dielectric(v_dot_h, eta);
@@ -144,10 +75,6 @@ DEVICE_FUNC float3 transmission_fresnel(const THREAD_REF SurfaceInteraction& si,
 }
 #    endif
 
-// A coloured Fresnel response needs a scalar branch probability, but that
-// probability is a proposal rather than the response itself. Luminance gives a
-// low-variance split; the endpoint guards preserve both outcomes whenever any
-// colour channel has support on the renderer's finite random lattice.
 DEVICE_FUNC float transmission_fresnel_probability(float3 filmFresnel)
 {
     float probability = saturate(luminance(filmFresnel));
@@ -171,50 +98,16 @@ DEVICE_FUNC float3 sheen_brdf(const THREAD_REF SurfaceInteraction& si, float n_d
         return make_float3(0.0f);
     }
     const float alpha = alpha_from_roughness(si.sheen_roughness);
-    // Normalised by its own directional albedo where that exceeds 1. Ashikhmin's
-    // visibility term does not conserve energy -- it reaches 2.78 at low
-    // roughness and grazing incidence -- so the raw lobe returns more light than
-    // arrived, which is a glowing towel rather than a shiny one.
     const float e = sheen_albedo(fabsf(n_dot_v), si.sheen_roughness);
     const float norm = (e > 1.0f) ? (1.0f / e) : 1.0f;
     return si.sheen_color * (si.sheen * norm * sheen_d_charlie(alpha, n_dot_h) * sheen_v_ashikhmin(n_dot_l, n_dot_v));
 }
 
-// The coat's reflectance at normal incidence. KHR_materials_clearcoat fixes this
-// at 0.04, i.e. a clear lacquer; a DCC that lets an artist author the coat's IOR
-// means something else by a "coat" and the difference is not subtle -- a coat at
-// IOR 2.0 reflects 11% head-on rather than 4%.
 DEVICE_FUNC float clearcoat_f0(const THREAD_REF SurfaceInteraction& si)
 {
     return f0_from_ior(fmaxf(si.clearcoat_ior, 1.0f));
 }
 
-// What survives under the coat: enter, bounce on the base, leave -- and the
-// geometric series of bounces between the base and the coat's underside.
-//
-// The coat used to be added on top with nothing taken away, which makes a glazed
-// ceramic brighter than the light falling on it. Taking (1-F_L)*(1-F_V) out
-// without giving the series back then left scenes/feature_tests/15_clearcoat
-// 6% dark at IOR 2.2 while matching at IOR 1.0 -- the signature of a missing
-// term that scales with the coat's reflectance.
-//
-// Per channel, against ½(F_L+F_V). A hemispherical F_avg is larger than F at
-// normal incidence, so dividing (1-F0)^2 by (1-F_avg ρ) is what pushed a white
-// ceramic to 1.02; the internal average (~0.6 with TIR) pushed it to 2.43.
-// Both are the wrong Fresnel for a model that never refracts L and V into the
-// coat. The ceiling at (1-F_ms) is what keeps a base whose albedo we have
-// under-counted -- specular sits under the coat too -- from climbing past one.
-// What survives under the specular layer, the way clearcoat_base_scale() answers
-// it for the coat. The lobe used to be summed on top of a full diffuse one, so a
-// rough dielectric returned more light than fell on it -- docs/open-defects.md,
-// Closed, for the measurements.
-//
-// Against the layer's directional albedo rather than a Fresnel at one angle:
-// Schlick with F0 = 0 has a (1-cos)^5 tail reaching one, so a (1-F) complement
-// drains a material that has no specular lobe at all. ggx_specular_albedo() is
-// the quantity that goes to zero when the lobe does.
-//
-// View side only, because the model never refracts L into the layer.
 DEVICE_FUNC float3 specular_base_scale(const THREAD_REF SurfaceInteraction& si, const THREAD_REF float3& F0, float n_dot_v)
 {
     // ggx_specular_albedo() is already clamped to one and specular_lobe_scale()
@@ -231,10 +124,6 @@ DEVICE_FUNC float3 clearcoat_base_scale(const THREAD_REF SurfaceInteraction& si,
     }
     const float f0 = clearcoat_f0(si);
     const float w = si.clearcoat;
-    // Twice, because the light crosses the coat twice: in along L and out along
-    // V. Scaling by the view-side Fresnel alone -- which is what the glTF sample
-    // viewer does -- still let a glazed white ceramic reach 1.06 directional
-    // albedo, measured in tests/material/test_clearcoat.cpp.
     const float F_L = w * fresnel_schlick_scalar(f0, fabsf(n_dot_l));
     const float F_V = w * fresnel_schlick_scalar(f0, fabsf(n_dot_v));
     const float single = (1.0f - F_L) * (1.0f - F_V);
@@ -247,10 +136,6 @@ DEVICE_FUNC float3 clearcoat_base_scale(const THREAD_REF SurfaceInteraction& si,
                        fminf(single / fmaxf(1.0f - F_ms * rho.z, 1e-5f), ceiling));
 }
 
-// OpenPBR / Cycles thin-glass transmission roughness. Two refraction events
-// widen the lobe; the scale is from Kulla Conty (Imageworks 2017, p.40 -- the
-// slides say 3.7, the Cycles port and the algebra say 3.4). `eta` is n_glass /
-// n_air, at least one.
 DEVICE_FUNC float thin_glass_transmission_alpha(float alpha, float eta)
 {
     eta = fmaxf(eta, 1.0f);
@@ -266,10 +151,6 @@ DEVICE_FUNC float3 flip_through_surface(float3 w, float3 n)
     return w - n * (2.0f * dot(w, n));
 }
 
-// How much of the base layer survives under the sheen, per KHR_materials_sheen.
-// What the fabric reflected is not available to the lobes beneath it; leaving
-// this out is what made an additive sheen measure 1.40 directional albedo on a
-// plain white cloth.
 DEVICE_FUNC float sheen_base_scale(const THREAD_REF SurfaceInteraction& si, float n_dot_v)
 {
     if (si.sheen <= 0.0f)
@@ -287,36 +168,18 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
 
     const float dielectric_weight = 1.0f - si.metallic;
 
-    // The diffuse lobe splits rather than grows: KHR_materials_diffuse_transmission
-    // defines the result as mix(diffuse_brdf, diffuse_btdf, weight), so what goes
-    // through is what no longer comes back, and a leaf cannot reflect and
-    // transmit its way past the energy that hit it.
     const float dt = saturate(si.diffuse_transmission);
     const float diffuse_base = dielectric_weight * (1.0f - si.transmission);
 
     w.diffuse = diffuse_base * (1.0f - dt) * luminance(si.albedo) * diffuse_lobe_scale(si);
     w.diffuse = fmaxf(w.diffuse, 0.0f);
 
-    // Sheen rides the cosine-sampled lobe instead of getting one of its own.
-    // Charlie has no cheap invertible sampling routine, a cosine hemisphere
-    // covers its support, and sharing the selection probability keeps
-    // combined_pdf a single cosine term in every branch below. What sharing does
-    // require is that the lobe stays reachable on a dark fabric, which the max
-    // guarantees; for a material without sheen this is exactly a no-op.
     const float sheen_lum = si.sheen * luminance(si.sheen_color);
     w.diffuse = fmaxf(w.diffuse, sheen_lum * diffuse_lobe_scale(si));
 
     w.diffuse_transmission = diffuse_base * dt * luminance(si.diffuse_transmission_color);
     w.diffuse_transmission = fmaxf(w.diffuse_transmission, 0.0f);
 
-    // For specular, use the approximate Fresnel reflectance at normal incidence.
-    //
-    // Scaled by (1 - transmission) for the same reason diffuse is: the
-    // transmission lobe runs its own Fresnel and reflects internally, so leaving
-    // a separate specular lobe alive on a transmissive material makes the
-    // reflected direction reachable by two strategies whose pdfs each ignore the
-    // other. Neither over-counts on its own; together they do, and smooth glass
-    // came out about 9% too bright.
     const float f0_scalar = f0_from_ior(si.ior);
     const float spec_lum = mix(f0_scalar * luminance(si.specular_color), luminance(si.albedo), si.metallic);
     w.specular = fmaxf(spec_lum, 0.04f) * (1.0f - si.transmission * dielectric_weight);
@@ -338,12 +201,6 @@ DEVICE_FUNC PbrLobeWeights pbr_lobe_weights(const THREAD_REF SurfaceInteraction&
         return w;
     }
 
-    // The shipped GPU generators return k/2^23. A positive interval narrower
-    // than that can disappear entirely after the float CDF additions, leaving a
-    // lobe that eval() sees but sample() cannot select. Four lattice cells leave
-    // room for those additions to round while changing only the proposal, never
-    // the material response. Exact represented categorical masses are unified in
-    // finding R; this guard establishes support in the meantime.
     const float minPositiveWeight = w.total * (4.0f / 8388608.0f);
     if (w.diffuse > 0.0f)
         w.diffuse = fmaxf(w.diffuse, minPositiveWeight);
@@ -373,11 +230,6 @@ struct PbrLobeProbabilities
     unsigned int cdfTransmission;
 };
 
-// Apportion the five proposal weights onto the exact 23-bit categorical
-// lattice consumed by production BSDF sampling. Every positive lobe keeps at
-// least one state, zero lobes keep none, and the counts sum exactly to the
-// lattice size. The float probabilities are exact dyadics and are the same
-// values eval() places in the marginal PDF.
 DEVICE_FUNC PbrLobeProbabilities pbr_lobe_probabilities(const THREAD_REF PbrLobeWeights& w, bool exiting)
 {
     const float weights[5] = { exiting ? 0.0f : w.diffuse,
@@ -428,45 +280,12 @@ DEVICE_FUNC float pbr_fresnel_proposal(float physicalProbability)
     return discreteFloatLatticeProbability(physicalProbability);
 }
 
-// ---------------------------------------------------------------------------
-// The reflection hemisphere, evaluated once
-//
-// f and the combined sampling density for a direction on the same side of the
-// surface as the view vector. Every lobe that can produce such a direction
-// contributes to both, whichever lobe the sampler happened to pick -- that is
-// what makes bsdf_sample() and bsdf_eval() two descriptions of one BRDF, and
-// what the MIS weights on either side of the estimate assume.
-//
-// This used to be written out four times: once in each of the diffuse, specular
-// and clearcoat branches of standard_pbr_sample(), and once in
-// standard_pbr_eval(). tests/material/test_sample_eval_consistency.cpp exists
-// because of that duplication. The transmission lobe's Fresnel reflection was
-// the copy that never got made: sample() produced those directions from inside
-// the transmission branch and reported only that branch's density, while eval()
-// left the term out of f and out of the pdf altogether. On glass the two did not
-// merely disagree -- eval() returned pdf 0 for 100% of the reflections sample()
-// generated, so next-event estimation could not see a rough glass reflection at
-// all while the light hit still deducted a MIS share for it. At transmission
-// 0.5 the surviving disagreement was up to 17000x on the directions the two do
-// share.
-// ---------------------------------------------------------------------------
 struct PbrReflectionTerms
 {
     float3 f;
     float pdf;
 };
 
-/// The transmission lobe's Fresnel reflection, as a BRDF and as the density it
-/// contributes *within* that lobe (the caller scales by the lobe's selection
-/// probability).
-///
-/// Weighted by transmission * (1 - metallic), which is exactly the complement of
-/// specular_lobe_scale(): the separate specular lobe is faded out by the same
-/// factor as a transmissive material takes over its own reflection, so the two
-/// sum to one reflection rather than double counting.
-///
-/// A delta interface has no density and is left at zero: sample() reports a
-/// discrete probability for it and eval() correctly returns nothing.
 DEVICE_FUNC PbrReflectionTerms pbr_transmission_reflection(const THREAD_REF SurfaceInteraction& si,
                                                            float alpha,
                                                            float eta,
@@ -511,10 +330,6 @@ DEVICE_FUNC PbrReflectionTerms pbr_transmission_reflection(const THREAD_REF Surf
     return r;
 }
 
-/// f and the combined pdf for `L`, which must be in the same hemisphere as V.
-///
-/// `pTransEff` is the transmission lobe's selection probability as the sampler
-/// applies it -- 1 on an exit hit, where that lobe is taken unconditionally.
 DEVICE_FUNC PbrReflectionTerms pbr_reflection_terms(const THREAD_REF SurfaceInteraction& si,
                                                     const THREAD_REF PbrLobeProbabilities& probabilities,
                                                     float pTransEff,
@@ -629,10 +444,6 @@ DEVICE_FUNC PbrReflectionTerms pbr_reflection_terms(const THREAD_REF SurfaceInte
     return out;
 }
 
-// All smooth reflective components land on the same macro mirror direction.
-// Their lobe identities are latent variables, not different path-space events,
-// so a selected component must return the sum of every compatible discrete mass
-// and the sum of their physical atom coefficients.
 struct PbrDeltaReflectionTerms
 {
     float3 numerator;
@@ -729,27 +540,7 @@ DEVICE_FUNC bool pbr_finish_delta_transmission(const THREAD_REF SurfaceInteracti
     return true;
 }
 
-// Forward-declared so every non-delta sample can be finished from the same full
-// marginal value and density that the light-sampling side evaluates. This is
-// intentionally not used for delta events: their `pdf` field is discrete mass,
-// whereas standard_pbr_eval() returns only a solid-angle density.
 struct PbrPrepared;
-// ---------------------------------------------------------------------------
-// Prepare once per vertex
-//
-// sample() and eval() open with the same twenty-odd lines: flip the frame for an
-// opaque back hit, take NdotV, derive the tangent frame, split the roughness
-// into ax/ay, weigh the five lobes and apportion them onto the 23-bit
-// categorical lattice. A vertex ran that prologue three times or more --
-// bsdf_has_smooth_lobe() before next-event estimation, bsdf_eval() for the
-// connection, bsdf_sample() for the bounce -- over inputs that cannot have
-// changed between them.
-//
-// OpenPBR has had openpbr_prepare_at() for exactly this reason; this is the same
-// thing for the glTF model. The struct is a cache and nothing else: every field
-// is what the code that used to compute it computed, which is why the old entry
-// points are still here and simply prepare first.
-// ---------------------------------------------------------------------------
 struct PbrPrepared
 {
     /// The normal actually shaded with -- flipped when an opaque surface is hit
@@ -792,11 +583,6 @@ DEVICE_FUNC PbrPrepared pbr_prepare(const THREAD_REF SurfaceInteraction& si)
     prep.alpha = alpha_from_roughness(si.roughness);
     prep.alpha_cc = alpha_from_roughness(si.clearcoat_roughness);
 
-    // Anisotropy is defined relative to the surface's own tangent frame, so the
-    // arbitrary azimuthal basis build_onb() derives from N alone will not do:
-    // rotate the mesh's UV tangent and the highlight has to rotate with it.
-    // Gram-Schmidt against N rather than si.bitangent, which already carries the
-    // TANGENT.w handedness and would flip the lobe with it.
     {
         const float3 Tp = si.tangent - prep.N * dot(prep.N, si.tangent);
         if (dot(Tp, Tp) > 1e-8f)
@@ -820,11 +606,6 @@ DEVICE_FUNC PbrPrepared pbr_prepare(const THREAD_REF SurfaceInteraction& si)
     return prep;
 }
 
-/// The preparation, or a zeroed one for a material that has no glTF lobe stack.
-///
-/// A hair or a pure dielectric vertex reads none of these fields, and building
-/// them for it would be the cost this cache exists to remove, charged to the
-/// materials that cannot use it.
 DEVICE_FUNC PbrPrepared pbr_prepare_for(const THREAD_REF SurfaceInteraction& si)
 {
     if (si.material_type != MATERIAL_TYPE_STANDARD_PBR)
@@ -857,13 +638,6 @@ DEVICE_FUNC bool pbr_finish_continuous_sample(const THREAD_REF SurfaceInteractio
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Sample
-//
-// u1, u2: uniform random for microfacet / hemisphere sampling
-// lobeWord: 23-bit categorical word for lobe selection
-// fresnelWord: 23-bit categorical word for dielectric reflect/refract choice
-// ---------------------------------------------------------------------------
 DEVICE_FUNC BsdfSampleResult
 standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
                     float u1,
@@ -888,11 +662,6 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
     // into Nf and picks eta by direction), so the reflection lobes are skipped
     // rather than evaluated against a back-facing normal.
     const bool exiting = prep.exiting;
-    // On an exit hit the reflective base/coat lobes do not apply, but diffuse
-    // and interface transmission can both cross the surface. Renormalize those
-    // two compatible proposals rather than assigning the whole discrete choice
-    // to one of them. This also makes either proposal probability one when it is
-    // the only surviving lobe.
     const float exit_transmission_total = w.diffuse_transmission + w.transmission;
     if (exiting && !(exit_transmission_total > 0.0f))
         return result;
@@ -908,17 +677,6 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
     const bool baseSpecularDelta = anisotropic_ggx_is_delta(ax, ay);
     const float3 F0 = prep.F0;
 
-    // -----------------------------------------------------------------------
-    // Lobe selection
-    // -----------------------------------------------------------------------
-    // The thresholds are the running sums of the lobe probabilities, in the
-    // order the branches test them. Spelled out rather than accumulated inside
-    // the conditions: an assignment in an `if` reads as a typo for a comparison,
-    // and here it was also load-bearing in a way that is easy to misread, since
-    // the increment on a short-circuited branch never happened. It does not have
-    // to -- that branch is the one being taken -- and naming each sum says so
-    // without the reader having to work it out. Same additions in the same
-    // order, so the same floats.
     if (!exiting && lobeWord < probabilities.cdfDiffuse)
     {
         // ===== DIFFUSE LOBE ===============================================
@@ -935,12 +693,6 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
     }
     else if (lobeWord < probabilities.cdfDiffuseTransmission)
     {
-        // ===== DIFFUSE TRANSMISSION LOBE ==================================
-        //
-        // Lambertian about -N: light enters, scatters inside, and leaves on the
-        // far side with no memory of where it came from. No Fresnel and no eta,
-        // which is what separates this from the specular transmission lobe
-        // below -- there is no interface being refracted through.
         const float3 Nt = (NdotV > 0.0f) ? -N : N;
         float3 Tt, Bt;
         build_onb(Nt, Tt, Bt);
@@ -989,29 +741,9 @@ standard_pbr_sample(const THREAD_REF SurfaceInteraction& si,
         // ===== TRANSMISSION LOBE ==========================================
         const bool entering = NdotV > 0.0f;
         const float3 Nf = entering ? N : -N;
-        // Which side of the interface the ray is on decides eta -- except that a
-        // thin-walled surface has no side to be on. Its far wall is another film
-        // met from the air, not the way out of a dense medium, so the ratio is
-        // the entering one whichever way the shading normal points.
-        //
-        // Reading that far wall as an exit made it dense-to-thin, where
-        // everything past the critical angle reflects with probability 1. At IOR
-        // 1.6 the critical angle is 38.7 degrees, and on a sphere the incidence
-        // angle at radius r is asin(r / R) -- so the whole annulus outside
-        // r / R = 1 / 1.6 = 0.625 total-internally-reflected. A ray through the
-        // front wall was trapped between the two walls, reflected every time and
-        // absorbed none, so Russian roulette never ended it and maxDepth did:
-        // the path returned nothing. That is the black ring on the soap bubbles,
-        // and it covered the outer 37.5% of each one, which is what the
-        // arithmetic above predicts.
         const float eta = (entering || si.thin_walled) ? (si.exterior_ior / si.ior) : (si.ior / si.exterior_ior);
         const bool is_smooth = (alpha < BSDF_DELTA_ALPHA);
 
-        // Thin wall: Cycles / OpenPBR split Fresnel at the shading normal once,
-        // then run a reflection lobe at `alpha` and a transmission lobe at the
-        // Kulla-Conty-raised alpha. Using a microfacet F here made the coin flip
-        // track the reflection distribution instead of the wall, and disagreed
-        // with the weight Cycles bakes into its two closures.
         if (si.thin_walled)
         {
             const float NdotV_abs = fabsf(NdotV);
@@ -1234,15 +966,6 @@ standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THRE
     const float3 N = prep.N;
     const float3 V = si.wo;
 
-    // Cycles' opening test in bump_shadowing_term, which applies to evaluation
-    // whatever the lobe: when the normal the map asked for and the one that was
-    // shaded disagree about which side the viewer is on, there is nothing to
-    // evaluate. Such a hit is lit by its bounce alone and takes no next-event
-    // estimate, which is exactly why Cycles renders these pixels dimmer than a
-    // renderer that just shades them with the corrected normal.
-    //
-    // A no-op wherever nothing was corrected: bump_normal is shading_normal
-    // there, and the product reduces to a square.
     {
         const float cosNsI = dot(si.bump_normal, V);
         const float cosNsN = dot(si.bump_normal, N);
@@ -1282,11 +1005,6 @@ standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THRE
 
     const float3 F0 = prep.F0;
 
-    // Reflection means wi and wo are on the SAME side of the surface. Testing
-    // NdotL alone only worked while NdotV was guaranteed positive; on an exit
-    // hit NdotV is negative, so a refracted direction has NdotL > 0 and would be
-    // mistaken for a reflection -- eval would then return 0 for exactly the
-    // directions sample produces.
     const bool is_reflection = ((NdotL > 0.0f) == (NdotV > 0.0f));
 
     if (is_reflection)
@@ -1301,12 +1019,6 @@ standard_pbr_eval(const THREAD_REF SurfaceInteraction& si, float3 wi, const THRE
     }
     else
     {
-        // ---- Transmission hemisphere --------------------------------------
-        //
-        // Diffuse transmission first, and on its own terms: it is not delta at
-        // any roughness and needs no interface, so neither of the guards below
-        // applies to it. A leaf is the whole reason next-event estimation has
-        // anything to connect to on the shadowed side of a canopy.
         const float dt = saturate(si.diffuse_transmission);
         if (dt > 0.0f)
         {

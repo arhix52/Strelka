@@ -10,10 +10,6 @@
 
 using namespace oka;
 
-// Photometric -> radiometric conversion factor used by the glTF loader
-// (KHR_lights_punctual intensity is candela / lux, everything downstream of
-// UniformLightDesc is watts). Mirrored here on purpose: gltfloader.cpp keeps it
-// file-static, so this is the contract the test pins, not the symbol.
 static constexpr float kLumensPerWatt = 683.0f;
 
 static constexpr float kPi = std::numbers::pi_v<float>;
@@ -109,10 +105,6 @@ TEST_CASE("power on a spot light integrates back to the input power over its con
 
 TEST_CASE("power on a projector integrates back over its rectangular frame")
 {
-    // I = Phi / Omega, with Omega the pyramid the image fills. Six 90-degree
-    // square pyramids tile the sphere, so this one takes a sixth of the watts of
-    // the equivalent point lamp -- and multiplying the intensity back by the
-    // solid angle has to return the watts that went in.
     const float halfFov = 0.25f * kPi;
     const float aspect = 1.0f;
     const glm::float3 baked = bakeProjector(LIGHT_UNIT_POWER, 60.0f, halfFov, aspect);
@@ -302,31 +294,10 @@ TEST_CASE("a 1000 lux Blender sun round-trips through 683000 lx")
 
 TEST_CASE("the renderer carries two lm/W figures, for two different jobs")
 {
-    // This looks like an inconsistency and is regularly reported as one, so it
-    // is pinned here with the reason.
-    //
-    //   kLuminousEfficacyD65 = 177.83 converts a *measurement*. An IES file
-    //   holds candela produced by a real luminaire with an unknown spectrum, and
-    //   turning that into watts needs an assumed illuminant. Cycles assumes D65
-    //   for the same conversion, which is what lets the 27_ies ladder row
-    //   compare two angular distributions instead of two guesses at a scale.
-    //
-    //   683 lm/W, in gltfloader.cpp, undoes a *bookkeeping step*. Blender's glTF
-    //   exporter writes candela as watts * 683 / (4 pi), so recovering the watts
-    //   the artist typed means dividing by 683 -- the same 683, whatever the
-    //   lamp's spectrum is or is not.
-    //
-    // Collapsing them into one number necessarily breaks agreement with one
-    // reference or the other: with Cycles on IES profiles, or with Blender on a
-    // round-tripped lamp. The round trip is pinned above; this pins the pair.
     CHECK(oka::kLuminousEfficacyD65 == doctest::Approx(177.83f));
     CHECK(oka::kCandelaToRadiantIntensity == doctest::Approx(1.0f / 177.83f));
     CHECK(kLumensPerWatt == doctest::Approx(683.0f));
 
-    // A luminaire measured at 1000 cd and a Blender lamp exported at 1000 cd are
-    // therefore not the same light, and differ by this much. Anyone mixing the
-    // two in one scene is looking at a 3.84x imbalance that is inherited, not
-    // introduced.
     CHECK(kLumensPerWatt / oka::kLuminousEfficacyD65 == doctest::Approx(3.841f).epsilon(1e-3));
 }
 
@@ -393,16 +364,6 @@ TEST_CASE("unit names round-trip through the sidecar spellings")
 
 TEST_CASE("cone solid angle survives sun-sized half-angles")
 {
-    // 2pi (1 - cos x) is exact in real arithmetic and worthless in floats here:
-    // at the sun's 0.00459 rad, cos rounds to within 6e-8 of 1 while the true
-    // 1 - cos is 1.05e-5, so three of the five significant digits are gone, and
-    // a few times narrower it collapses to zero outright.
-    //
-    // This matters more than a precision note usually would. The host bakes a
-    // distant light's radiance as irradiance / solid angle and the shader
-    // divides it back out by the sampling pdf; they only cancel while both are
-    // computing the same number. Once they stopped, the sun came out 73 times
-    // too bright.
     struct Case { double halfAngle; };
     const Case cases[] = { { 0.5 }, { 0.05 }, { 0.00459216 }, { 1e-3 }, { 1e-4 }, { 1e-5 } };
     for (const Case& c : cases)

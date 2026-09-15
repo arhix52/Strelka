@@ -1,28 +1,3 @@
-// ============================================================================
-// test_openpbr_volume.cpp
-//
-// The interior medium an OpenPBR material encloses: what fills a closed surface
-// once subsurface scattering and transmission are blended, which the
-// specification defines jointly rather than as two volumes.
-//
-// Worth pinning separately from the BSDF because the integrator consumes it
-// through a different route. openpbr_interior_volume() is called from the
-// wavefront tracer's `extend` stage, which has a ray and a medium id and no
-// shading point at all -- no hit, no basis, no view direction. That works only
-// because Adobe's staged initialisation lets the volume be derived on its own,
-// and if a later version started reading the geometry basis there, the extend
-// stage would be handing it an identity frame without knowing.
-//
-// The numbers below are checked against the closed forms rather than against
-// whatever the library returned when this was written:
-//
-//   subsurface   extinction = 1 / (radius * radius_scale)   per channel
-//   transmission extinction = -ln(transmission_color) / transmission_depth
-//
-// and the two cases that must produce *no* medium, because they are the ones a
-// caller gets wrong: a thin-walled surface has no interior, and transmission
-// with no depth is a tint on the surface lobe rather than a volume.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -56,14 +31,6 @@ TEST_CASE("subsurface extinction is the reciprocal of the per-channel mean free 
         CHECK(s.extinction_coefficient.x == doctest::Approx(1.0f / 0.003f).epsilon(1e-3f));
         CHECK(s.extinction_coefficient.y == doctest::Approx(1.0f / (0.003f * 0.5f)).epsilon(1e-3f));
 
-        // The blue channel would be 1/(0.003 * 0.25) = 1333, and is 1000
-        // instead: openpbr_clamp_input_distance floors the mean free path at
-        // OpenPBR_MinDistance = 1e-3, which caps extinction at 1000.
-        //
-        // Pinned rather than worked around. A clamp on the mean free path is
-        // exactly the kind of constant that moves in a library bump, and it
-        // would shift the look of every dense subsurface material -- the chess
-        // pieces among them -- with nothing else to notice.
         CHECK(s.extinction_coefficient.z == doctest::Approx(1000.0f).epsilon(1e-3f));
         CHECK(s.extinction_coefficient.z < 1.0f / (0.003f * 0.25f));
     }
@@ -133,11 +100,6 @@ TEST_CASE("scatter anisotropy reaches the phase function")
 
 TEST_CASE("a dark subsurface colour makes a dark medium")
 {
-    // The Open Chess Set's pieces are dark green marble driven from a map, and
-    // they rendered white. This pins the half of that path that is testable on
-    // the CPU: the mapping from an authored colour to a single-scattering albedo
-    // is monotonic and goes to zero, so a medium that comes out bright from a
-    // dark colour is not this function's doing.
     auto albedoFor = [](float c) {
         OpenPBRParams p = openpbr_make_default_params();
         p.subsurface_weight = 1.0f;
@@ -159,10 +121,6 @@ TEST_CASE("a dark subsurface colour makes a dark medium")
 
 TEST_CASE("the subsurface entry lobe carries no colour of its own")
 {
-    // The contract between the BSDF and the integrator, and the reason the
-    // medium's albedo is not optional: at subsurface_weight 1 the surface hands
-    // the path on colourless and almost always into the interior. Whatever the
-    // walk does not apply is simply lost -- a dark marble comes back white.
     SurfaceInteraction si = {};
     si.shading_normal = make_float3(0.0f, 0.0f, 1.0f);
     si.geometry_normal = si.shading_normal;

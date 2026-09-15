@@ -73,13 +73,6 @@ glm::float4x4 perspective(float fov, float aspect_ratio, float n, float f, glm::
     const float A = n / (f - n);
     const float B = f * A;
 
-    // glm::float4x4 projection = glm::perspective(fov, aspect_ratio, n, f);
-    // if (inverse)
-    //{
-    //     *inverse = glm::inverse(projection);
-    // }
-
-
     const glm::float4x4 projection({
         x,
         0.0f,
@@ -139,10 +132,6 @@ void Camera::setPerspective(float _fov, float _aspect, float _znear, float _zfar
     matrices.perspective = perspective(fov, _aspect, zfar, znear, &matrices.invPerspective);
 }
 
-// Reverse-z orthographic, to match what perspective() above produces: the near
-// plane maps to 1 and the far plane to 0. Unlike the perspective case the fourth
-// row is (0,0,0,1) -- there is no divide -- so clip space and view space differ
-// only by a scale, which is what makes the inverse trivial.
 namespace
 {
 glm::float4x4 orthographic(float halfWidth, float halfHeight, float n, float f, glm::float4x4* inverse)
@@ -208,10 +197,6 @@ void Camera::setOrthographic(float _xmag, float _ymag, float _znear, float _zfar
     matrices.perspective = orthographic(xmag, ymag, znear, zfar, &matrices.invPerspective);
 }
 
-// The perspective path holds the horizontal angle across a change of aspect
-// (see fovForAspect); an orthographic frame has to hold the matching extent for
-// the same reason, or the same scene rendered at a different aspect is framed
-// differently and every whole-frame comparison measures the reframe instead.
 void Camera::magForAspect(float aspect, float& halfWidth, float& halfHeight) const
 {
     halfWidth = xmag;
@@ -229,21 +214,6 @@ void Camera::magForAspect(float aspect, float& halfWidth, float& halfHeight) con
     }
 }
 
-// Zooming a parallel projection is a change of film extent, not of position.
-//
-// An orthographic camera has no centre of projection, so translating it along the
-// view direction slides the film plane through the scene and leaves the image
-// exactly as it was: the bundle of rays has moved along itself. "Closer" here can
-// only mean a smaller film rectangle, which is xmag / ymag.
-//
-// Multiplicative, so one wheel notch is the same proportion of the frame at every
-// scale, and no amount of zooming out can walk an extent down through zero into a
-// mirrored frame. Both axes take the same factor, which leaves xmag/ymag -- and so
-// authoredAspect and the reframe in magForAspect -- unchanged.
-//
-// The projection is rebuilt from the raw extents, as setOrthographic does; the
-// aspect-adapted one follows from updateAspectRatio, which the editor and the
-// renderer both call every frame.
 void Camera::zoomOrthographic(float factor)
 {
     if (projection != ProjectionType::orthographic || !(factor > 0.0f))
@@ -291,11 +261,6 @@ glm::float4x4 Camera::getView()
 
 void Camera::updateAspectRatio(float _aspect)
 {
-    // Deliberately not through setPerspective(): that stores the fov it is
-    // given, so feeding it an adapted angle would adapt the adapted angle on the
-    // next frame, and the frame after that. `fov` stays the authored vertical
-    // angle; only the projection sees the adapted one. Same reasoning for the
-    // orthographic extents, which is why magForAspect does not write xmag/ymag.
     if (projection == ProjectionType::orthographic)
     {
         float halfWidth = xmag, halfHeight = ymag;
@@ -306,16 +271,6 @@ void Camera::updateAspectRatio(float _aspect)
     matrices.perspective = perspective(fovForAspect(_aspect), _aspect, zfar, znear, &matrices.invPerspective);
 }
 
-// The vertical angle to use when rendering at `aspect`, given what the camera
-// was authored for.
-//
-// A landscape frame is fitted horizontally -- Blender's AUTO sensor fit puts the
-// lens angle on the larger axis, and so does every other tool -- so the
-// horizontal angle is the one that survives a change of aspect. Keeping the
-// vertical angle instead widens the frame by the ratio of the two aspects: a
-// camera authored at 16:9 and rendered at 4:3 sees 1.33x too much, which does
-// not look like a camera bug so much as a scene that does not match, and it
-// quietly invalidates every whole-frame measurement taken against a reference.
 float Camera::fovForAspect(float aspect) const
 {
     if (authoredAspect <= 0.0f || aspect <= 0.0f)
@@ -351,10 +306,6 @@ void Camera::rotate(float rightAngle, float upAngle)
 {
     const glm::quat a = glm::angleAxis(glm::radians(upAngle) * rotationSpeed, glm::float3(1.0f, 0.0f, 0.0f));
     const glm::quat b = glm::angleAxis(glm::radians(rightAngle) * rotationSpeed, glm::float3(0.0f, 1.0f, 0.0f));
-    // const glm::quat a = glm::angleAxis(glm::radians(upAngle) * rotationSpeed, getRight());
-    // const glm::quat b = glm::angleAxis(glm::radians(rightAngle) * rotationSpeed, getWorldUp());
-    // auto c = a * b;
-    // c = glm::normalize(c);
     mOrientation = glm::normalize(a * mOrientation * b);
     // mOrientation = glm::normalize(c * mOrientation);
     updateViewMatrix();
@@ -407,10 +358,6 @@ void Camera::update(float deltaTime)
 
     if (movementSmoothing > 0.0f && deltaTime > 0.0f)
     {
-        // Frame-rate independent exponential approach: the same wall-clock time
-        // gets the same fraction of the way to `target` whether it took one long
-        // frame or ten short ones. A plain lerp by a constant factor would not,
-        // and would tie the feel of the camera to how expensive the scene is.
         const float alpha = 1.0f - std::exp(-deltaTime / movementSmoothing);
         mMoveInput += (target - mMoveInput) * alpha;
         if (target == glm::float3(0.0f) && !isSettling())
@@ -459,10 +406,6 @@ void generatePickRay(const Camera& camera, const glm::float2& uv, glm::float3& o
 
     if (camera.projection == Camera::ProjectionType::orthographic)
     {
-        // Same film extents generateCameraRay uses: MagForAspect adapted to the
-        // render aspect, already written into invPerspective by updateAspectRatio.
-        // Reading xmag/ymag here ignored that reframe, so a non-square viewport
-        // (typical editor) produced pick rays that missed what the user saw.
         const float halfWidth = camera.matrices.invPerspective[0][0];
         const float halfHeight = camera.matrices.invPerspective[1][1];
         const glm::float3 filmPos(ndcX * halfWidth, ndcY * halfHeight, 0.0f);

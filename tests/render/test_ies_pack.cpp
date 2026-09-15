@@ -13,11 +13,6 @@ using Profile = oka::Scene::IesProfile;
 namespace
 {
 
-/// Read the packed buffer back exactly the way lights.h::sampleIesCandela does:
-/// header, then profile headers at a fixed stride, then float indices relative
-/// to the blob. The point of duplicating the arithmetic here rather than calling
-/// a shared helper is that the device side cannot be linked into these tests, so
-/// what is under test is that the two independent readers agree on the layout.
 struct Reader
 {
     const uint8_t* base;
@@ -123,11 +118,6 @@ TEST_CASE("the packed layout is what the device-side reader indexes")
 
 TEST_CASE("candela is divided by the D65 luminous efficacy Cycles assumes")
 {
-    // An IES file is photometric (candela) and a light's colour here is radiant
-    // intensity (W/sr). 177.83 lm/W is the D65 figure Cycles uses for the same
-    // conversion. This test exists to stop it being quietly replaced by a
-    // constant fitted to the 27_ies row: a fit that lands that row would leave
-    // every IES scene outside the ladder wrong by whatever it absorbed.
     CHECK(kLuminousEfficacyD65 == doctest::Approx(177.83f));
 
     const std::vector<uint8_t> bytes = packProfiles(std::vector<Profile>{ ladderProfile() });
@@ -181,10 +171,6 @@ TEST_CASE("a second profile's blob indices follow the first")
 
 TEST_CASE("a degenerate profile is packed empty rather than dropped")
 {
-    // The light records carry profile indices assigned at load time, so
-    // dropping a malformed profile would silently repoint every later light at
-    // its neighbour's distribution. An empty entry is read as "no data" by
-    // sampleIesCandela's nVertical < 2 guard instead.
     Profile broken;
     broken.verticalAngles = { 0.0f }; // one angle cannot be interpolated
     broken.horizontalAngles = { 0.0f };

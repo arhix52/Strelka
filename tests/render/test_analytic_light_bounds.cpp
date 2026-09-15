@@ -1,20 +1,3 @@
-// The box has to contain the surface the intersection program will find.
-//
-// On the OptiX backend an analytic emitter is a custom primitive: hardware
-// traversal culls it by its AABB and only then runs the intersection program.
-// That inverts the old failure mode. A light-table walk that skipped a light
-// cost a wrong pixel; a box that is one epsilon too small costs a light that is
-// simply not there for the rays that graze it -- no error, no warning, and the
-// only symptom is a slightly darker frame.
-//
-// This is the check that could not be written against the pre-test it replaced.
-// That one -- analyticLightBoundsMayIntersect(), a ball around each light in
-// front of both scans -- had a test of exactly this shape over random spheres,
-// which passed, and it still disagreed with the exact intersector on 333 of
-// kids_room's 921 600 pixels. So this one does not test the box against its own
-// arithmetic: it takes the rays the exact intersector says are hits and demands
-// the box contain the point it returned, for every light type the backend
-// builds a box for.
 
 #include <host/analytic_light_bounds.h>
 

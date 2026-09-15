@@ -85,24 +85,8 @@ TEST_CASE("procedural sphere preserves near and far shadow self-occlusion")
     CHECK(intersectAnalyticEllipsoid(origin, direction, 0.0f, std::nextafter(4.0f, 0.0f), center, axisX, axisY, axisZ).hit);
 }
 
-
 TEST_CASE("the quick affine factorisation agrees with the exact one it skips")
 {
-    // scaledAffineBasis() equilibrates the axes by powers of two before it
-    // forms the determinant and the adjugate. That exists for one reason: the
-    // determinant is cubic in the axis scale, so a light with axes of 1e13
-    // overflows a float without it, and half a dozen tests in
-    // test_light_pdf.cpp and test_lights.cpp are exactly those lights. It costs
-    // twelve frexp and twelve ldexp per call, and every call that matters for a
-    // frame is on a light authored in the range a scene in metres uses, where
-    // nothing can overflow and the factorisation is pure overhead -- 7% of
-    // kids_room, measured by removing it.
-    //
-    // So there are two paths now, and the risk is that they disagree: the quick
-    // one is not a different formula, it is the same formula on unscaled axes,
-    // and what says so is that the solve inverts the axes it was given either
-    // way. This drives axis scales across the window's boundary at 1e10 and
-    // 1e-10, so a change to either bound has to keep both sides inverting.
     struct Rng
     {
         uint32_t s = 0x9e3779b9u;

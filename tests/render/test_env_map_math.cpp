@@ -11,28 +11,6 @@
 #include <random>
 #include <vector>
 
-// ============================================================================
-// test_env_map_math.cpp -- the equirectangular parametrisation and the density
-// built on it.
-//
-// These four functions used to exist twice, in common/env_light.h for CUDA and
-// metal/env_light_metal.h for Metal, with a comment on each asking that the two
-// stay identical and nothing able to check it: the suite could compile neither
-// header. They are one file now, and this is that check.
-//
-// Two properties matter and they are different in kind:
-//
-//   1. The parametrisation has to be invertible, because the sampler picks a
-//      texel, turns (u, v) into a direction, and the MIS weight turns that
-//      direction back into a texel. If the round trip lands on a neighbour, the
-//      two halves of the estimate are dividing by densities read from different
-//      pixels.
-//
-//   2. The density has to integrate to one. The alias table stores the complete
-//      represented solid-angle density of each bin, including the bilinear
-//      reconstruction footprint used to preserve radiance support.
-// ============================================================================
-
 namespace
 {
 
@@ -254,10 +232,6 @@ TEST_CASE("luminance matches the weight the host builds the table from")
 // ---------------------------------------------------------------------------
 TEST_CASE("a jittered texel sample lands back in the texel it was drawn from")
 {
-    // sampleEnvMap() picks texel (x, y), jitters inside it and returns a
-    // direction; envMapPdf() takes that direction and looks the texel up again.
-    // They have to agree, or the light half divides by one texel's density while
-    // the BSDF half weighs against another's.
     std::mt19937 rng(0x5A17u);
     std::uniform_real_distribution<float> U(0.0f, 1.0f);
 
@@ -289,10 +263,6 @@ TEST_CASE("a jittered texel sample lands back in the texel it was drawn from")
                     ++mismatch;
                 }
             }
-            // What survives is float precision at the texel boundary, where
-            // acos/atan2 round across the edge. Measured at 0.001% for 256x128
-            // and 0.02% at 4096x2048; anything above a tenth of a percent is a
-            // parametrisation that no longer inverts.
             CHECK(double(mismatch) / double(trials) < 1e-3);
         }
     }

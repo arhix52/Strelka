@@ -24,19 +24,6 @@
 
 // KHR_materials_volume uses the model selected by `render/material/volumeModel`.
 
-// ---------------------------------------------------------------------------
-// Fibre semantics.
-//
-// A strand is not a surface with a lit side and a dark side. Chiang's TT and TRT
-// terms describe light that entered one side of the fibre and left the other,
-// and on a bright groom TT alone holds about four fifths of the albedo:
-// integrated over the sphere the lobe gives R 0.047, TT 0.799, TRT 0.033. Testing
-// the shading hemisphere the way a surface does discards every one of those
-// connections and leaves the dominant lobe to be found by chance.
-//
-// All three are identities for every non-hair material, which is why the other
-// twenty-seven ladder rows re-render unchanged.
-// ---------------------------------------------------------------------------
 static __forceinline__ __device__ bool scattersThroughFibre(const SurfaceInteraction& si)
 {
     return si.material_type == MATERIAL_TYPE_HAIR;
@@ -72,21 +59,6 @@ static __forceinline__ __device__ float3 fibreExitOrigin(
 // optix_device_utils.h, included above. This file carried an identical copy of it
 // until the two streams met; one definition is enough.
 
-// ---------------------------------------------------------------------------
-// OpenPBR maps
-// ---------------------------------------------------------------------------
-//
-// Behaviour port of applyOpenPBRTextures() in src/shaders/metal/shading_common.h.
-// Every decision it records holds here for the same reason, so they are not
-// restated: maps *replace* rather than modulate (a MaterialX input is either a
-// value or a nodegraph, never both), emission is deliberately left to the
-// Material struct, and the normal map rebuilds Z from X and Y.
-//
-// What differs is only the plumbing. Metal binds nineteen texture handles in a
-// per-material struct; OptiX indexes one flat array of cudaTextureObject_t, the
-// same shape params.materialTextures already uses, and the wrap mode and
-// transfer function live in the texture object rather than in a sampler here.
-
 static __forceinline__ __device__ float2 openpbr_transform_uv(const OpenPBRParams& p, float2 uv)
 {
     // KHR_texture_transform's composition order: scale, then rotate, then
@@ -99,12 +71,6 @@ static __forceinline__ __device__ float2 openpbr_transform_uv(const OpenPBRParam
            make_float2(p.uv_offset_x, p.uv_offset_y);
 }
 
-/// Folds an OpenPBR material's maps into a thread-local copy of its parameters.
-///
-/// `textures` is this material's slice of the global handle array, i.e.
-/// `&params.openpbrTextures[materialId * MAX_OPENPBR_TEXTURES]`. A slot with no
-/// map holds 0, which `texture_mask` already says; the handle is tested anyway
-/// because a texture that failed to load leaves the bit set and the handle null.
 static __forceinline__ __device__ void openpbr_apply_textures(OpenPBRParams& p,
                                                               const cudaTextureObject_t* textures,
                                                               SurfaceInteraction& si,
@@ -119,14 +85,6 @@ static __forceinline__ __device__ void openpbr_apply_textures(OpenPBRParams& p,
     auto sample = [&](unsigned int slot) -> float4
     { return tex2D<float4>(textures[slot], tuv.x, tuv.y); };
 
-    // The sixteen value slots as two tables rather than sixteen near-identical
-    // `if` blocks. Both arrays are constexpr and both loop bounds are literals,
-    // so this unrolls into exactly the same code the blocks compiled to -- the
-    // saving is in what a reader has to check, not in what the GPU runs.
-    //
-    // Split by what the slot writes, because that is the only thing that ever
-    // differed between the blocks: a scalar takes the red channel, a colour takes
-    // three. Adding a slot is now one line in one table.
     struct ScalarSlot
     {
         unsigned int slot;
@@ -149,10 +107,6 @@ static __forceinline__ __device__ void openpbr_apply_textures(OpenPBRParams& p,
         { OPENPBR_TEX_GEOMETRY_OPACITY, &OpenPBRParams::geometry_opacity },
         { OPENPBR_TEX_SUBSURFACE_WEIGHT, &OpenPBRParams::subsurface_weight },
     };
-    // subsurface_radius_scale is a per-channel tint on the mean free path, which
-    // is why it is here and not with the scalars: the scalar length stays as
-    // authored, and a map says how the three channels differ rather than how far
-    // light travels.
     constexpr ColorSlot kColorSlots[] = {
         { OPENPBR_TEX_BASE_COLOR, &OpenPBRParams::base_color },
         { OPENPBR_TEX_SPECULAR_COLOR, &OpenPBRParams::specular_color },
@@ -204,11 +158,6 @@ static __forceinline__ __device__ void openpbr_apply_textures(OpenPBRParams& p,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fill SurfaceInteraction from hit geometry and sample the material's textures.
-//
-// OptiX currently has no mipmapped material arrays, so lodBase is unused.
-// ---------------------------------------------------------------------------
 static __forceinline__ __device__ void initSurfaceInteraction(
     SurfaceInteraction& si,
     const MaterialParams& material,
@@ -238,11 +187,6 @@ static __forceinline__ __device__ void initSurfaceInteraction(
     // from the same Mapping node, and the loader reads it that way.
     const float2 tuv = apply_texture_transform(uv, material);
 
-    // bsdf_init's CUDA overload samples base colour, metallic-roughness and
-    // emission itself, at si.uv. Handing it the transformed coordinate is what
-    // makes KHR_texture_transform apply to all three at once; the untransformed
-    // one goes back afterwards because that is what the interaction is supposed
-    // to carry.
     si.uv = tuv;
     bsdf_init(si, material, textures);
     si.uv = uv;
@@ -251,10 +195,6 @@ static __forceinline__ __device__ void initSurfaceInteraction(
     // all three multiplicative. bsdf_init knows the first two.
     si.albedo *= vertexColor;
 
-    // Normal map. Z comes from X and Y rather than from the texture: a normal map
-    // is two-channel once compression is on, and for a unit-length tangent-space
-    // normal this is the value that was dropped -- reading it the same way whether
-    // or not the texture was compressed keeps the two paths from disagreeing.
     if (material.normal_tex >= 0)
     {
         const float4 nTex = tex2D<float4>(textures[material.normal_tex], tuv.x, tuv.y);
@@ -270,14 +210,6 @@ static __forceinline__ __device__ void initSurfaceInteraction(
         // pre-bump normal instead would reject directions no map ever moved.
         si.bump_normal = si.shading_normal;
 
-        // A grazing normal map can turn the normal past the viewer, where an
-        // opaque material has no valid lobe. Correct it where the shading normal
-        // is produced so sampling and evaluation use the same normal; disable
-        // the diffuse lobe because the correction is for reflective lobes.
-        //
-        // Against the geometric normal turned to agree with the view ray: the
-        // correction is about the surface the reflection has to clear, and on a
-        // back-face hit that surface is the side being looked at.
         if (dot(si.shading_normal, si.wo) <= 0.0f)
         {
             const float3 facingGeom =

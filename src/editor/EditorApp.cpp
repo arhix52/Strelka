@@ -56,21 +56,6 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_render->setLoadProgress(&m_loadProgress);
     m_sceneLoader->setProgress(&m_loadProgress);
 
-    // Start parsing before device/window creation so independent CPU I/O overlaps
-    // their setup. The loaded Scene is private to the worker until the main loop
-    // consumes the future, so neither renderer nor display can observe it early.
-    //
-    // The scene used to be parsed synchronously here, before the window existed,
-    // so the five seconds a large scene takes were five seconds of an application
-    // that had not drawn anything and could not be closed. It remains async: the
-    // window comes up while parsing is in flight and can cancel it normally.
-    //
-    // "Only" is relative: a perf profile of an empty start puts createContext()
-    // at 36% of it, some 240 ms of cuInit and cuDevicePrimaryCtxRetain against
-    // roughly 280 ms for the display below, out of ~700 ms in total. Almost none
-    // of an empty start is our own code. The two are serialised because Vulkan
-    // picks the physical device matching the renderer's CUDA device; overlapping
-    // them means splitting GlfwDisplay::init() around that one dependency.
     loadSettings();
     if (!sceneFile.empty())
     {
@@ -87,10 +72,6 @@ EditorApp::EditorApp(const std::string& sceneFile, const std::string& resourceSe
     m_display->init(1024, 768, m_settingsManager.get());
     m_display->setResizeHandler(this);
 
-    // A camera has to exist before a scene does: the main loop reads
-    // getCamera(m_selectedCamera) on every iteration, including the ones that
-    // draw nothing but the progress bar. It is replaced with one framed to the
-    // scene's bounds when the load lands.
     oka::Camera camera;
     camera.name = "Main";
     camera.fov = 45.0f;
@@ -240,12 +221,6 @@ void EditorApp::ensureValidCameraSelection()
     const uint32_t count = m_scene ? m_scene->getCameraCount() : 0;
     m_selectedCamera = editor_document::clampCameraIndex(m_selectedCamera, count);
 
-    // The renderer takes the camera it draws from the settings, while picking, the
-    // selection box and the gizmo all read m_selectedCamera. Only the camera combo
-    // used to write the setting, so loading a scene that carries its own cameras
-    // left the frame coming from the scene's first camera while every click was
-    // traced through the fitted "Main" one: in a scene whose first camera is
-    // orthographic nothing the user clicked was where the UI thought it was.
     if (m_settingsManager && count > 0)
     {
         const uint32_t selected = static_cast<uint32_t>(m_selectedCamera);
@@ -271,12 +246,6 @@ void EditorApp::handleDeviceError()
     m_frameBudgetConfirmOpen = false;
     STRELKA_INFO("ACTION device_error");
     STRELKA_ERROR("GPU device error — render submissions stopped");
-    // Print the viewport that did it, unasked. A GPU timeout is reported by the
-    // backend as a chunk index and a bounce range, which says what the renderer
-    // was doing but not what it was looking at -- and the ones seen so far only
-    // reproduce from one angle, which no chunk index recovers. The dump is a
-    // .toml StrelkaCLI reads, so a pasted crash log carries its own repro
-    // instead of a description of where the camera roughly was.
     dumpCameraSettings();
     showAlert(
         "GPU device error.\nRender submissions have been stopped.\n"
@@ -422,10 +391,6 @@ void EditorApp::requestPreviewResolution(uint32_t width, uint32_t height)
         return;
     }
 
-    // The fraction of the output the tracer is really launching at, which is not
-    // the upscale factor on a backend whose upscaler has one fixed ratio: OptiX
-    // reads the enable bit and takes exactly half. Dividing a measured frame time
-    // by the wrong pixel count mispredicts the next one by that ratio squared.
     const bool enableUpscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");
     const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
     const int denoiseMode =
@@ -479,18 +444,6 @@ glm::vec3 EditorApp::computeSceneFitPosition(float fovDegrees) const
     return center + glm::vec3(0.0f, 0.0f, distance);
 }
 
-
-// Measure the scene's own brightness and expose for it, once.
-//
-// The radiance buffer is linear and pre-tonemap, which is the only place the
-// question can be asked: after the tone curve every scene looks like it has
-// roughly the range the curve has. Middle grey is the target because that is
-// what a photographer's meter aims at, and it is what makes an unknown scene
-// arrive looking neither black nor blown out.
-//
-// Set through cm2_factor with the film speed at zero, which is the tonemapper's
-// own arbitrary-units mode -- the alternative, solving back to an f-stop, states
-// a photographic setting the scene never had.
 void EditorApp::applyAutoExposure(oka::Buffer* buf)
 {
     if (!buf)
@@ -525,31 +478,12 @@ void EditorApp::applyAutoExposure(oka::Buffer* buf)
     m_settingsManager->setAs<float>("render/post/tonemapper/filmIso", 0.0f);
     m_settingsManager->setAs<float>("render/post/tonemapper/cm2_factor", (float)factor);
     m_autoExposurePending = false;
-    // {:.4g}, not {:.1f}: the factor is middle grey over the scene mean, so on
-    // any scene brighter than 0.18 it is well below 1 and a single decimal place
-    // printed every one of them as "x0.0". Stops alongside it, because that is
-    // the unit the exposure controls in the UI are in.
-    // The metered coverage is in the line because it is what distinguishes a
-    // dim scene from a mostly empty frame, and those want opposite answers.
     STRELKA_INFO(
         "Auto exposure: scene mean luminance {:.5f} over the {:.1f}% of the frame that caught light, "
         "exposure x{:.4g} ({:+.2f} EV); no exposure in the light sidecar",
         mean, total > 0 ? 100.0 * double(n) / double(total) : 0.0, factor, std::log2(factor));
 }
 
-// Exposure comes from the scene when the scene says, and is measured from the
-// first frame when it does not.
-//
-// Has to run after loadSettings(), which writes the photographic defaults
-// unconditionally and would otherwise put them back over whatever the scene
-// asked for -- that ordering is why the pine forest opened black.
-//
-// A glTF camera carries a projection and nothing else, so a file cannot state
-// how bright it is meant to look. Those defaults are a real daylight setting --
-// ISO 100, f/4, 1/100 s -- and against a scene authored in normalised units,
-// which is most of them, they land about 1600x under: the pine forest arrives
-// with two suns at irradiance 5 and 1 and an environment at intensity 1, and
-// renders as black. That reads as a broken renderer.
 void EditorApp::applySceneExposure()
 {
     if (const auto& exposure = m_scene->getExposure(); exposure.has_value())
@@ -588,17 +522,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 1); // 0 - None, 1 - Reinhard, 2 - ACES, 3 - Filmic
     m_settingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
     m_settingsManager->setAs<float>("render/cameraSpeed", 1.0f);
-    // Gamepad. Editor-only, so deliberately not mirrored into
-    // HeadlessApp::populateSettings(): a headless render has no one holding a
-    // controller, and a key that exists in both places is a key that has to be
-    // kept in step in both places.
-    //
-    // The pad itself needs no enabling -- it is detected and used when present.
-    // What is here is the tuning a hand can disagree with: `enabled` exists to
-    // turn a pad off without unplugging it (a controller left on a desk with a
-    // sticky stick would otherwise keep restarting accumulation), and the rest
-    // is the feel. Defaults come from gamepad::Config, which is where the
-    // measurements behind them are written down.
     m_settingsManager->setAs<bool>("editor/gamepad/enabled", true);
     m_settingsManager->setAs<bool>("editor/gamepad/invertLookY", false);
     m_settingsManager->setAs<float>("editor/gamepad/lookSpeed", gamepad::Config{}.lookSpeed);
@@ -607,32 +530,7 @@ void EditorApp::loadSettings()
     // Preview resolution itself bounds interactive work. MetalFX remains an
     // explicit quality/performance choice inside that fixed output.
     m_settingsManager->setAs<bool>("render/pt/enableUpscale", false);
-    // Sobol with a blue-noise screen-space error distribution, handing over to
-    // plain per-pixel Owen scrambling once the frame has enough samples that the
-    // spectrum of the error matters less than how fast it shrinks.
-    //
-    // Not Halton, which was the default and is the reason 1024 samples did not
-    // look like four times 256: its dimensions are told apart only by an offset
-    // into a table of 32 bases, so any two that are 32 apart -- and a depth-8
-    // path uses 117 -- are the same sequence read from two places. Measured on
-    // vespa, its error at 1024 spp was no lower than at 512.
     m_settingsManager->setAs<uint32_t>("render/pt/samplerType", 4);
-    // Measured crossover on vespa: blue noise wins on post-filter error up to
-    // 4 samples (-12% at 1 spp, -7% at 2, -4% at 4) and loses past it (+13% at
-    // 8, +9% at 16, +40% at 32), because a toroidal shift is a weaker
-    // randomisation than a scramble once there are enough samples for that to
-    // matter. Past the crossover the mask does not merely converge slower, it
-    // makes the error *less* blue than the plain scramble does -- lp/raw rises
-    // from 0.28 to 0.36 -- so there is nothing left to trade for.
-    //
-    // This was 16, from the same measurement taken before the Owen scramble
-    // used Vegdahl's LK hash. The old hash left the blue-noise sampler's
-    // dimensions correlated (they share a screen-wide seed and differ only in
-    // its low bits), which held that sampler back at the counts where it was
-    // still nominally winning. Fixing the hash moved the crossover to 4.
-    //
-    // Four is also where it matters: accumulation restarts whenever the camera
-    // moves, so navigating the scene means looking at 1-4 spp frames.
     m_settingsManager->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", 4);
     m_settingsManager->setAs<uint32_t>("render/selectedCamera", 0);
     m_settingsManager->setAs<bool>("render/enableMotionBlur", true);
@@ -656,10 +554,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/risCandidates", 1u);
     m_settingsManager->setAs<uint32_t>("render/pt/writeAov", 0);
     m_settingsManager->setAs<bool>("render/pt/denoise", false);
-    // The MetalFX denoiser compiles a large graph synchronously. The interactive
-    // renderer prepares it during startup so selecting the default-off mode does
-    // not put that work on a display frame; headless runs opt in only when their
-    // configuration actually enables denoising.
     m_settingsManager->setAs<bool>("render/pt/prewarmDenoiser", true);
     // Luminance ceiling for the denoiser's colour input, in exposed units: a
     // single unbounded sample gets smeared over many frames by a temporal filter.
@@ -673,12 +567,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/sortRays", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/guidePrimaryHit", 0);
-    // 0 = the single-image model, 1 = the temporally stable one. Off by default:
-    // a temporal model reusing a history it has no motion vectors for produces a
-    // smear. Overridable from the environment because it is the switch the
-    // denoise audit has to flip to measure reprojection at all -- with no way to
-    // turn it on headlessly, the motion vectors it grades feed nothing, which is
-    // how they stayed identically zero through several audit runs.
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", envUint("STRELKA_UPSCALE_MODE", 0) != 0 ? 1u : 0u);
     if (envFlag("STRELKA_UPSCALE"))
     {
@@ -709,10 +597,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/material/model", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/maxDimension", 0);
     m_settingsManager->setAs<uint32_t>("render/texture/downscale", 1);
-    // The diffuse/specular split of the first event, accumulated into two extra
-    // images. Off by default: nothing in either app reads them back, and writing
-    // them costs four scattered records per pixel per launch. See
-    // docs/open-perf.md.
     m_settingsManager->setAs<bool>("render/pt/splitAov", false);
     // Spatially hashed radiance cache. Off by default: it trades a little
     // bias for a large cut in path length, which is a choice a scene makes.
@@ -732,10 +616,6 @@ void EditorApp::loadSettings()
     // camera movement instead of being cleared by it; see sharc_resolve.h.
     m_settingsManager->setAs<uint32_t>("render/pt/sharcAccumFrames", 32);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcStaleFrames", 64);
-    // Responsive lighting: the short window a light marked `responsive` in the
-    // scene is cached on. On whenever such a light exists -- the setting can
-    // only turn it off, which is what makes it an A/B rather than a switch
-    // somebody has to find.
     m_settingsManager->setAs<bool>("render/pt/sharcResponsiveLighting", true);
     m_settingsManager->setAs<uint32_t>("render/pt/sharcResponsiveFrames", 4);
     // Metal's own responsive switch, off by default: its compact key has no
@@ -756,10 +636,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<bool>("render/pt/sharcCacheResampling", true);
     m_settingsManager->setAs<bool>("render/pt/sharcBlendAdjacentLevels", true);
     m_settingsManager->setAs<bool>("render/pt/sharcFadeAcceleration", false);
-    // How often a scene that is still loading is republished. Every snapshot
-    // restarts convergence, so this trades latency against the noise the load
-    // finishes with; twice a second reads as continuous without doing that
-    // often enough to matter.
     m_settingsManager->setAs<float>("render/stream/publishIntervalMs", 500.0f);
     // The editor picks against the host arrays, so it keeps them.
     m_settingsManager->setAs<bool>("scene/releaseHostGeometry", false);
@@ -769,12 +645,6 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<float>("render/post/paperWhiteNits", 203.0f);
     m_settingsManager->setAs<float>("render/post/peakNits", 1000.0f);
     m_settingsManager->setAs<bool>("display/vrr/enabled", true);
-    // Metal presentation. Seeded on every platform because SettingsManager does
-    // not insert on read -- a missing key logs an error and asserts -- and the
-    // panel picks its branch from the display, not from an #ifdef here.
-    // 0 headroom means "whatever the display grants"; 0 fps means "the display's
-    // own rate". Both are the neutral choice, so the defaults change nothing
-    // until the user touches them.
     m_settingsManager->setAs<float>("display/edr/headroomLimit", 0.0f);
     m_settingsManager->setAs<bool>("display/vsync/enabled", true);
     m_settingsManager->setAs<bool>("display/present/tripleBuffering", true);
@@ -824,18 +694,6 @@ void EditorApp::loadAnimSettings()
 
 void EditorApp::initializeRendererForCurrentScene(bool reuseExisting)
 {
-    // Motion blur is a capability, not a per-frame switch: both backends read
-    // this once in init() and it decides the shape of the pipeline and of the
-    // acceleration structures -- a motion GAS rebuilt rather than refit, a
-    // three-level traversable graph, a static TLAS instead of a refittable one.
-    //
-    // The editor used to ask for it on every scene. On iso_bathroom, which has
-    // nothing that moves, that was 5.91 ms per frame against 4.11 ms without,
-    // plus a second 30 s pipeline build the CLI had already paid for the
-    // motion-free variant. A scene with no animations and no skinning has no
-    // motion to blur -- only instance and skeletal motion is interpolated over
-    // the shutter, camera movement is not -- so asking for the capability buys
-    // nothing there.
     bool sceneHasMotion = !m_scene->getAnimations().empty();
     for (const oka::Mesh& mesh : m_scene->getMeshes())
     {
@@ -845,10 +703,6 @@ void EditorApp::initializeRendererForCurrentScene(bool reuseExisting)
 
     if (reuseExisting && m_render)
     {
-        // No render was submitted while the startup file was parsing, so the
-        // scene-preparation state is still at Buffers and owns no old-scene GPU
-        // resources. Metal reads the motion setting per frame as well; unlike
-        // OptiX it does not need a new context or pipeline for this switch.
         m_render->setSettingsManager(m_settingsManager.get());
         m_render->setSharedContext(m_sharedCtx.get());
         m_render->setScene(m_scene.get());
@@ -931,11 +785,6 @@ void EditorApp::checkLoadingComplete()
     m_initialMetalRendererUnused = false;
 #endif
 
-    // A renderer that has submitted work must be torn down *before* replacing
-    // the scene and shared context it points at. ~MetalRender drains the GPU and
-    // waits for in-flight completion handlers, which may touch that state. The
-    // startup Metal renderer is the one exception: it has not submitted a frame
-    // and can safely adopt the first loaded scene.
     m_display->resetFrame();
     // Clear the display's raw Render* before destroying the object it points at.
     if (!reuseInitialRenderer)
@@ -977,10 +826,6 @@ void EditorApp::checkLoadingComplete()
     m_render->resetTemporalHistory(); // new scene, new everything
     m_display->setInputHandler(m_cameraController.get());
 
-    // Every scene brings its own exposure, so this belongs here rather than in
-    // startup: before, a scene opened through File -> Open kept the previous
-    // one's exposure and there was no way to tell from the picture whether that
-    // was the scene's intent.
     applySceneExposure();
 
     rememberRecentScene(m_sceneFile);
@@ -1000,13 +845,6 @@ void EditorApp::run()
 
         const auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
 
-        // Before update(), so the stick's contribution is in the queue that
-        // update() drains this frame rather than next. The pad shares the mouse's
-        // speed setting deliberately: two numbers for one notion of "how fast
-        // does the camera fly" is how they end up disagreeing.
-        // WantTextInput is last frame's, which is what it has to be here: this
-        // runs before NewFrame(). One frame of lag on "a text field has focus"
-        // is not something a hand can produce.
         if (m_settingsManager->getAs<bool>("editor/gamepad/enabled") &&
             gamepad::cameraOwnsPad(m_display->getGamepadState(), ImGui::GetIO().WantTextInput))
         {
@@ -1054,10 +892,6 @@ void EditorApp::run()
             auto& ctrlCam = m_cameraController->getCamera();
             selectedCam.position = ctrlCam.position;
             selectedCam.mOrientation = ctrlCam.mOrientation;
-            // An orthographic camera zooms by its film extents rather than its
-            // pose, and updateAspectRatio below rebuilds the projection from the
-            // extents of *this* camera -- so a sync that carried only the pose
-            // would hand the renderer the zoom the user just left behind.
             selectedCam.xmag = ctrlCam.xmag;
             selectedCam.ymag = ctrlCam.ymag;
             selectedCam.matrices = ctrlCam.matrices;
@@ -1065,10 +899,6 @@ void EditorApp::run()
             selectedCam.isDirty = ctrlCam.isDirty;
         }
 
-        // The renderer refreshes the projection of the camera it draws with, but
-        // the UI reads the same camera earlier in the frame: picking and the gizmo
-        // run before the first render has happened, and with an unset projection
-        // both fail without a trace (an inf pick ray, a gizmo that never draws).
         const uint32_t renderWidth = m_settingsManager->getAs<uint32_t>("render/width");
         const uint32_t renderHeight = m_settingsManager->getAs<uint32_t>("render/height");
         if (renderHeight != 0)
@@ -1111,29 +941,6 @@ void EditorApp::run()
 
         const Render::ReadyFrame readyFrame = m_render->getReadyFrame();
         oka::Buffer* readyBuf = readyFrame.buffer;
-        // Not the first frame that happens to be ready. Exposure is measured
-        // once and then multiplies every pixel for the rest of the session, so
-        // measuring it off an arbitrary frame makes the whole picture depend on
-        // load timing: the same scene opened twice came out at x1.8, x1.9 and
-        // x2.1 here, which is plainly visible when two saved images are
-        // compared. Wait until the scene has finished building -- a frame drawn
-        // part way through it is missing geometry that has not been handed to
-        // the tracer yet -- and until enough samples have landed that the mean
-        // is a property of the scene rather than of the noise.
-        //
-        // Counted here rather than read from the accumulator. mSubframeIndex is
-        // the accumulator's own counter: it returns to zero on every camera move
-        // and never leaves zero at all when accumulation is switched off, so
-        // gating on it means a scene that is being flown through, or that has
-        // accumulation off, never gets an exposure and renders the whole session
-        // at the default one.
-        // Counted on the renderer's frame number, not on passes through this
-        // loop. The UI runs at vsync and a traced frame takes many times longer,
-        // so counting loop iterations counts the same finished frame over and
-        // over -- and the frame still standing right after the build is one of
-        // the partial ones published during it. Measured off an environment-only
-        // frame that way, the pine forest read 0.596 instead of 0.089 and the
-        // scene came out six times too dark.
         static constexpr uint32_t kExposureSettleFrames = 8;
         const bool sceneReady = !m_render->isBuildingScene() && !m_isLoading;
         if (readyBuf && sceneReady && m_sharedCtx->mFrameNumber != m_lastExposureFrameSeen)
@@ -1175,10 +982,6 @@ void EditorApp::run()
             drawUI();
         }
 
-        // --need_screenshot: the sample cap has been reached, so the estimator has
-        // stopped and this frame is the finished one. Queued rather than written
-        // here so it takes the same path as the menu's screenshot, including the
-        // display readback.
         if (m_batchScreenshotArmed && m_pendingScreenshotPath.empty() && !m_isLoading && !m_render->isRenderBusy() &&
             m_batchSppTotal > 0 && m_sharedCtx->mSubframeIndex >= m_batchSppTotal)
         {
@@ -1210,17 +1013,6 @@ void EditorApp::run()
         m_display->drawUI();
         m_display->onEndFrame();
 
-        // Enqueue the next render pass only after this frame's presentation work
-        // has been committed. The renderer runs on its own command queue, but the
-        // GPU still executes submissions roughly in arrival order — submitting a
-        // multi-second path-trace batch first would push the compositor's work
-        // behind it and stall nextDrawable() on the following frame.
-        //
-        // Skipped while a scene is being parsed: the renderer still points at the
-        // outgoing scene, or at the empty one the window came up with. It is
-        // deliberately *not* skipped while the GPU build runs -- that build
-        // advances one stage per call to this, and gating it here would stop it
-        // before it started.
         if (!m_isLoading && !m_renderSubmissionsBlocked)
         {
             m_render->triggerRenderIfIdle();
@@ -1469,11 +1261,6 @@ void EditorApp::dumpCameraSettings()
     s.shutterSpeed = m_settingsManager->getAs<float>("render/post/tonemapper/shutterSpeed");
 
     const std::string dump = oka::formatCameraDump(s);
-    // Straight to stdout as well as to the log: the point is to be copied out of
-    // a terminal, and the log's prefixes land on every line of the block.
-    // Return values discarded deliberately, and said so: there is nothing to do
-    // if writing a debug dump to a terminal fails, and cert-err33-c is an error
-    // in this tree.
     (void)std::fputs(dump.c_str(), stdout);
     (void)std::fflush(stdout);
     ImGui::SetClipboardText(dump.c_str());
@@ -1806,11 +1593,6 @@ void EditorApp::drawUI()
 
     const ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
-    // A layout saved by an older build is missing a panel added since (floats
-    // it) or carries a stale Pos/Size with DockId 0 (same effect). Checked once
-    // against every window buildDefaultDockLayout places -- not every frame,
-    // since FindWindowSettingsByID reads the ini snapshot, which only catches
-    // up with a fresh rebuild on ImGui's autosave timer, not immediately.
     if (!m_startupLayoutChecked)
     {
         m_startupLayoutChecked = true;

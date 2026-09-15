@@ -1,31 +1,3 @@
-// ============================================================================
-// test_openpbr_from_gltf.cpp
-//
-// openpbr_from_gltf.h re-spells a glTF material as an OpenPBR one. Most of it is
-// field-to-field and would be dull to test; what is tested here is the handful
-// of places where the two models disagree about how to *store* the same physical
-// quantity, because those are the ones that fail silently.
-//
-// Three of them, and each has a characteristic wrong-looking result rather than
-// an error:
-//
-//   * specular_weight. gltfloader.cpp halves KHR_materials_specular's
-//     specularFactor on the way in -- glTF's default 1.0 is stored as 0.5 -- and
-//     OpenPBR's specular_weight means the unhalved thing. Forget to undo it and
-//     every converted material quietly loses half its specular reflection, which
-//     reads as "OpenPBR is duller" rather than as a conversion bug.
-//   * emission. A colour times a multiplier becomes a level times a tint. The
-//     product is the radiance, and it is the product that has to survive.
-//   * subsurface radius. A per-channel vector becomes a scalar length times a
-//     normalised scale, so that the longest channel keeps its world units.
-//
-// The last case here is the one that matters for validation strategy: a material
-// with no coat, no fuzz, no transmission and no subsurface must convert to an
-// OpenPBR block that is *only* base and specular. That is the configuration the
-// degenerate-case cross-check against standard_pbr renders, and if conversion
-// leaves a stray lobe switched on, the cross-check measures that instead of the
-// thing it was written for.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -108,12 +80,6 @@ TEST_CASE("emission survives the change of parameterisation as a product")
 
 TEST_CASE("subsurface colour is the authored albedo, not the inverted one")
 {
-    // OpenPBR's interior volume runs its own van de Hulst inversion on this
-    // input, so it has to receive the colour the DCC authored. Strelka's own
-    // walk wants the single-scattering albedo instead and keeps it on
-    // diffuse_transmission_color, which makes the two fields easy to confuse --
-    // and confusing them inverts twice, which whitens a saturated medium
-    // rather than shifting it slightly.
     MaterialParams p = plainGltfMaterial();
     p.subsurface = 1.0f;
     p.subsurface_radius = make_float3(6.75f, 1.66f, 0.33f);

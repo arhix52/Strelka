@@ -1,19 +1,3 @@
-// ============================================================================
-// test_materialx_inputs.cpp
-//
-// How the MaterialX front-end resolves a shader input: to a folded constant, to
-// a texture, and with whatever the document says about that texture's encoding.
-//
-// The loader resolves each shader input to a constant or to an image. Real
-// libraries rarely state a constant outright: they scale a tint, mix two
-// colours, remap a roughness. Before folding, every one of those landed in
-// `unsupported` and the parameter silently kept its specification default --
-// a material that ignored the document while reporting success, which is the
-// failure mode these cases exist to refuse.
-//
-// Written against documents small enough to read, because the arithmetic is the
-// thing under test and a production asset would hide it.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -148,10 +132,6 @@ TEST_CASE("a scalar broadcasts across a colour operand")
     std::filesystem::remove(path);
 }
 
-// The line the fold must not cross. A texture has no value until the pixel is
-// shaded, so an expression containing one cannot become a number in
-// OpenPBRParams -- and half-folding it, by taking the constant operand and
-// dropping the image, would be worse than saying so.
 TEST_CASE("an expression containing an image does not fold, and says which node")
 {
     const auto path = writeDoc("withimage",
@@ -220,15 +200,6 @@ TEST_CASE("only the procedural examples are left unexpressed")
                                           "standard_surface_onyx_hextiled" };
     CHECK(documentsWithGaps == expected);
 }
-
-// ----------------------------------------------------------------------------
-// Colour spaces.
-//
-// The renderer guesses a slot's encoding from what the slot is for -- base
-// colour sRGB, roughness linear -- which is glTF's convention and what the
-// chess set happens to agree with. Only the document can say when an asset
-// departs from it, and until this was read, it could not.
-// ----------------------------------------------------------------------------
 
 TEST_CASE("a stated colorspace overrides the slot's guess in both directions")
 {
@@ -319,17 +290,6 @@ TEST_CASE("the chess set's own tagging agrees with the slot defaults")
                                      OPENPBR_TEX_SUBSURFACE_RADIUS };
     CHECK(tagged == expected);
 }
-
-// ----------------------------------------------------------------------------
-// UV placement.
-//
-// Transcribed from the stdlib nodegraphs, because every field here means the
-// opposite of what its name suggests: place2d divides by scale and subtracts
-// offset, tiledimage subtracts after multiplying, and MaterialX's rotate2d
-// turns clockwise where the shader's turns the other way. A texture placed
-// almost right is the hardest kind of wrong to see, so these pin the algebra
-// rather than the plumbing.
-// ----------------------------------------------------------------------------
 
 TEST_CASE("place2d scale divides, and reaches the shader as its reciprocal")
 {

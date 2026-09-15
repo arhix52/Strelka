@@ -459,10 +459,6 @@ void MetalWavefrontIntegrator::reportStageTimestampValues(const uint64_t* timest
     uint32_t counts[kStageCount] = {};
     double primaryExtendMs = 0.0;
     double primaryShadowMs = 0.0;
-    // Per-bounce durations of the three traversal-heavy stages. The cost of a
-    // bounce says more than the total does: bounce 0 is a coherent primary pass
-    // and the later ones are not, which is what decides whether sorting rays is
-    // worth anything.
     std::string perBounce[kStageCount];
     for (NS::UInteger i = 0; i < mStageKinds.size(); ++i)
     {
@@ -817,10 +813,6 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
         enc->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
     };
     auto traversalBatchBarrier = [&]() {
-        // This is an execution boundary only. Intermediate traversal batches
-        // append through atomics and consume none of each other's ordinary
-        // writes; the device-wide visibility barrier after the final batch
-        // publishes their combined queues to the next stage.
         enc->barrierAfterEncoderStages(MTL::StageDispatch, MTL::StageDispatch, MTL4::VisibilityOptionNone);
     };
     auto bind = [&](MTL::Buffer* buffer, NS::UInteger offset, NS::UInteger index) {
@@ -843,10 +835,6 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     const bool profileThisSample =
         frame.profileStages && accumulatedSample >= profileStart && accumulatedSample - profileStart < profileCount;
 
-    // Breadcrumbs identify a failed stage; precise timestamps measure
-    // successful runs. Limit the default window because hundreds of precise
-    // boundaries on every sample of a long SSS render eventually trip the GPU
-    // watchdog. STRELKA_STAGE_PROFILE_START/COUNT select another window.
     const bool diagnose = profileThisSample && envUint("STRELKA_STAGE_BREADCRUMBS", 0u) != 0u && mStageBreadcrumbPSO4 &&
                           mStageStatsBuffer;
     // Keep the two modes mutually exclusive. A breadcrumb is a one-thread
@@ -2167,10 +2155,6 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
     return enc;
 }
 
-// Build (or return) the pipeline set specialised for one combination of scene
-// features. Compiling seven kernels takes a few milliseconds, which is fine
-// because the key only changes when a setting or the scene does — never per
-// frame.
 const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, bool textureLodCode)
 {
     const uint64_t variantKey = uint64_t{ features } | (uint64_t{ textureLodCode } << 32u);
@@ -2207,10 +2191,6 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
     // A pipeline built the Metal 3 way cannot be used with an argument table, so
     // the two paths need separate pipelines and the mode is part of the cache key.
     const bool useMetal4 = (features & WavefrontFeatures::kMetal4) != 0;
-    // Curves change the intersector's *type*, which no function constant can do,
-    // so this picks a different entry point out of the same library. `shade`
-    // takes a constant as well: it has no intersector, only the branch that
-    // rebuilds a curve hit's geometry, and that one is worth compiling out.
     const bool curves = (features & WavefrontFeatures::kCurves) != 0;
     values->setConstantValue(&curves, MTL::DataTypeBool, (NS::UInteger)9);
     const bool sharcUpdate = (features & WavefrontFeatures::kSharcUpdate) != 0;
@@ -2268,10 +2248,6 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
     values->setConstantValue(&alphaBaseColorOne, MTL::DataTypeBool, (NS::UInteger)35);
     const bool compactAlphaMaterials = !envFlag("STRELKA_NO_COMPACT_ALPHA_MATERIALS");
     values->setConstantValue(&compactAlphaMaterials, MTL::DataTypeBool, (NS::UInteger)36);
-    // BLEND visibility is already sampled stochastically. A nearest alpha
-    // lookup turns the usual binary foliage texture into one texel fetch and,
-    // more importantly, avoids long runs of fractional boundary candidates.
-    // Keep MASK and deterministic compatibility paths bilinear.
     const bool nearestAlphaTexture =
         stochasticAlphaVisibility && allAlphaBlend && !envFlag("STRELKA_LINEAR_ALPHA_TEXTURE");
     values->setConstantValue(&nearestAlphaTexture, MTL::DataTypeBool, (NS::UInteger)37);
@@ -2364,10 +2340,6 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
         else
         {
             auto* descriptor = MTL::IntersectionFunctionTableDescriptor::alloc()->init();
-            // Compatible triangle BLASes always carry the cutout offset so the
-            // UI can switch alpha traversal without rebuilding the scene. A
-            // non-alpha traversal must explicitly accept that slot: Metal
-            // ignores a triangle when a required table entry is empty.
             descriptor->setFunctionCount(SHADOW_INTERSECTION_FUNCTION_COUNT);
             table = pso->newIntersectionFunctionTable(descriptor);
             descriptor->release();
@@ -2416,11 +2388,6 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
 
     WavefrontVariant v;
     v.generate = make("wavefrontGenerate");
-    // Motion, denoiser guides and ReSTIR are independent optional paths. The
-    // linked curve traversal kernels take seconds to specialise, so compiling
-    // every alternative on first frame is visible startup work, not harmless
-    // prewarming. A variant key already records all three capabilities; create
-    // only the PSOs an encoder can select for this key.
     const bool forceMotionTraversal = envUint("STRELKA_STATIC", 1u) == 0u;
     const bool needsMotionTraversal = motionBlur || forceMotionTraversal;
     if (needsMotionTraversal)
@@ -2482,15 +2449,6 @@ const WavefrontVariant* MetalWavefrontIntegrator::variantFor(uint32_t features, 
     }
     else
     {
-        // Generic materials already use the same producer-side buckets as
-        // OpenPBR. Give their ordinary opaque surfaces a PSO that cannot see
-        // fog, volume exits, hair or transmission continuation. The rare Tail
-        // records keep the full path. An opt-out remains for paired profiling.
-        // A fog hit is deliberately routed to Tail. In atmospheric scenes that
-        // population can be comparable to the surface population (pine is the
-        // representative case), and sorting plus launching two equally hot
-        // kernels costs more than the smaller Base code saves. Keep those
-        // scenes monolithic; the split wins when Tail is genuinely sparse.
         if (genericShadeSplit && !fog && !envFlag("STRELKA_NO_GENERIC_SHADE_SPLIT"))
         {
             v.shadeBase = make("wavefrontShadeBase", "wavefrontShadeBaseGeneric");
@@ -2638,14 +2596,6 @@ void MetalWavefrontIntegrator::ensureBuffers(uint32_t width,
     {
         return;
     }
-    // Out of the residency set before it is freed, for the same reason the
-    // acceleration structures do it: the set does not retain what it names, so a
-    // released allocation leaves a dangling entry, and the allocator readily
-    // hands the same address back for the replacement below. addAllocation then
-    // sees an address the set already holds and the new buffer is never made
-    // resident. `makeResourcesResidentForMetal4` reconciles by pointer
-    // set-difference, so a reused address is invisible to it and cannot repair
-    // this. Every buffer released here is named by addResidentAllocations().
     auto release = [this](MTL::Buffer*& b) {
         if (b)
         {

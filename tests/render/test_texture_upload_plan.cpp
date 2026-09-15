@@ -4,11 +4,6 @@
 
 using namespace oka::optix_tex;
 
-// The OptiX texture loader's arithmetic. Everything here runs on the host with
-// no CUDA and no GPU: the parts that need a device are in
-// texture_support_cuda.h, and the parts that can be got wrong silently are
-// here.
-
 TEST_CASE("resolveExtent matches the Metal rule: downscale, then fit maxDimension")
 {
     // Neither knob set: the file's own size.

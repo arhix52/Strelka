@@ -1,59 +1,8 @@
 #ifndef STRELKA_MATERIAL_OPENPBR_PARAMS_H
 #define STRELKA_MATERIAL_OPENPBR_PARAMS_H
 
-// ============================================================================
-// openpbr_params.h -- the OpenPBR Surface argument block, host to GPU
-// ============================================================================
-//
-// One struct, read verbatim by CUDA device code, Metal shaders, CUDA host code
-// and the CPU tests. Unlike MaterialParams there is deliberately **no
-// per-backend mirror** of it, and that is the whole point of how it is spelled.
-//
-// MaterialParams has one, `struct Material` in src/shaders/metal/ShaderTypes.h,
-// because MaterialParams uses `float3` -- which is 12 bytes on the host and
-// under CUDA, and *16* under Metal. A struct containing it therefore cannot be
-// read out of a Metal buffer, so Metal grew a parallel declaration spelled with
-// packed_float3 plus a hand-written field-by-field converter
-// (MetalMaterials.mm::makeMaterialParams). That converter currently drops nine
-// MaterialParams fields on the floor, silently, because nothing checks it.
-//
-// This struct avoids the mirror by containing no vector type at all. Colours are
-// OpenPBRColor -- three bare floats, which every one of the four compilers lays
-// out as 12 bytes at alignment 4 -- and the two anisotropy rotations are stored
-// as separate scalars for the same reason (Metal's and CUDA's float2 align to 8,
-// GLM's vec2 to 4). What the host writes is byte-for-byte what each shader
-// reads, and the static_assert at the bottom is what keeps it that way.
-//
-// Textures are not in here either. They are a parallel table indexed by
-// [materialId * MAX_OPENPBR_TEXTURES + slot], resolved by each backend into the
-// handle type it uses -- cudaTextureObject_t on OptiX, MTL::ResourceID on Metal
-// -- exactly as params.materialTextures already does for the glTF path.
-//
-// Field names and defaults follow the OpenPBR 1.1.1 specification, so this maps
-// one-to-one onto OpenPBR_ResolvedInputs in third_party/openpbr_bsdf. The two
-// geometry bases that struct also carries are built at the shading point from
-// the hit, not stored here.
-
 #include <strelka/material/material_params.h>
 
-// Three floats, 12 bytes, alignment 4 -- on all four compilers. See the note
-// above: this exists so that no backend needs its own copy of the struct below.
-//
-// This *is* Metal's packed_float3, and the numbers are worth stating because the
-// alternative is not obviously worse until it is measured. On an M4 Pro:
-//
-//     sizeof(packed_float3)              12   align 4
-//     sizeof(float3)                     16   align 16
-//     sizeof(struct{packed_float3,float})16
-//     sizeof(struct{float3,float})       32   <-- the row silently doubles
-//
-// So packed_float3 is exactly the right tool and `struct Material` in
-// src/shaders/metal/ShaderTypes.h correctly uses it. It is simply not reachable
-// from here: that header is the Metal backend's, it opens with
-// #include <simd/simd.h>, and its non-Metal shim takes a vector_float3 -- none
-// of which exists in a CUDA build on Linux or Windows, where this header still
-// has to compile. Hence a fourth spelling of the same twelve bytes rather than a
-// fifth dependency.
 struct OpenPBRColor
 {
     float r;
@@ -82,21 +31,11 @@ enum OpenPBRTextureSlot : unsigned int
     OPENPBR_TEX_GEOMETRY_NORMAL = 13,
     OPENPBR_TEX_GEOMETRY_COAT_NORMAL = 14,
     OPENPBR_TEX_GEOMETRY_OPACITY = 15,
-    // Appended after real content asked for them, which is the only reason any
-    // of these should grow. The Open Chess Set drives subsurface_radius from a
-    // map in 13 of its 15 materials and subsurface weight in 4; a fabric wants
-    // its fuzz tint the same way velvet states it as a constant.
     OPENPBR_TEX_SUBSURFACE_WEIGHT = 16,
     OPENPBR_TEX_SUBSURFACE_RADIUS = 17,
     OPENPBR_TEX_FUZZ_COLOR = 18,
     MAX_OPENPBR_TEXTURES = 19
 };
-
-// The ceiling is 32, not a matter of taste: OpenPBRParams::texture_mask is one
-// uint32_t with a bit per slot, and it is what makes the count nearly free --
-// see the note on that field. Past 32 the gate would need a second word and
-// every shader that reads it would have to change.
-
 
 struct OpenPBRParams
 {
@@ -164,18 +103,6 @@ struct OpenPBRParams
     float emission_luminance; //  4
     float geometry_opacity; //  4
     unsigned int geometry_thin_walled; //  4
-    // One bit per OpenPBRTextureSlot, derived by the renderer from which slots
-    // the material actually names a file for.
-    //
-    // This is what decides the cost of having slots at all. The handles live in
-    // a *different* buffer (OpenPBRTextures, in the backend's own header,
-    // because a texture handle has a different type per backend), so testing
-    // them directly means streaming that buffer's cache lines at every hit --
-    // for every material, including the ones with no maps, which is most of
-    // them. The mask is already here, in a struct the shading path has loaded,
-    // so `texture_mask == 0` skips the second buffer entirely and a per-slot bit
-    // skips a handle load. Adding a slot then costs eight bytes in a buffer that
-    // is only touched when some material says it has maps.
     unsigned int texture_mask; //  4  -- 240
 
     // -- KHR_texture_transform equivalent, folded from MaterialX place2d ------
@@ -190,10 +117,6 @@ struct OpenPBRParams
     float _pad[3]; // 12  -- 272
 };
 
-// The mirror this struct does not have is replaced by this line. If a field is
-// added without keeping the 16-byte rows above, the Metal shader and the host
-// stop agreeing and nothing else in the build would say so -- Scene::Vertex
-// carries the same guard for the same reason.
 #if defined(__METAL_VERSION__)
 static_assert(sizeof(OpenPBRParams) == 272, "OpenPBRParams must stay 272 bytes (Metal)");
 static_assert(sizeof(OpenPBRColor) == 12, "OpenPBRColor must stay 12 bytes (Metal)");
@@ -202,24 +125,6 @@ static_assert(sizeof(OpenPBRParams) == 272, "OpenPBRParams must stay 272 bytes (
 static_assert(sizeof(OpenPBRColor) == 12, "OpenPBRColor must stay 12 bytes (host/CUDA)");
 #endif
 
-// ---------------------------------------------------------------------------
-// Specification defaults
-// ---------------------------------------------------------------------------
-//
-// Host-side only: device code is handed a filled block and never authors one.
-// Keeping it out of the shaders also keeps this header free of material_math.h,
-// which material_params.h documents it must not pull in.
-//
-// These numbers are the OpenPBR 1.1.1 defaults, and they are duplicated from
-// openpbr_make_default_resolved_inputs() in third_party/openpbr_bsdf on purpose:
-// this header must not depend on the vendored one, because the glTF loader
-// includes it and has no business compiling a BSDF. The duplication is not
-// trusted -- tests/material/test_openpbr_params.cpp asserts the two agree field
-// by field, so the copy cannot drift.
-//
-// A zero-initialised OpenPBRParams is NOT a valid material: it has zero IOR,
-// zero coat_darkening and a zero anisotropy rotation cosine, which is a
-// degenerate basis rather than "no rotation". Always start here.
 #if !defined(__CUDA_ARCH__) && !defined(__METAL_VERSION__)
 enum OpenPBRFeature : unsigned int
 {

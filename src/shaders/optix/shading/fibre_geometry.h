@@ -1,34 +1,10 @@
 #ifndef STRELKA_OPTIX_FIBRE_GEOMETRY_H
 #define STRELKA_OPTIX_FIBRE_GEOMETRY_H
 
-// ============================================================================
-// fibre_geometry.h -- where a ray that scattered *through* a strand comes out.
-//
-// Deliberately free of CUDA and OptiX: it is plain vector arithmetic over
-// material_math.h's float3, so the same code compiles into the closest-hit
-// program and into the unit tests (tests/render/test_fibre_chord.cpp), which is
-// the only way any of this can be checked without a GPU.
-// ============================================================================
-
 #include <strelka/material/material_math.h>
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-member-init)
-//
-// NVCC and host tests compile this header, while clang-tidy sees only the host
-// build. Initialising out-parameters or GPU-bound structs would add dead stores.
 
-// The Chiang hair lobe is a whole-fibre model: its transmission term is the
-// absorption over the chord *inside* the strand, so a direction leaving on the
-// far side has already been charged for the crossing. Starting such a ray on the
-// surface it came from puts the strand in its way -- a shadow ray dies on its own
-// fibre, and a bounce ray hits the far wall and buys a second whole-fibre event
-// that the first one already contains.
-//
-// The strand is a cylinder of radius r about `tangent`, and the hit sits on its
-// surface along `normal`. In the plane across the axis the chord from that point
-// along the ray is -2r(n.u), where u is the ray direction projected into that
-// plane and renormalised; the distance travelled to cover it is that chord over
-// the length the direction itself has in the plane.
 struct FibreExit
 {
     float3 position; // where the ray leaves the strand

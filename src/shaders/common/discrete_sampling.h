@@ -13,10 +13,6 @@
 #    define STRELKA_DISCRETE_FN inline
 #endif
 
-// Map all 2^32 input words onto `count` adjacent buckets. Unlike
-// floor(float(word) * count), this retains enough states for every uint32-sized
-// table. Multiplication-high also avoids the float rounding that can produce
-// the out-of-range endpoint `count`.
 STRELKA_DISCRETE_FN uint32_t discreteUniformIndex(uint32_t count, uint32_t word)
 {
     if (count == 0u)
@@ -89,10 +85,6 @@ STRELKA_DISCRETE_FN bool discreteBernoulli(uint32_t word, float probability)
     return word < discreteProbabilityThreshold(probability);
 }
 
-// BSDF entry points historically receive floats, and their continuous draws
-// still do. Their two categorical coordinates use the common 23-bit subset of
-// every production sampler so the represented branch masses are exact floats
-// and identical on Metal and OptiX.
 #define STRELKA_FLOAT_LATTICE_STATES 8388608u
 
 STRELKA_DISCRETE_FN uint32_t discreteFloatLatticeCount(float probability)

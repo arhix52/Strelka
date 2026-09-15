@@ -1,12 +1,6 @@
 #ifndef STRELKA_TEXTURE_SAMPLE_H
 #define STRELKA_TEXTURE_SAMPLE_H
 
-// ============================================================================
-// texture_sample.h -- Platform-specific texture sampling abstractions
-//
-// Provides a uniform texture_sample_2d() function across CUDA, Metal, and CPU.
-// ============================================================================
-
 #include "material_math.h"
 
 // ===========================================================================

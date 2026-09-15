@@ -108,10 +108,6 @@ TEST_CASE("intensity and colour end up multiplied into the GPU light")
     CHECK(any(scene.peekChanges() & ChangeBits::Lights));
 }
 
-// The bug: getTransform() scaled every light by (width, height, 1), and a disc
-// light has no width. Its in-plane axes came out zero -- so the sampler had no
-// disc to sample -- and its mesh instance was squashed flat, which made the light
-// invisible as well.
 TEST_CASE("a disc light's frame survives having no width")
 {
     Scene scene;
@@ -613,12 +609,6 @@ TEST_CASE("headless light edits do not recreate released proxy geometry")
 
 TEST_CASE("a rect or disc light carries its area density rather than rebuilding it")
 {
-    // The density is a constant of the light, and the shading path used to
-    // rebuild it per next-event draw out of exponent-decomposed compensated
-    // arithmetic. It now travels in pad0, which those two types write and never
-    // read -- so this is what says the number packed there is the number the
-    // device would have computed. Both halves of the MIS estimate read it, so a
-    // wrong value does not cancel: it biases.
     Scene scene;
 
     Scene::UniformLightDesc rect{};

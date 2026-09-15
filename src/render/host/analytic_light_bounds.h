@@ -1,19 +1,5 @@
 #pragma once
 
-// The box traversal culls an analytic light by.
-//
-// The OptiX backend gives every analytic emitter an AABB in a custom-primitive
-// structure, and the intersection program decides the rest. That makes the box
-// the only thing standing between a ray and a light it should have hit: a box
-// that is too small does not slow anything down, it silently drops the emitter
-// from the frame, and only for the rays that graze it.
-//
-// So it is built from the same packed points the exact intersector reads, it is
-// loose on purpose -- the component sum of the axes rather than their true
-// extent -- and it lives here, out of the .cpp, so that a test can hold it
-// against the exact intersector rather than against its own arithmetic.
-// tests/render/test_analytic_light_bounds.cpp is that test.
-
 #include <light_types.h>
 
 #include <glm/glm.hpp>

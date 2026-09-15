@@ -49,10 +49,6 @@ TEST_CASE("the stage with no mark is the one that faulted")
     CHECK_FALSE(failure.allSubmittedCompleted);
 }
 
-// The whole reason the submitted mask exists. A static scene never dispatches
-// the skinning kernel, so its completion mark is absent on a perfectly healthy
-// device -- an inference that read the completion marks alone would name
-// skinning on every static scene, every time, and be believed.
 TEST_CASE("a stage that was never submitted is never blamed")
 {
     Frame f;
@@ -82,10 +78,6 @@ TEST_CASE("a fault before anything completed names the first submitted stage")
     CHECK_FALSE(failure.allSubmittedCompleted);
 }
 
-// A device that has already faulted can write anything into the mark buffer,
-// including marks for work that came after the one that died. Taking the
-// highest mark would then report a stage that demonstrably never ran, so the
-// scan reports the first submitted stage without a mark instead.
 TEST_CASE("marks above the gap do not move the blame past it")
 {
     Frame f;

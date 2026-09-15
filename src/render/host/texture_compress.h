@@ -1,27 +1,5 @@
 #pragma once
 
-// Block compression for the texture cache: BC1 for opaque colour, BC3 where
-// alpha carries something, BC5 for normal maps.
-//
-// Why these and not BC7, which is better: BC7 is a search over eight block modes
-// and takes long enough that it wants a GPU encoder or a build step. BC1, BC3
-// and BC5 are a range fit over a 4x4 block -- a few hundred instructions -- and
-// they are what makes the difference between a scene fitting in memory and not.
-// The results are cached, so the encode is paid once per texture per setting
-// rather than once per launch.
-//
-// What they cost: BC1 quantises colour to 5:6:5 endpoints and four interpolated
-// levels, which is visible on smooth gradients and invisible on the bark, moss
-// and foliage that fill a scene like this.
-//
-// Normal maps go through BC5 rather than BC1 because a direction does not
-// survive BC1: three channels share one line through 5:6:5 space and two bits of
-// index, and the result facets every curved surface. BC5 is two independent BC4
-// blocks -- 8-bit endpoints, three bits of index -- one for X and one for Y, at
-// the same 8 bits per pixel. Z is not stored; the shader rebuilds it from X and
-// Y, which is exact for a unit-length tangent-space normal and is also what
-// Apple recommends for normal data on Metal.
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -43,12 +21,6 @@ inline void unpack565(uint16_t c, int& r, int& g, int& b)
     b = (c & 0x1F) * 255 / 31;
 }
 
-/// One 4x4 BC1 colour block, 8 bytes. `src` is RGBA8, `stride` in bytes.
-///
-/// Range fit: the endpoints are the per-channel extremes of the block, which is
-/// what makes this fast. It is not optimal -- a least-squares fit along the
-/// principal axis is better -- but the difference is small on photographic
-/// texture and the cost is not.
 inline void compressBlockBC1(const uint8_t* src, int width, int height, int x0, int y0,
                              size_t stride, uint8_t out[8])
 {
@@ -184,21 +156,6 @@ inline void compressBlockBC4(const uint8_t* src, int width, int height, int x0, 
         out[2 + b] = (uint8_t)((indices >> (8 * b)) & 0xFF);
 }
 
-/// Rewrite an RGBA8 normal map in place so every texel is a unit vector, which
-/// is what makes dropping Z lossless: the shader rebuilds it as
-/// sqrt(1 - x^2 - y^2), and that is only the Z that was there if the source had
-/// unit length to begin with.
-///
-/// Real assets do not. Normal maps arrive off a lossy encoder, so a texel is
-/// typically a percent off, and a mip level is an average of unit vectors and so
-/// is shorter still. Worse, a glTF sometimes points normalTexture at a
-/// displacement map, where the three channels are one grey value and the vector
-/// is nowhere near unit -- reconstructing Z from that without this pass turns a
-/// 70-degree error loose on the material.
-///
-/// Normalising does not change what is shaded: the shader normalises after the
-/// tangent transform anyway, and glTF's normal scale applies to X and Y only, so
-/// scaling a unit normal and scaling the original give the same direction.
 inline void normalizeNormalMap(uint8_t* rgba, int width, int height)
 {
     const size_t count = (size_t)width * height;

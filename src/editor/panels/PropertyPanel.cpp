@@ -315,10 +315,6 @@ void EditorApp::drawPropertyPanel()
             Scene::UniformLightDesc desc = m_scene->getLightsDesc()[m_selectedLightId];
             pushUndoLight(m_selectedLightId);
             desc.projectorImagePath = ImGuiFileDialog::Instance()->GetFilePathName();
-            // Registered with the scene, not decoded here: the renderer walks
-            // Scene::getProjectorImages() whenever the light set changes and
-            // uploads what it finds, so picking a file is the same kind of edit
-            // as moving the light.
             desc.projectorImage = m_scene->addProjectorImage(desc.projectorImagePath);
             m_scene->setLight(m_selectedLightId, desc);
             markDocumentDirty();

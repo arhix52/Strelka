@@ -247,10 +247,6 @@ TEST_CASE("ImGuizmo draws with editor call order (dockspace, manipulate from ano
     CHECK(vtxAfter > vtxBefore);
 }
 
-// ImGuizmo bails out without any warning when the target projects behind the
-// camera, which is also what a stale or never-built view matrix looks like: the
-// gizmo just never shows up. Pinning the behaviour keeps that failure mode
-// documented next to the positive case.
 TEST_CASE("ImGuizmo draws nothing when the target is behind the camera")
 {
     const HeadlessImGui ctx;

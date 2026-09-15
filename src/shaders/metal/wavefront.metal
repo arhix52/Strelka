@@ -5,12 +5,6 @@
 
 #include "shading_common.h"
 
-// The OpenPBR BSDF. Included unconditionally, and it has to be: SPEC_OPENPBR is
-// a function constant, so it selects code when the pipeline is specialised, not
-// when this file is preprocessed. Its ~264 KB of lookup tables therefore land in
-// the metallib whichever variant is built. That is data rather than
-// instructions, so it does not compete for the instruction cache this kernel is
-// bound by -- which is the whole reason the branch below is behind a constant.
 #define STRELKA_OPENPBR_FEATURE_EnableSheenAndCoat SPEC_OPENPBR_SHEEN_AND_COAT
 #define STRELKA_OPENPBR_FEATURE_EnableDispersion SPEC_OPENPBR_DISPERSION
 #define STRELKA_OPENPBR_FEATURE_EnableTranslucency SPEC_OPENPBR_TRANSLUCENCY
@@ -116,23 +110,6 @@ static void applyOpenPBRBaseTextures(thread OpenPBR_BaseParams& p,
 #include "subsurface.h"
 #include "sharc.h"
 
-// Every stage that resolves a hit reads the same instance descriptor buffer the
-// top level was built from, so its element type has to be the one the host
-// wrote -- MTLIndirectAccelerationStructureInstanceDescriptor.
-//
-// Not a choice: Metal 4's instance descriptor takes no array of bottom-level
-// structures, so an instance can only name one by resource ID, which is what
-// the indirect descriptor carries and the UserID one does not. The two differ
-// in both stride (72 against 68) and in where userID sits (60 against 64), so
-// reading one as the other silently turns userID into half a resource ID and
-// indexes the geometry table with it -- every surface comes back black, with
-// nothing for the validation layer to report.
-
-// Bit 30 of HitRecord::geomEntryIndex marks a scattering event in the
-// atmosphere: no surface was reached, the ray was stopped by the medium. Bit 31
-// is the emissive-geometry flag; both live in the same word because a fog event
-// is a third kind of "what did this ray hit" and the shade kernel already
-// branches on that word.
 #define HIT_FOG_BIT (1u << 30)
 
 // Bit 29 marks a scattering event inside a subsurface medium: like the fog bit,
@@ -201,13 +178,6 @@ WF_ANALYTIC_INTERSECTION_FAMILY(RestirSpatialDiagnostic)
 #undef WF_ANALYTIC_INTERSECTION_FAMILY
 #undef WF_ANALYTIC_INTERSECTION_ENTRY
 
-// Layout of the control buffer, shared by every stage.
-//   [0], [1] : live path count of each ping-pong queue
-//   [2..4]   : MTLDispatchThreadgroupsIndirectArguments for extend/shade
-//   [5]      : live path count for this bounce, so stages need no queue index
-//   [6..10]  : shadow ray count, republished count, and its dispatch arguments
-//   [11..15] : the same for rays that hit geometry
-//   [16..20] : the same for rays that escaped
 #define WF_CTRL_COUNT0 0
 #define WF_CTRL_COUNT1 1
 #define WF_CTRL_DISPATCH 2
@@ -268,10 +238,6 @@ static inline void auditExtendWork(constant Uniforms& uniforms, uint32_t bounce)
 {
     if (SPEC_RENDER_WORK_AUDIT)
     {
-        // Only lanes that survived the queue/SSS guards reach this point. Keep
-        // the counters exact while replacing three contended atomics per ray
-        // with three atomics per active SIMD group. The whole block disappears
-        // from normal Release variants through the function constant.
         const uint32_t rays = simd_sum(1u);
         if (simd_is_first())
         {
@@ -345,11 +311,6 @@ static inline void restirDiagnosticVisibility(constant Uniforms& uniforms, uint3
     }
 }
 
-// Reserve a run of output slots for the active lanes of one simdgroup. Every
-// lane that reaches a call site belongs in that queue -- the others already
-// returned or took the other branch, so they are inactive and the simdgroup
-// reductions below see only the lanes being queued. One atomic per simdgroup
-// instead of one per lane.
 static inline void queuePush(constant Uniforms& uniforms,
                              device atomic_uint* counter,
                              device uint32_t* queueOut,
@@ -375,26 +336,9 @@ static inline void queuePush(constant Uniforms& uniforms,
     }
 }
 
-
 // Static and motion acceleration structures require different intersector types,
 // so traversal specialization cannot be a runtime branch or function constant.
 
-// The fraction of a light a cutout shadow ray is allowed to carry before Russian
-// roulette ends its walk.
-//
-// Accepting on a collapsed transmittance keeps the early-out the walk had: once
-// nothing measurable can get through, the ray is blocked and traversal stops.
-// A shadow ray that is already almost blocked is allowed to stop.
-//
-// Through a canopy the expensive rays are not the blocked ones -- those accept
-// at the first opaque leaf -- but the ones that keep slipping past cutouts with
-// a hundredth of the light left, traversing the whole crown to deliver
-// something that rounds to nothing. Below this fraction of the light the ray is
-// killed by Russian roulette and what survives is scaled back up, so the
-// estimate stays unbiased and only its variance moves.
-//
-// A fraction of the light, not a distance or a size, so it means the same thing
-// in any scene.
 constant float kShadowTransmittanceCutoff = 0.05f;
 
 // Coverage helpers for the inline-query and restart fallbacks.
@@ -508,10 +452,6 @@ static inline float resolveKnownCutoutOpacity(device const AlphaMaterialData& ma
             uv = float2(dot(uv, float2(material.uvTransformX)), dot(uv, float2(material.uvTransformY))) +
                  float2(material.uvOffset);
         }
-        // In the stochastic BLEND specialization nearest preserves the binary
-        // texels authored by foliage masks. Camera/path jitter integrates their
-        // coverage, while traversal no longer walks through several fractional
-        // bilinear edge candidates. MASK and compatibility variants stay linear.
         alpha *= SPEC_NEAREST_ALPHA_TEXTURE ? material.baseColorTexture.sample(alphaNearestSampler, uv).a :
                                               material.baseColorTexture.sample(alphaSampler, uv).a;
     }
@@ -531,15 +471,6 @@ static inline uint32_t cutoutIftHash(uint32_t v)
     return v ^ (v >> 16u);
 }
 
-// Payload-free stochastic alpha for static shadow rays. An independent
-// Bernoulli decision at each BLEND candidate has survival probability
-// product(1 - alpha), exactly like the kernel walk's accumulated threshold,
-// without retaining per-ray state in traversal. MASK remains deterministic.
-//
-// geometryEntryBase is the TLAS user ID, so no instance-descriptor load is
-// needed here. The production experiment reads UVs from the existing dense
-// 12-byte buffer: embedding those same bytes in pine's AS inflated its compacted
-// BLAS by 34%, enough to make both extend and shadow slower.
 static inline bool cutoutShadowAccept(float2 barycentricCoord,
                                       uint32_t primitiveId,
                                       uint32_t geometryId,
@@ -567,10 +498,6 @@ static inline bool cutoutShadowAccept(float2 barycentricCoord,
     float opacity = SPEC_ALPHA_BASE_COLOR_ONE ? 1.0f : material.baseColorAlpha;
     if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
     {
-        // Match the current fast foliage path for BLEND while retaining the
-        // linear lookup required by thresholded MASK materials. Hoisting scene
-        // facts into function constants removes the material-mode branch and
-        // unused transform/factor loads from the hot intersection function.
         opacity *= SPEC_NEAREST_ALPHA_TEXTURE ? material.baseColorTexture.sample(alphaNearestSampler, uv).a :
                                                 material.baseColorTexture.sample(alphaLinearSampler, uv).a;
     }
@@ -747,10 +674,6 @@ struct StaticTraversal
     using structure = acceleration_structure<instancing>;
     using volume_structure = structure;
     using isect = intersector<triangle_data, instancing>;
-    // Metal's inline traversal, used by the cutout shadow walk so the alpha test
-    // can run in the kernel without giving up the single traversal. An enum
-    // rather than a static constexpr: a program-scope constexpr under the Metal
-    // compiler has to live in the constant address space.
     using query = intersection_query<triangle_data, instancing>;
     enum
     {
@@ -820,10 +743,6 @@ struct StaticAlphaIftTraversal
     }
 };
 
-// Fast path for a scene whose immutable geometry was baked into one world-space
-// primitive AS. Extend does not need a top-level traversal for that case. Area
-// lights are intersected analytically below; volume walks retain their separate
-// instanced structure because medium boundaries are not necessarily flat.
 struct DirectStaticTraversal
 {
     using query = intersection_query<triangle_data>;
@@ -868,14 +787,6 @@ struct DirectStaticTraversal
     }
 };
 
-// The same two, able to see curves.
-//
-// A separate pair rather than a flag, because `curve_data` is a *tag*: it decides
-// what the intersector's result type carries, so it cannot be turned on by a
-// function constant any more than the motion tag can. That is also why it is
-// worth keeping apart -- a scene with no hair in it goes on traversing with the
-// triangle-only intersector it always used, and the extra geometry type costs it
-// nothing.
 struct CurveMotionTraversal
 {
     // intersection_query rejects the motion tags, so this one keeps the
@@ -979,10 +890,6 @@ struct CurveStaticAlphaIftTraversal
     }
 };
 
-// The curve and triangle intersectors return different result types even though
-// extend consumes the same common fields. Copy those fields into one small
-// value so an SSS lane can use a genuinely triangle-only intersector while the
-// other lanes keep the curve-capable one.
 struct ExtendIntersection
 {
     intersection_type type;
@@ -1144,11 +1051,6 @@ static inline uint32_t pathDepth(uint32_t depthAndFlags)
 // once per stage and reuse that register state for alternate depths locally.
 static inline uint32_t sampleSequenceIndex(constant Uniforms& uniforms, uint32_t sampleIdx)
 {
-    // Ordinary accumulation advances subframeIndex by the number of samples
-    // already folded into the estimate. Temporal reconstruction instead follows
-    // the monotonic display frame: camera motion resets subframeIndex, and using
-    // it there would retrace the same path and hand MetalFX correlated noise.
-    // SHARC has its own temporal sequence for the same reason.
     const uint32_t sequenceBase = restirSampleSequenceBase(
         uniforms.useFrameJitter != 0u, uniforms.enableAccumulation != 0u, uniforms.restirDIEnabled != 0u,
         uniforms.frameIndex, uniforms.samples_per_launch, uniforms.subframeIndex);
@@ -1210,10 +1112,6 @@ static inline SamplerState samplerForFixedDepth(
     return s;
 }
 
-// A path has one time, sampled once when its camera ray is generated. The
-// sampler is stateless, so every later stage can recover that exact value by
-// drawing eTime at depth 0 again -- drawing it at the current depth would give a
-// different time on every bounce and smear the path across the shutter.
 static inline float motionTimeFromSampler(constant Uniforms& uniforms, uint32_t sampleIdx, thread SamplerState& sampler)
 {
     if (!SPEC_MOTION_BLUR || !uniforms.enableMotionBlur)
@@ -1309,20 +1207,6 @@ static inline float sharcReceiverRoughness(bool isOpenPBR,
 // generate -- camera rays
 // ---------------------------------------------------------------------------
 
-/// The medium a path is travelling inside, from whichever model describes it.
-///
-/// Two sites need this -- `extend`, to sample the next free flight, and `shade`,
-/// to weight a scattering event -- and they must agree to the digit or the
-/// estimator stops being unbiased: a flight sampled from one density and
-/// weighted by another is exactly that mistake.
-///
-/// The OpenPBR branch does not read the material's subsurface fields at all. It
-/// derives the medium from the OpenPBR parameters through the vendored
-/// implementation, which blends subsurface scattering and transmission into one
-/// volume the way the specification defines them jointly, and which applies a van
-/// de Hulst mapping from the authored colour to a single-scattering albedo.
-/// Reimplementing either here would be two formulas to keep in step instead of
-/// none.
 struct MediumProps
 {
     float3 sigmaT;
@@ -1330,15 +1214,6 @@ struct MediumProps
     float anisotropy;
 };
 
-/// Extinction alone, for the two places that need no albedo: the exit boundary
-/// weight and the optical depth a shadow ray accumulates.
-///
-/// Its own function because those two sites read the material directly and had
-/// no reason to know OpenPBR exists -- which is exactly how they went on using
-/// Material::subsurface_radius, a glTF field an OpenPBR material never fills.
-/// At zero that reciprocal is 1e5, so the exit boundary weight annihilated every
-/// path leaving the medium, independent of how long its walk had been. That is
-/// what made the chess kings dark at every iteration budget.
 static float3 mediumSigmaT(constant Uniforms& uniforms, device const Material* materials, uint32_t materialIndex)
 {
     device const Material& mm = materials[materialIndex];
@@ -1362,11 +1237,6 @@ static MediumProps mediumPropsFor(constant Uniforms& uniforms,
     if ((SPEC_ALL_OPENPBR || (SPEC_OPENPBR && mm.material_type == MATERIAL_TYPE_OPENPBR)) &&
         uniforms.openpbrParams != nullptr)
     {
-        // Copied out of device memory because the bridge takes a thread
-        // reference -- it is portable code and cannot name Metal's address
-        // spaces. The copy is nominal: openpbr_interior_volume() reads eleven
-        // of these fields and the rest are dead, which scalar replacement
-        // removes.
         const OpenPBRParams mat = uniforms.openpbrParams[materialIndex];
         const OpenPBR_HomogeneousVolume v = openpbr_interior_volume(mat);
         out.sigmaT = v.extinction_coefficient;
@@ -1611,10 +1481,6 @@ static inline void bucketPush(constant Uniforms& uniforms,
     queueOut[simd_broadcast_first(base) + rank] = pathIndex;
 }
 
-// Bucket at the producer rather than scanning the completed hit queue. Every
-// hit belongs to exactly one bucket, so their four counters are also the
-// total count. Avoid maintaining a redundant fifth counter in the hottest
-// producer; wavefrontPrepareHitMiss sums the four counters after traversal.
 static inline void hitQueuePush(
     constant Uniforms& uniforms, device uint32_t* queue, uint32_t pathIndex, uint32_t capacity, uint32_t bucket)
 {
@@ -2003,10 +1869,6 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
                              objectGeomNormal, uvArea2);
     }
 
-    // Every material texture sampler is repeat-addressed, but fract(rawUv) is
-    // not equivalent when KHR_texture_transform is applied afterwards. Apply
-    // the material's shared affine transform first, then retain only the
-    // periodic coordinate. Geometries without maps avoid the material read.
     if ((entry.flags & GEOM_FLAG_SURFACE_UV) != 0u)
     {
         if (SPEC_ALL_NATIVE_OPENPBR)
@@ -2124,10 +1986,6 @@ static void extendImpl(uint gid,
                        device const UniformLight* lights,
                        uint32_t directGeometryBase,
                        uint32_t directInstanceIndex,
-                       // Chosen per dispatch rather than per ray: the only thing it distinguishes
-                       // is the camera bounce from the rest, and `extend` is encoded once per
-                       // bounce anyway. Reading the path's depth here to answer the same question
-                       // would put a load in the hottest kernel in the renderer.
                        uint32_t rayMask,
                        device PathState* primaryPaths,
                        device PathRay* primaryRays,
@@ -2181,11 +2039,6 @@ static void extendImpl(uint gid,
             }
         }
         pr = rays[tid];
-        // The host excludes camera-hidden lights only on bounce zero. Camera
-        // rays therefore need no PathState load: their depth is zero and the cone
-        // code already treats depth zero as specular. Secondary iterations retain
-        // the per-path depth because transparent and medium crossings need not
-        // advance in lockstep with the host's bounce loop.
         pathFlags = primaryRay ? 0u : paths[tid].depthAndFlags;
         motionTime = motionTimeFor(uniforms, tid, sampleIdx);
     }
@@ -2194,10 +2047,6 @@ static void extendImpl(uint gid,
     auditExtendWork(uniforms, auditBounce);
 
     ray r;
-    // Match Apple's curve sample: an offset origin and a positive lower bound
-    // solve different halves of self-intersection. Round curves can still report
-    // the surface the secondary ray just left at an almost-zero t after several
-    // fibre crossings.
     r.min_distance = pathDepth(pathFlags) == 0u ? 0.0f : 1e-6f;
     r.max_distance = INFINITY;
     r.origin = float3(pr.origin);
@@ -2216,16 +2065,6 @@ static void extendImpl(uint gid,
         }
     }
 
-    // Draw a participating-medium event before traversal and use it as the
-    // ray's upper bound. The old order traced to the closest surface first and
-    // only then discovered that a sub-millimetre SSS free flight should have
-    // stopped the ray. That is equivalent statistically, but catastrophically
-    // more work in a curve-heavy scene: a single late random-walk ray could walk
-    // the entire multi-million-segment AS and hold one dispatch past the GPU
-    // watchdog. The same bound helps a fog ray in a large instanced scene.
-    //
-    // A surface at or before the sampled distance still wins below, so this is
-    // only a scheduling bound; it does not change which event the path sees.
     bool insideSss = false;
     uint32_t mediumHitBit = 0u;
     float mediumScatterT = 0.0f;
@@ -2273,13 +2112,6 @@ static void extendImpl(uint gid,
         r.max_distance = max(mediumScatterT, r.min_distance + 1e-6f);
     }
 
-    // SSS random walks only need the closed triangle boundary of their volume.
-    // Curves are fibre primitives, not volume boundaries. An instance mask was
-    // not sufficient here: the curve-capable intersector still entered Metal's
-    // pathological traversal mode for a handful of deep random-walk rays. Use
-    // a triangle-only intersector type for those lanes, so curve intersection
-    // code is absent from the operation rather than merely unable to return a
-    // candidate.
     ExtendIntersection hit;
     if (insideSss)
     {
@@ -2307,10 +2139,6 @@ static void extendImpl(uint gid,
     float surfaceDistance = hit.type == intersection_type::none ? r.max_distance : hit.distance;
     if (T::kDirect && SPEC_LIGHTS)
     {
-        // The direct primitive AS contains immutable scene triangles only. Area
-        // lights already carry their exact world-space surface in UniformLight.
-        // Host eligibility admits rectangles only, so this PSO needs neither a
-        // type switch nor any general affine solver.
         for (uint32_t lightId = 0u; lightId < uniforms.numLights; ++lightId)
         {
             device const UniformLight& light = lights[lightId];
@@ -2386,7 +2214,6 @@ static void extendImpl(uint gid,
                                shadeBucket, SPEC_PREPARE_SURFACE_GEOMETRY_IN_EXTEND && !hasSurfaceGeometry);
 }
 
-
 #define WF_EXTEND_ENTRY(NAME, TRAITS)                                                                                   \
     kernel void NAME(                                                                                                   \
         uint gid [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                                \
@@ -2452,10 +2279,6 @@ kernel void wavefrontExtendDirectStatic(uint gid [[thread_position_in_grid]],
                                       directInstanceIndex, rayMask, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
-// Camera-only static traversal. The host runs wavefrontGenerate for one lane so
-// it can initialise the shared queue counters, then this kernel creates each
-// camera path immediately before tracing it. Camera RNG and state stores die
-// before the intersector, while the identity queue and PathRay reload disappear.
 #define WF_EXTEND_PRIMARY_ENTRY(NAME, TRAITS)                                                                           \
     kernel void NAME(                                                                                                   \
         uint2 pixel [[thread_position_in_grid]], constant Uniforms& uniforms [[buffer(0)]],                             \
@@ -2522,13 +2345,6 @@ kernel void wavefrontExtendPrimaryDirectStatic(uint2 pixel [[thread_position_in_
                                             directInstanceIndex, rayMask, paths, rays, mediumPaths, radianceOut, aov);
 }
 
-// Rebuild the triangle's vertex attributes from the vertex buffer.
-//
-// intersection.primitive_data is only addressable inside the kernel that ran the
-// intersect, so `shade` cannot reach the per-primitive record `extend` saw. The
-// vertex buffer holds the same values — the skinning pass writes it, and the
-// per-primitive record is derived from it — so refetching here is equivalent and
-// keeps the hit record small.
 static void fetchTriangle(device const char* vertexBuffer,
                           device const char* prevVertexBuffer,
                           device const uint32_t* indexBuffer,
@@ -2595,31 +2411,6 @@ static void fetchTriangle(device const char* vertexBuffer,
     }
 }
 
-// Rebuild a curve hit from the segment it landed on.
-//
-// A curve intersection reports the segment and one parameter along it, and
-// nothing else -- there is no vertex to interpolate and no uv authored anywhere.
-// Everything a shading point needs comes back out of the three curve buffers:
-//
-//   tangent  the segment's own direction, which for hair is the strand's;
-//   normal   the outward radial direction at the hit, which is what makes a
-//            round curve shade as a cylinder rather than as a ribbon;
-//   uv.x     where along the strand this is, root at 0 and tip at 1.
-//
-// The radius buffer is not read here at all: the distance from the hit to the
-// axis is the radius the intersector used, so the one thing downstream does ask
-// about thickness -- where a ray that scatters through the strand comes out --
-// costs a square root of a quantity already in hand.
-//
-// uv.x is recovered from the segment index alone: strands from a particle system
-// all have the same number of segments, so `segment % segmentsPerStrand` is the
-// position within the strand and no per-point coordinate has to be stored. A set
-// with strands of differing lengths reports 0 there, which is a flat root
-// colour rather than a wrong gradient.
-//
-// The normal is derived from the hit point rather than from the parameter,
-// because the hit point is exact and the parameter is what the intersector chose
-// to report -- and at a sphere cap, where segments overlap, the two disagree.
 static void fetchCurve(device const packed_float3* curvePoints,
                        device const uint32_t* curveSegments,
                        GeometryEntry entry,
@@ -2710,12 +2501,6 @@ static inline float3 fibreExitOrigin(float3 position, float3 tangent, float3 nor
     return offset_ray(position + dir * (chord / m), normalize(normal * radius + u * chord));
 }
 
-// The same fetch, interpolated on the way out.
-//
-// Blend each vertex as it is loaded instead of retaining three complete vertex
-// records. Keeping only the accumulated attributes limits live state in
-// wavefrontShade without baking a particular threadgroup limit into this code.
-// The geometric normal and ray-cone footprint need only two position/uv edges.
 static void fetchTriangleBlended(device const char* vertexBuffer,
                                  device const char* prevVertexBuffer,
                                  device const uint32_t* indexBuffer,
@@ -2799,16 +2584,6 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
     outUvArea2 = abs(uvE1.x * uvE2.y - uvE2.x * uvE1.y);
 }
 
-// Where this hit point stood one frame ago, in world space.
-//
-// This is the whole difference between a motion vector that describes the scene
-// and one that only describes the camera. Two things can have moved a surface
-// between frames: the skinning pass rewrote its vertices, and the node holding it
-// was re-placed. Both are read from the previous frame's copies, at the same
-// barycentric coordinates, so what comes back is the same material point earlier
-// in time. Without it a temporal denoiser reprojects a moving limb onto wherever
-// that pixel used to be looking and smears the two together -- the ghosting that
-// shows up on exactly the animated content the denoiser is supposed to help with.
 static inline float3 previousWorldPosition(device const char* prevFrameVertexBuffer,
                                            device const uint32_t* indexBuffer,
                                            device const MTLIndirectAccelerationStructureInstanceDescriptor* prevInstances,
@@ -2863,16 +2638,6 @@ static inline float backgroundDepth(constant Uniforms& uniforms)
     return denoiseBackgroundDepth(uniforms.denoiseDepthMode, uniforms.projectionType);
 }
 
-// Where a point was on screen last frame, in pixels, y down. That is the sign
-// MetalFX documents: "the motion vectors for an object that moves down and to
-// the right by 10 pixels would be (-10,-10)".
-//
-// The current position is the jittered sample position, not the pixel centre.
-// The ray that produced this hit went through the jitter offset, so projecting
-// the hit through either unjittered camera lands there. Subtracting the pixel
-// centre would therefore leave this frame's jitter in every motion vector; a
-// static scene must produce zero motion because MetalFX receives the sampling
-// offset separately through jitterOffsetX/Y.
 struct ScreenMotion
 {
     float2 offset;
@@ -2901,11 +2666,6 @@ static inline ScreenMotion screenMotion(constant Uniforms& uniforms, float4 prev
     // exactly the jitter as motion, which is not a dejittered vector.
     const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX, (float)pixel.y + 0.5f + uniforms.jitterY);
     const float2 motion = prevPixel - currPixel;
-    // Nothing that moved further than the frame is across in one frame can be
-    // reprojected onto anything: past that the history lookup lands outside the
-    // image, and the value is far more likely to be a reprojection artefact than
-    // a real displacement. Clamped rather than zeroed so a genuinely fast object
-    // still drags its history in the right direction.
     const float limit = (float)(uniforms.width + uniforms.height);
     result.offset = clamp(motion, -limit, limit);
     return result;
@@ -2925,11 +2685,6 @@ static inline bool openpbrBaseMapDetailsSubsurface(thread const OpenPBRParams& p
            !openpbrHasMap(p, OPENPBR_TEX_SUBSURFACE_COLOR);
 }
 
-// MetalFX asks for albedos that approximate the diffuse and specular radiance
-// visible from this view, rather than the material's normal-incidence F0. Keep
-// the layered lobes in that approximation: otherwise a grazing dielectric or a
-// clear coat is described as almost black precisely where its highlight fills
-// the pixel.
 static inline DenoiserMaterialGuides standardDenoiserGuides(thread const SurfaceInteraction& si)
 {
     DenoiserMaterialGuides g;
@@ -3022,10 +2777,6 @@ static inline float denoiserInterfaceIor(bool isOpenPBR,
         return max(si.ior, 1.0f);
     }
 
-    // Match OpenPBR's preparation: specular_weight index-matches the base to
-    // the surrounding medium, which is a partial coat while entering and the
-    // tracked exterior otherwise. Using the authored IOR directly invents a
-    // reflection when specular_weight is zero.
     const float exterior = max(si.exterior_ior, 1e-4f);
     const bool entersCoat = entering && openpbr.coat_weight > 0.0f;
     const float surrounding = entersCoat ? mix(exterior, max(openpbr.coat_ior, 1.0f), openpbr.coat_weight) : exterior;
@@ -3058,14 +2809,6 @@ static inline float2 unpackGuideIors(uint32_t packed)
     return float2(as_type<half2>(packed));
 }
 
-// ---------------------------------------------------------------------------
-// miss -- rays that escaped the scene
-//
-// Split out of `shade` rather than branched inside it. The work is a texture
-// fetch and one MIS weight, and keeping it here means `shade` neither dispatches
-// threads for escaped rays nor carries the environment sampler in its register
-// budget.
-// ---------------------------------------------------------------------------
 kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                           constant Uniforms& uniforms [[buffer(0)]],
                           device const PathState* paths [[buffer(1)]],
@@ -3075,10 +2818,6 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                           device const uint32_t* control [[buffer(5)]],
                           device AovSample* aov [[buffer(6)]],
                           constant uint32_t& sampleIdx [[buffer(7)]],
-                          // The escape counter's other half. A path that reaches infinity while its
-                          // dielectric stack still holds something left a volume without crossing its
-                          // surface -- which is exactly what a hole in a refracting mesh does, and the
-                          // failure `shade` cannot see because no exit event ever happens.
                           device const IorStack* iorStacks [[buffer(8)]],
                           device atomic_uint* iorStats [[buffer(9)]],
                           device SharcUpdateState* sharcUpdates [[buffer(10)]],
@@ -3188,12 +2927,6 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
     if (SPEC_ENV_MAP && uniforms.hasEnvMap)
     {
         auditWork(uniforms, WORK_ENVIRONMENT_EVALUATIONS);
-        // repeat in u, clamp in v. The map wraps in azimuth and does not wrap in
-        // polar angle: with repeat on both axes the bilinear tap in the first row
-        // blends the zenith with the last row, which is the nadir. OptiX has always
-        // clamped v (cudaAddressModeClamp on axis 1); this backend wrapped it, so the
-        // two disagreed on the one row where an equirectangular map has a seam that
-        // is not a seam.
         constexpr sampler envSampler(
             mag_filter::linear, min_filter::linear, s_address::repeat, t_address::clamp_to_edge, coord::normalized);
         const float2 envUV = metalDirToEnvUv(rayDir, uniforms.envMapRotationSinCos);
@@ -3202,11 +2935,6 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
 
         if (depth == 0u || specularBounce || !neeDone)
         {
-            // A ray still at depth 0 has scattered off nothing -- it may have
-            // passed through cutout foliage, which Cycles also counts as a
-            // camera ray -- so this is exactly where the backdrop belongs, and
-            // the MIS branch below is left reading the lighting environment
-            // because that is the one that was importance sampled.
             if (uniforms.hasEnvBackground && depth == 0u)
             {
                 envColor = envBackgroundTexture.sample(envSampler, envUV).xyz * uniforms.envBackgroundIntensity *
@@ -3224,11 +2952,6 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
                     uniforms.envMapColorTint.w :
                     1.0f;
             const float effectiveEnvPdf = envPdf * envSelectionPdf;
-            // A texel of zero luminance has zero sampling density, so light
-            // sampling could never have produced this direction and the BSDF
-            // strategy owns it outright. Dropping the contribution instead --
-            // which the guard used to do -- loses energy exactly along the edges
-            // of dark regions, where the bilinear radiance is still non-zero.
             const float mis =
                 effectiveEnvPdf > 0.0f ? computeMisWeight(p.lastBsdfPdf, effectiveEnvPdf, uniforms.misHeuristic) : 1.0f;
             radiance += throughput * envColor * mis;
@@ -3241,10 +2964,6 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         sharcEnvironment = uniforms.missColor;
     }
 
-    // Finite distant lights and domes are emitters at infinity. NEE samples
-    // them in shade; the complementary BSDF strategy reaches them here. Use the
-    // exact same selected-light density and cap support as connectToLight(). A
-    // sharp distant is a delta and deliberately has no continuous miss term.
     if (SPEC_LIGHTS)
     {
         const float localSelectionPdf = (SPEC_ENV_MAP && uniforms.hasEnvMap) ? (1.0f - uniforms.envMapColorTint.w) : 1.0f;
@@ -3263,10 +2982,6 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
             const float3 axis = -float3(light.normal);
             if (light.type == LIGHT_TYPE_DISTANT && distantLightIsDelta(light.halfAngle))
             {
-                // This is a discrete path-space event: only a preceding BSDF
-                // atom can meet the represented light atom, and no continuous
-                // MIS density participates. Exact equality avoids widening the
-                // sharp distant into an artificial finite cone.
                 if (distantLightDeltaPathMatches(depth, specularBounce, rayDir, axis))
                 {
                     const float3 infiniteRadiance = float3(light.color);
@@ -3687,11 +3402,6 @@ static inline LightConnection unpackBaseLightConnection(device const BaseLightCo
     return connection;
 }
 
-// Diagnostic thread-local connection representation. Radiance and density
-// retain float precision; unit directions and the endpoint offsets relative to
-// the already-live surface position use half. Probe 10 consumes this value
-// directly, so comparing it with probe 5 measures compact state rather than
-// recreating the full float connection at the observation point.
 struct PackedLightConnectionProbe
 {
     packed_float3 radiance;
@@ -3724,10 +3434,6 @@ static inline PackedLightConnectionProbe packLightConnectionProbe(thread const L
     return payload;
 }
 
-// Probe 11 stops immediately after the Base NEE eval, but keeps every field
-// needed by the later BSDF sample observable. Unlike probe 7, this prevents DCE
-// from deleting sample-only lifetime at the phase boundary without executing
-// openpbr_bsdf_sample() itself.
 static inline float baseSampleStateChecksum(thread const OpenPBR_BasePreparedBsdf& prepared)
 {
     const thread OpenPBR_BaseMicrofacetDistribution& distribution = prepared.specular_lobe.microfacet_distr;
@@ -3847,10 +3553,6 @@ static inline void wavefrontShadeImpl(uint gid,
     constexpr bool kShadeLayer = ShadeBucket == WF_SHADE_LAYER;
     constexpr bool kShadeTranslucent = ShadeBucket == WF_SHADE_TRANSLUCENT;
     constexpr bool kShadeTail = ShadeBucket == WF_SHADE_TAIL;
-    // Extend sends fog events, SSS scattering events and analytic-light hits
-    // directly to bucket 3. Keeping their large, mutually exclusive call
-    // graphs reachable from the three material-only kernels inflated every
-    // surface PSO even though no lane in those dispatches can take them.
     constexpr bool kHandlesSpecialHits = kShadeTail || ShadeBucket == WF_SHADE_GENERIC;
     gid += kShadeTail ? control[WF_CTRL_SHADE_TAIL_START] :
                         (kShadeTranslucent ? control[WF_CTRL_SHADE_TRANSLUCENT_START] :
@@ -3902,10 +3604,6 @@ static inline void wavefrontShadeImpl(uint gid,
     const float3 rayDir = float3(pr.direction);
     float3 throughput = float3(p.throughput);
     const float3 throughputAtStageEntry = throughput;
-    // The throughput `extend` drew this segment's medium channel from. The
-    // nested-dielectric attenuation below moves `throughput` on, and weighting a
-    // free flight by a density other than the one it was sampled from is how an
-    // unbiased estimator stops being one.
     const float3 sampledThroughput = throughput;
 
     float3 radiance = float3(0.0f);
@@ -3934,12 +3632,6 @@ static inline void wavefrontShadeImpl(uint gid,
         }
     }
 
-    // --- Atmospheric scattering ---------------------------------------------
-    //
-    // Handled before anything to do with surfaces: the ray never reached one.
-    // Free-flight sampling was analog, so the only weight is the single-
-    // scattering albedo -- the fraction of an extinction event that scatters
-    // rather than absorbs.
     if (kHandlesSpecialHits && SPEC_FOG && (rec.geomEntryIndex & HIT_FOG_BIT) != 0u)
     {
         SamplerState rng = samplerFor(uniforms, tid, sampleIdx, depth);
@@ -3962,11 +3654,6 @@ static inline void wavefrontShadeImpl(uint gid,
         si.geometry_normal = -rayDir;
         si.front_face = true;
 
-        // Decided by what this vertex had available, never by what the draw
-        // produced -- see volumeNeePairsWithBounce(). Setting it from the
-        // outcome hands the bounce ray the whole contribution on exactly the
-        // draws where the connection failed, and the two strategies stop
-        // summing to one.
         const bool didNee = volumeNeePairsWithBounce(
             uniforms.estimatorMode == 0,
             (SPEC_LIGHTS && (uniforms.numLights > 0 || (SPEC_EMISSIVE_MESH_LIGHTS && uniforms.numEmissiveMeshes > 0))) ||
@@ -4063,10 +3750,6 @@ static inline void wavefrontShadeImpl(uint gid,
         return;
     }
 
-    // --- Subsurface random walk ---------------------------------------------
-    //
-    // Dense random walks skip NEE; bounded media connect at the scatter vertex.
-    // Surface NEE handles light entering and leaving the material.
     if (kHandlesSpecialHits && SPEC_SSS && (rec.geomEntryIndex & HIT_SSS_BIT) != 0u)
     {
         const uint32_t medium = mediumState.medium & MEDIUM_INDEX_MASK;
@@ -4097,10 +3780,6 @@ static inline void wavefrontShadeImpl(uint gid,
         SamplerState wrng = samplerFor(uniforms, tid, sampleIdx, depth);
         wrng.depth = depth + step;
 
-        // A bounded volume is the one kind of medium worth connecting to a light
-        // from: it is thin, it is lit from outside, and the shafts and the glow
-        // are single scattering. A subsurface walk gets neither -- its boundary
-        // occludes almost every shadow ray it would spawn.
         const bool isBounded = isBoundedMedium;
         // As in the fog path: available, not delivered.
         const bool didNeeVolume =
@@ -4111,14 +3790,6 @@ static inline void wavefrontShadeImpl(uint gid,
                                          (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (isBounded)
         {
-            // Volumetric emission: what makes the bath water glow rather than
-            // merely tint what is behind it.
-            //
-            // Clamped like every other contribution. Emission reached through a
-            // glass or specular chain arrives with a throughput well above one,
-            // and adding that unclamped put fireflies over the entire frame --
-            // including the backdrop outside the room, which is what made it
-            // obvious the term and not the medium was at fault.
             radiance += clampIndirectContribution(throughput * float3(mm.medium_emission), depth, uniforms.clampIndirect);
 
             if (didNeeVolume)
@@ -4290,10 +3961,6 @@ static inline void wavefrontShadeImpl(uint gid,
         {
             aov[tid].specularHitDistance += rec.distance;
         }
-        // An emitter is a surface with a grid address like any other, so the
-        // single-hit diagnostics answer here as well. Left to the branch below,
-        // its emission -- orders of magnitude above any debug colour -- would
-        // simply take the pixel.
         if (!SPEC_SHARC_UPDATE && depth == 0u)
         {
             if (SPEC_DEBUG && (DebugMode)uniforms.debug == DebugMode::eSharcGrid)
@@ -4379,11 +4046,6 @@ static inline void wavefrontShadeImpl(uint gid,
     {
         const float4x4 objectToWorld =
             geometryObjectToWorld(uniforms, instances, rec.instanceIndex, rec.geomEntryIndex, entry);
-        // Built in world space rather than fetched in object space and
-        // transformed out, because the radial normal is taken *from the hit
-        // point* -- and the hit point only exists in world space. Coming back the
-        // other way would need the transform's inverse, which MSL does not
-        // provide and which nothing else in this kernel wants.
         fetchCurve(curvePoints, curveSegments, entry, rec.primitiveId, bary.x, worldPosition, objectToWorld,
                    shadingNormal, shadingTangent, uv, curveRadius);
         // A strand has no separate geometric normal: the surface *is* the
@@ -4394,10 +4056,6 @@ static inline void wavefrontShadeImpl(uint gid,
     else
     {
         const SurfaceGeometryPayload preparedGeometry = uniforms.surfaceGeometry[tid];
-        // Regular extend routes every triangle without a valid compact payload
-        // to Tail. Consequently Base/Layer/Translucent can compile without the
-        // vertex-fetch fallback and its peak live range; Tail retains the exact
-        // path for fused SSS exits, curves and degenerate transforms.
         if (!kHandlesSpecialHits || (preparedGeometry.tangentAndFlags & SURFACE_GEOMETRY_VALID) != 0u)
         {
             shadingNormal = unpackSurfaceNormal(preparedGeometry.shadingNormal);
@@ -4411,10 +4069,6 @@ static inline void wavefrontShadeImpl(uint gid,
         }
         else
         {
-            // Fused SSS exits are traced in a separate kernel which deliberately
-            // stays free of geometry reconstruction. Retain the exact old path
-            // in Tail for those uncommon records and for a degenerate triangle
-            // rejected by extend.
             float uvArea2 = 0.0f;
             fetchTriangleBlended(vertexBuffer, prevVertexBuffer, indexBuffer, entry, rec.primitiveId, interpolateMotion,
                                  motionTime, bary, objectNormal, objectTangent, uv, vertexColor, tangentSign,
@@ -4454,23 +4108,8 @@ static inline void wavefrontShadeImpl(uint gid,
 
     const float3 geomNormal = shadingGeomNormal;
 
-    // --- Crossing the boundary of a participating medium --------------------
-    //
-    // The gizmo of a bounded fog volume is not a surface: it is where the medium
-    // starts and stops. A ray through it toggles which medium it is in and
-    // carries on with the same direction and throughput -- unshaded, and without
-    // spending a bounce, because a volume the light passes through twice would
-    // otherwise cost two of them.
     if (kHandlesSpecialHits && SPEC_SSS && (materials[entry.materialId].medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
     {
-        // The segment just travelled was attenuated at the top of this kernel,
-        // which is the only place that sees all four kinds of vertex.
-        //
-        // Bounded by the same counter the cutout pass-through uses, and for the
-        // same reason: neither advances `depth`, so neither has a natural end. A
-        // boundary the ray re-hits through a self-intersection would otherwise
-        // toggle the medium forever, and the path would stay in the queue burning
-        // samples rather than stopping.
         const uint32_t passes = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
         if (passes >= PATH_PASSTHROUGH_MAX)
         {
@@ -4480,16 +4119,6 @@ static inline void wavefrontShadeImpl(uint gid,
         p.depthAndFlags = (p.depthAndFlags & ~PATH_PASSTHROUGH_MASK) |
                           (((passes + 1u) << PATH_PASSTHROUGH_SHIFT) & PATH_PASSTHROUGH_MASK);
 
-        // Toggle, rather than deciding from the normal.
-        //
-        // A gizmo's winding is arbitrary: V-Ray decides inside from an
-        // inside/outside test and never looks at the normal, so a box exported
-        // from it may be wound either way. Reading `entering` off
-        // dot(rayDir, geomNormal) therefore inverted one of the two volumes in
-        // this scene -- and an inverted volume is not a subtle error, it is a
-        // medium that fills all of space except the gizmo. Every path in the
-        // frame then scattered in open air, which is what the speckle over the
-        // backdrop and the haze through the window were.
         const uint32_t here = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
         const bool leaving = (mediumState.medium & MEDIUM_INDEX_MASK) == here;
         mediumState.medium = leaving ? 0u : here;
@@ -4503,10 +4132,6 @@ static inline void wavefrontShadeImpl(uint gid,
         nextRay.direction = packed_float3(rayDir);
         rays[tid] = nextRay;
 
-        // The MIS distance has to keep counting: as far as the light at the end
-        // of this ray is concerned, the scattering vertex is still the one before
-        // the boundary, and resetting it here would inflate the weight the same
-        // way a cutout pass-through would.
         p.misDistance += rec.distance;
         radianceOut[tid] += float4(radiance, 0.0f);
         if (SPEC_SHARC_UPDATE)
@@ -4523,18 +4148,6 @@ static inline void wavefrontShadeImpl(uint gid,
         return;
     }
 
-    // --- Leaving a subsurface medium ----------------------------------------
-    //
-    // The walk reached the boundary. Everything below -- the material, the BSDF,
-    // the cutout test -- describes what happens to a ray arriving from outside,
-    // and none of it applies to one on its way out, so the exit is handled here
-    // and the rest is skipped.
-    //
-    // Whatever surface the walk hit is treated as the boundary, not only the
-    // object it entered. For the closed shapes this serves that is the same
-    // surface; for geometry that interpenetrates it is a simplification, and the
-    // alternative is carrying the entry instance and rejecting hits on anything
-    // else -- which turns an open mesh into a light leak instead.
     if (kHandlesSpecialHits && SPEC_SSS && (mediumState.medium & MEDIUM_INDEX_MASK) != 0u &&
         (materials[(mediumState.medium & MEDIUM_INDEX_MASK) - 1u].medium_flags & MEDIUM_FLAG_BOUNDARY) == 0u)
     {
@@ -4602,12 +4215,6 @@ static inline void wavefrontShadeImpl(uint gid,
                         sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
                         sr.maxDistance = visibility.maxDistance;
                         sr.pixelIndex = tid;
-                        // Outside the medium: this vertex is the walk leaving it,
-                        // and the ray starts on the far side of the boundary.
-                        // Carrying the walk's medium here attenuated the whole
-                        // distance to the light by a dense extinction that nothing
-                        // ever cancelled -- the connection is what lights a
-                        // translucent object, and it was arriving at zero.
                         sr.medium = 0u;
                         sr.sharcRadiance = packed_float3(
                             SPEC_SHARC_UPDATE ? (conn.radiance / conn.pdf) * misWeight * M_1_PI_F : float3(0.0f));
@@ -4681,10 +4288,6 @@ static inline void wavefrontShadeImpl(uint gid,
     SurfaceInteraction si;
     if (nativeOpenPBR)
     {
-        // The all-native function-constant variant compiles the generic
-        // Material path out completely. Mixed scenes retain this per-material
-        // gate so authored OpenPBR still avoids it without changing converted
-        // glTF texture semantics.
         initSurfaceGeometry(si, worldPosition, worldNormal, geomNormal, worldTangent, worldBinormal, uv, rayDir);
         initOpenPBRSurfaceMaterial(si, uniforms.openpbrParams[entry.materialId], vertexColor);
     }
@@ -4694,10 +4297,6 @@ static inline void wavefrontShadeImpl(uint gid,
                                rayDir, vertexColor, lodBase, uvPretransformed);
     }
 
-    // A strand shaded by the whole-fibre lobe: light crosses it in one event, so
-    // neither the hemisphere tests nor the ray offsets below apply. Gated on the
-    // geometry as well as the material because the chord needs a radius, and only
-    // a curve hit has one.
     const bool fibreMaterial = !isOpenPBR && scattersThroughFibre(si);
     const bool isFibre = isCurve && fibreMaterial;
 
@@ -4706,37 +4305,11 @@ static inline void wavefrontShadeImpl(uint gid,
     // the fog and volume exits construct their own branch-local sampler state.
     SamplerState rng = samplerForFixedDepth(uniforms, tid, sampleIdx, depth);
 
-    // Coverage. A MASK surface resolves to 0 or 1 and a BLEND one to its alpha,
-    // so one stochastic test covers both: with probability (1 - opacity) the
-    // path continues straight through, unchanged and unshaded.
-    //
-    // Bounces through transparent geometry deliberately do NOT advance `depth`.
-    // A hedge of cutout leaves would otherwise exhaust maxDepth before any of
-    // its light transport happened. They are bounded by their own counter in the
-    // high bits of depthAndFlags, which PATH_DEPTH_MASK (0xFF) and the flags at
-    // bits 8..11 leave free.
-    //
-    // Extend deliberately forces triangle opacity during traversal, so surface
-    // coverage is resolved exactly once here. The payload-free IFT experiment
-    // applies only to deferred shadow visibility.
     if (si.opacity < 1.0f)
     {
         const uint32_t layer = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
         SamplerState orng = rng;
         float u = random<SampleDimension::eOpacity>(orng, uniforms.samplerType);
-        // Rotated by which layer of cutout this is.
-        //
-        // Passing through deliberately does not advance `depth`, so the sampler
-        // is rebuilt in the same state at every layer and hands back the same
-        // number. Two leaves with the same alpha then make the same decision: a
-        // ray that slipped through the first slips through the second as well,
-        // and a canopy that should pass (1-a)^2 of what reaches it passes (1-a).
-        // In a pine forest that is most of the geometry.
-        //
-        // A rotation rather than a fresh hash, because each layer on its own
-        // stays stratified across samples -- white noise here is what turned a
-        // blended plane into salt and pepper when this test first moved into
-        // traversal.
         if (layer != 0u)
         {
             uint32_t r = sharcHash(layer * 2654435761u + tid * 2246822519u);
@@ -4775,10 +4348,6 @@ static inline void wavefrontShadeImpl(uint gid,
         }
     }
 
-    // Resolve the full OpenPBR block only after the early fibre/coverage exits.
-    // The native initializer above reads its four required groups directly from
-    // device memory, so this large thread value starts at the same point as it
-    // did before the native fast path and does not inflate the early live state.
     OpenPBR_BaseParams openpbrBaseMat;
     OpenPBRParams openpbrMat;
     if (isOpenPBR)
@@ -4807,10 +4376,6 @@ static inline void wavefrontShadeImpl(uint gid,
     const DebugMode debugMode = (DebugMode)uniforms.debug;
     if (!SPEC_SHARC_UPDATE && SPEC_DEBUG && debugMode == DebugMode::eSharcGrid && depth == 0u)
     {
-        // NVIDIA's hash-grid view is evaluated at the primary world-space hit.
-        // It visualizes addressing, not cache contents, and therefore works
-        // whether the SHaRC resources are enabled or not. Assigned, not added:
-        // a diagnostic answers for the pixel instead of tinting the render.
         radianceOut[tid] = float4(sharcDebugColoredHash(uniforms, si.position, si.geometry_normal), 0.0f);
         return;
     }
@@ -4871,11 +4436,6 @@ static inline void wavefrontShadeImpl(uint gid,
 
     const float3 surfaceEmission = float3(si.emission);
 
-    // The radiance path owns the primary guides. A mirror or pane of glass may
-    // still need the material behind it, and a glossy primary needs a reflected
-    // hit distance, but those are geometric continuations rather than another
-    // light path. Store one compact ray for the guide kernel instead of tracing
-    // a second camera sample through every lighting and shadow stage.
     constexpr float kGuideRoughnessFloor = 0.05f;
     const bool writingAov = shouldWriteAov(uniforms, sampleIdx);
     if (writingAov && depth == 0u)
@@ -5032,14 +4592,6 @@ static inline void wavefrontShadeImpl(uint gid,
 
     if (SPEC_SHARC_UPDATE && uniforms.sharcCapacity != 0u)
     {
-        // The upstream contract hands SharcUpdateHit this vertex's direct
-        // lighting. A wavefront tracer does not have it yet: the connection is a
-        // shadow ray that the next stage resolves, so `shadow` deposits it into
-        // this same vertex -- state.cacheIndices[0], weight 1/demodulation --
-        // and into the vertices behind it, which is exactly the pair of writes
-        // SharcUpdateHit would have made. The direction weight is deferred for
-        // the same reason: it is a property of the lobe the BSDF has not been
-        // sampled from yet, and sharcSetRadianceDirectionWeight sets it below.
         const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
         SharcUpdateState updateState = sharcUpdates[updateIndex];
         sharcMultiplyPendingThroughput(updateState, throughput / max(throughputAtStageEntry, float3(1e-6f)));
@@ -5057,10 +4609,6 @@ static inline void wavefrontShadeImpl(uint gid,
     }
     else if (SPEC_SHARC && uniforms.sharcCapacity != 0u)
     {
-        // The cache diagnostics answer for the surface the camera sees, replace
-        // the pixel outright, and end the path -- the same contract the upstream
-        // sample's debug branch has. Everything they need is a query, so they run
-        // ahead of the eligibility gates that the render path is bound by.
         if (SPEC_DEBUG && (DebugMode)uniforms.debug == DebugMode::eSharcRadiance && depth == 0u)
         {
             radianceOut[tid] = float4(sharcDebugRadiance(uniforms, sharcHashEntries, sharcResolved, si.position,
@@ -5078,11 +4626,6 @@ static inline void wavefrontShadeImpl(uint gid,
         if (depth >= uniforms.sharcDepth)
         {
             const SharcAddress address = sharcAddress(uniforms, si.position, si.geometry_normal, false);
-            // Both gates are the upstream ones. A segment shorter than a voxel
-            // diagonal would read the cell it is standing in, and a scattering
-            // lobe whose footprint is finer than a voxel resolves detail the cell
-            // cannot hold -- a mirror being the limiting case, with no footprint
-            // at any distance.
             const float roughness = min(max(unpackSharcRoughness(p.depthAndFlags), 0.0f), 0.99f);
             const float alpha = roughness * roughness;
             const float alpha2 = alpha * alpha;
@@ -5149,31 +4692,6 @@ static inline void wavefrontShadeImpl(uint gid,
         return;
     }
 
-    // Next-event estimation first, and decided by the material rather than by the
-    // bounce.
-    //
-    // It used to run after bsdf_sample() and be gated on the event that came
-    // back, which made the light half of the estimate depend on a draw belonging
-    // to the other half. Two things were lost that way: the whole vertex
-    // whenever the sample came back BSDF_EVENT_ABSORB (a microfacet draw that
-    // landed below the horizon is not a material that absorbs), and the smooth
-    // lobe's direct light on every draw the delta lobe won -- over half the
-    // draws on a clearcoat with glTF's default coat roughness of 0. See
-    // neeRunsAtVertex() and bsdf_has_smooth_lobe().
-    //
-    // Moving it costs nothing in sample values: every random<Dim>() here is a
-    // pure function of (sampleIdx, dimension, seed, depth), so the order the
-    // dimensions are drawn in does not change any of them.
-    // OpenPBR, prepared once for this vertex.
-    //
-    // Once, because openpbr_prepare() builds the entire layered lobe stack and
-    // both halves of the estimate run here -- eval for the light connection just
-    // below, sample for the next segment further down. Preparing inside each
-    // would do that work twice at every vertex.
-    //
-    // Placed after si is finished with rather than beside initSurfaceInteraction:
-    // the nested-dielectric exterior IOR is resolved above, and prepare() reads
-    // it. SHARC eligibility never mutates these shading parameters.
     const bool smoothLobe =
         isOpenPBR ? (kShadeBase ? openpbr_has_smooth_lobe(openpbrBaseMat) : openpbr_has_smooth_lobe(openpbrMat)) :
                     bsdf_has_smooth_lobe(si);
@@ -5291,10 +4809,6 @@ static inline void wavefrontShadeImpl(uint gid,
             LightConnectionEvaluation candidate;
             if (SPEC_SHADE_PROBE == 8u)
             {
-                // Proposal + deferred-shadow payload, with BSDF prepare/eval
-                // removed. Preserve connection-dependent values so this still
-                // measures everything that must cross connectToLight before a
-                // shadow record can be emitted.
                 candidate.integrand = conn.radiance * conn.pdf;
                 candidate.target = conn.needsRay && conn.pdf > 0.0f ? max(luminance(candidate.integrand), 1.0e-6f) : 0.0f;
             }
@@ -5331,10 +4845,6 @@ static inline void wavefrontShadeImpl(uint gid,
                 const float3 weight = throughput * candidate.integrand * W;
                 if (SPEC_SHADE_PROBE == 9u)
                 {
-                    // Diagnostic upper bound: treat every selected connection
-                    // as unoccluded and resolve it in shade. This intentionally
-                    // changes the image, but removes both the deferred payload
-                    // and the complete shadow dispatch from the experiment.
                     radiance += clampIndirectContribution(weight, depth, uniforms.clampIndirect);
                 }
                 else
@@ -5415,10 +4925,6 @@ static inline void wavefrontShadeImpl(uint gid,
 #pragma clang loop unroll(disable)
             for (uint32_t i = 0; i < candidates; ++i)
             {
-                // Candidates differ by their scramble, not by their dimension: each
-                // one stays a stratified sequence across samples, and the first is
-                // the sequence this code drew before RIS existed, so a single
-                // candidate reproduces the old image exactly.
                 SamplerState crng = rng;
                 if (i != 0u)
                 {
@@ -5450,10 +4956,6 @@ static inline void wavefrontShadeImpl(uint gid,
                 const float w = candidate.target / conn.pdf;
                 if (singleCandidateNee)
                 {
-                    // With one proposal reservoir selection is deterministic and
-                    // normalization reduces to (target / pdf) / target. Keep that
-                    // operation order for bit-identical output, but skip the extra
-                    // RNG, reservoir update, and reservoir state traffic.
                     bestConn = conn;
                     bestF = candidate.integrand;
                     singleCandidateW = w / candidate.target;
@@ -5859,33 +5361,18 @@ static inline void wavefrontShadeImpl(uint gid,
         return;
     }
 
-    // Direct lighting at this vertex is complete. A terminal path has no next
-    // segment, so drawing and evaluating the full layered BSDF cannot affect
-    // the image. SHARC update still needs the sampled lobe to record its
-    // radiance-direction weight.
     if (!SPEC_SHARC_UPDATE && depth + 1u >= uniforms.maxDepth)
     {
         radianceOut[tid] += float4(radiance, 0.0f);
         return;
     }
 
-    // Base has no post-sample surface contribution: NEE has already emitted
-    // its shadow ray and the only local radiance is emission/cache lookup from
-    // this vertex. Commit it before the large OpenPBR sample so three radiance
-    // registers do not span the sampler's peak live range. Later Base exits add
-    // zero; the other buckets retain the original ordering because their
-    // transmission/SSS continuation still shares the generic tail below.
     if (kShadeBase)
     {
         radianceOut[tid] += float4(radiance, 0.0f);
         radiance = float3(0.0f);
     }
 
-    // Only this compact continuation state has to cross the Base sampler. The
-    // hit position is reconstructed from PathRay/HitRecord afterwards, and the
-    // path flags are reloaded after AOV handling has had a chance to update
-    // them. Half normals retain substantially more precision than the packed
-    // queue representation while occupying half the live register lanes.
     half3 baseContinuationShadingNormal = half3(0.0h);
     half3 baseContinuationGeometryNormal = half3(0.0h);
     half baseContinuationRoughness = half(0.0h);
@@ -5938,11 +5425,6 @@ static inline void wavefrontShadeImpl(uint gid,
 
     if (kShadeBase)
     {
-        // Base is opaque and cannot enter SSS or mutate the IOR stack. Keep its
-        // continuation out of the generic transmission tail: besides deleting
-        // unreachable code, this creates a hard lifetime boundary after the
-        // large OpenPBR sample. Cheap streamed state is reloaded here instead
-        // of occupying registers across openpbr_bsdf_sample().
         const PathRay continuationRay = rays[tid];
         const HitRecord continuationHit = *wavefrontHitRecord(hits, tid);
         const float3 continuationRayOrigin = float3(continuationRay.origin);
@@ -6021,24 +5503,10 @@ static inline void wavefrontShadeImpl(uint gid,
     // --- Next segment -------------------------------------------------------
     const float3 faceNg = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
     float3 nextOrigin;
-    // Bucket construction guarantees that native OpenPBR Base and Layer have
-    // neither transmission nor subsurface. Make that fact visible here: the
-    // generic continuation below carries IOR-stack, medium and SSS-entry state
-    // which cannot be reached by either specialised PSO.
     const bool openpbrOpaqueBucket = isOpenPBR && (kShadeBase || kShadeLayer);
-    // Colour the diffuse-transmission lobe applied on the way into a subsurface
-    // medium, divided back out below. The walk supplies the colour itself, once
-    // per scattering event, so leaving the lobe's copy in charges the first event
-    // twice: a sphere came out at albedo x its correct reflectance, which for a
-    // deep-red medium is a third of the light it should return. Cycles divides
-    // the same factor out for the same reason.
     float3 sssEntryTint = float3(1.0f);
     // Use the refracted entry direction instead of the lobe's cosine draw.
     bool sssRefractedEntry = false;
-    // A fibre's transmission lobes do not put the path inside anything: the strand
-    // is crossed within the one event, so there is no medium to enter and no entry
-    // to match with an exit. Pushing the IOR stack here left every transmitted hair
-    // path one level deeper than it came in, and a groom is thousands of hairs deep.
     if (openpbrOpaqueBucket)
     {
         nextOrigin = offset_ray(si.position, faceNg);
@@ -6054,11 +5522,6 @@ static inline void wavefrontShadeImpl(uint gid,
         const bool startsSubsurfaceWalk = SPEC_SSS && entersMedium && entryEvent != 0u;
         const bool diffuseTransmission = (sampleResult.event_type & BSDF_EVENT_DIFFUSE_TRANSMISSION) != 0u;
 
-        // A thin-walled surface has no interior, so crossing it does not put the
-        // path inside anything. Pushing the stack anyway left a ray that had gone
-        // through the front of a bubble believing it was inside glass, so the far
-        // side was an exit from a dense medium -- and every grazing angle there is
-        // past the critical angle.
         if (!si.thin_walled && !startsSubsurfaceWalk && !diffuseTransmission && !fibreMaterial)
         {
             IorStack iorStack;
@@ -6105,12 +5568,6 @@ static inline void wavefrontShadeImpl(uint gid,
         {
             mediumState.medium = (entry.materialId + 1u) & MEDIUM_INDEX_MASK;
 
-            // The walk's albedo, resolved here because this is the last place a
-            // texture exists: inside the medium there is no surface to sample.
-            // Scaled by how far this point's albedo departs from the one the
-            // material's scatter colour was derived from, so a flat material
-            // takes the ratio 1 and is unchanged, and marble carries its veining
-            // in.
             float3 walkAlbedo;
             if (isOpenPBR)
             {
@@ -6126,22 +5583,7 @@ static inline void wavefrontShadeImpl(uint gid,
                 }
             }
             mediumState.mediumAlbedo = packMediumAlbedo(saturate(walkAlbedo));
-            // This is the only common surface-shading branch that changes the
-            // side record. Leave every other surface bounce read-only so an
-            // SSS-capable scene does not turn eight cold bytes into an
-            // unconditional write on every live path.
             mediumPaths[tid] = mediumState;
-            // Only the glTF path divides by an entry tint. Its
-            // diffuse-transmission lobe already carries the scatter colour in
-            // bsdf_over_pdf, and the walk applies that colour again through the
-            // medium's albedo, so one of the two has to come back out.
-            //
-            // OpenPBR does not double it: Adobe's subsurface lobe weight and the
-            // single-scattering albedo its volume derives are already the split.
-            // Dividing here would use si.diffuse_transmission_color, a glTF
-            // field no OpenPBR material fills -- clamped to 1e-4, that is not a
-            // small darkening but a factor of ten thousand, which is what the
-            // fireflies around the chess kings were.
             if (!isOpenPBR)
             {
                 sssEntryTint = max(float3(si.diffuse_transmission_color), float3(1e-4f));
@@ -6167,13 +5609,6 @@ static inline void wavefrontShadeImpl(uint gid,
                                              entryRandom.x, entryRandom.y);
     }
 
-    // A refracted entry that came back out on the viewer's side of the geometric
-    // normal never entered anything, and the walk it would start is a walk
-    // through the outside of the object. Cycles gives up on the bounce for the
-    // same test -- `dot(sd->Ng, wo) >= 0.0f` in subsurface_bounce() -- and the
-    // draws this rejects are the grazing ones, which is where the microfacet
-    // normal can tilt far enough to refract along the surface rather than into
-    // it. Keeping them lit a rim on every sphere that no reference has.
     if (sssRefractedEntry && dot(faceNg, nextDir) >= 0.0f)
     {
         radianceOut[tid] += float4(radiance, 0.0f);
@@ -6188,14 +5623,6 @@ static inline void wavefrontShadeImpl(uint gid,
         nextOrigin = fibreExitOrigin(si.position, si.tangent, si.shading_normal, curveRadius, nextDir);
     }
     float3 segmentThroughput = float3(sampleResult.bsdf_over_pdf) / sssEntryTint;
-    // SHaRC treats every path segment independently: the cache stores radiance
-    // per vertex and carries the connecting throughput itself, through
-    // sharcSetThroughput. Leaving the path throughput accumulating on top of
-    // that weights each deposit twice, and -- because Russian roulette then
-    // divides by the whole path's throughput rather than this segment's -- puts
-    // compensation factors of thousands into cells that see a handful of samples
-    // a frame. That is the difference between a cache that converges and one
-    // whose fireflies feed back through cache resampling.
     float3 nextThroughput = SPEC_SHARC_UPDATE ? segmentThroughput : throughput * segmentThroughput;
 
     // Record exactly the support NEE offered in the same shaded frame. A raw
@@ -6215,10 +5642,6 @@ static inline void wavefrontShadeImpl(uint gid,
         float rr;
         if (kShadeBase)
         {
-            // random() is stateless in (pixel, sample, depth, dimension), so
-            // rebuilding here returns the identical roulette value. It also
-            // lets the five-register sampler used by NEE/BSDF die before
-            // openpbr_bsdf_sample instead of keeping it alive for this late use.
             SamplerState rrng = samplerFor(uniforms, tid, sampleIdx, depth);
             rr = random<SampleDimension::eRussianRoulette>(rrng, uniforms.samplerType);
         }
@@ -6262,10 +5685,6 @@ static inline void wavefrontShadeImpl(uint gid,
     p.throughput = packed_float3(SPEC_SHARC_UPDATE ? float3(1.0f) : nextThroughput);
     p.lastBsdfPdf = nextSpecular ? 1.0f : sampleResult.pdf;
     p.misDistance = 0.0f;
-    // AOV_DONE is carried, not rebuilt: it records something that already
-    // happened to this path, unlike the others, which describe the bounce being
-    // set up. Dropping it let every escaping ray overwrite guides that a surface
-    // had already written, which is most of the frame in an open scene.
     const float previousSharcRoughness = unpackSharcRoughness(p.depthAndFlags);
     const float sharcRoughness = min(
         previousSharcRoughness + (((sampleResult.event_type & BSDF_EVENT_DIFFUSE) != 0) ? 1.0f : si.roughness), 1.0f);
@@ -7110,17 +6529,6 @@ WF_GUIDE_ENTRY(wavefrontGuideStatic, StaticTraversal)
 WF_GUIDE_ENTRY(wavefrontGuideCurve, CurveMotionTraversal)
 WF_GUIDE_ENTRY(wavefrontGuideStaticCurve, CurveStaticTraversal)
 
-// ---------------------------------------------------------------------------
-// prepare -- turn the live path count into an indirect dispatch
-//
-// The count only exists on the GPU. Reading it back to size the next dispatch on
-// the CPU would put a round trip in the middle of every bounce, which costs far
-// more than the empty threadgroups an indirect dispatch occasionally launches.
-// ---------------------------------------------------------------------------
-// A timestamp query is surprisingly invasive on Metal 4: precise timestamps
-// may split a compute pass internally, and hundreds of them made a healthy long
-// frame trip the GPU watchdog. This one-word breadcrumb identifies the stage
-// that was entered without using the counter-sampling path at all.
 kernel void wavefrontStageBreadcrumb(device atomic_uint* stage [[buffer(0)]], constant uint32_t& stageIndex [[buffer(1)]])
 {
     atomic_store_explicit(stage, stageIndex, memory_order_relaxed);
@@ -7176,10 +6584,6 @@ kernel void wavefrontPrepare(device uint32_t& controlRef [[buffer(0)]],
             const PathRay r = rays[tid];
             const float3 origin = float3(r.origin);
             const float3 direction = float3(r.direction);
-            // prepare is intentionally not specialised with the scene feature
-            // constants. The runtime flag keeps non-SSS diagnostics from
-            // reading the uninitialised cold table; this only runs for the
-            // handful of diagnostic lanes and adds no traffic to rendering.
             stageStats[laneBase + 1u] = diagnosticsMediumEnabled != 0u ? mediumPaths[tid].medium : 0u;
             stageStats[laneBase + 2u] = p.depthAndFlags;
             stageStats[laneBase + 3u] = as_type<uint32_t>(origin.x);
@@ -7284,20 +6688,6 @@ kernel void wavefrontPrepareShadow(device uint32_t& controlRef [[buffer(0)]],
     control[WF_CTRL_GUIDE_DIS + 2] = 1u;
 }
 
-// Transmittance of a shadow ray through whatever bounded media it crosses.
-//
-// The medium's boundary is not on the shadow mask -- a fog gizmo left there would
-// black out everything it encloses -- so the segments inside it have to be found
-// with a traversal of their own. That is the second traversal this feature was
-// scoped to avoid, which is why it is gated on the scene having a bounded medium
-// at all, and why it walks a bounded number of crossings rather than to
-// completion.
-//
-// Alternating closest hits rather than an any-hit sweep: a convex volume answers
-// in two, and the alternative is a payload that sorts an unbounded set of
-// distances. `startMedium` is the one thing the ray cannot work out for itself --
-// whether it began inside. A vertex within a fog volume and one just outside it
-// produce the same origin and direction.
 template <typename T>
 static float3 mediumTransmittance(typename T::volume_structure accelerationStructure,
                                   constant Uniforms& uniforms,
@@ -7361,26 +6751,6 @@ static float3 mediumTransmittance(typename T::volume_structure accelerationStruc
     return exp(-optical);
 }
 
-// Cutout shadow occlusion has three deliberately separate implementations:
-//
-//   * The opt-in static IFT path leaves traversal in the RT unit. Its table owns
-//     the compact material/geometry/UV bindings and all reachable allocations
-//     are in the queue-wide Metal 4 residency set. A minimal reproducer proved
-//     both AS primitive_data and external table reads before this path was used
-//     on a production scene. No ray payload is involved.
-//   * The default static path uses Metal's inline intersection_query and hands
-//     each candidate back to this kernel. It remains the safe fallback and the
-//     reference for timing/image A/B.
-//   * Motion traversal cannot: intersection_query rejects the motion tags. It
-//     restarts past each cutout instead, which is what this renderer did before
-//     the any-hit existed. Bounded, because a canopy can stack more leaves than
-//     any shadow ray needs to resolve.
-//
-// Returns false when the ray is blocked; `transmittance` is what survived.
-// Alpha is scalar for every material path, so carrying float3 here only raises
-// register pressure. A fully opaque hit, numerical zero, or threshold rejection
-// ends the walk. Shared by both specialisations below so both traversal paths
-// implement identical alpha visibility.
 static inline bool cutoutRouletteDone(thread float& transmittance, float opacity, float cutoff)
 {
     transmittance *= (1.0f - opacity);
@@ -7419,10 +6789,6 @@ struct CutoutShadowWalk
     {
         transmittance = 1.0f;
         ray probe = shadowRay;
-        // Only probe.min_distance changes between restarts, so the intersector is
-        // configured once. Closest hit, because the walk has to meet the cutouts
-        // in the order the ray does; forced opaque so traversal never looks for
-        // an intersection function.
         typename T::isect isect;
         isect.assume_geometry_type(T::geometryTypes());
         isect.force_opacity(forced_opacity::opaque);
@@ -7501,12 +6867,6 @@ struct CutoutShadowWalk<T, true, false>
         T::resetShadowQuery(q, shadowRay, as, params);
         while (q.next())
         {
-            // Only geometry the builder left non-opaque surfaces as a candidate.
-            // Opaque geometry is committed by traversal itself and is never seen
-            // here -- which is why the committed result has to be read after the
-            // loop. Getting that wrong drops every opaque shadow caster in the
-            // scene: the ground keeps its dappled canopy shade and loses the
-            // trunks and rocks entirely, at 156 of this scene's 300 geometries.
             const uint32_t geometryEntryBase = T::shadowGeometryEntryBase(q, directGeometryBase);
             const float opacity =
                 useCompactAlphaMaterials ?
@@ -7650,13 +7010,6 @@ static void shadowImpl(uint gid,
     ray shadowRay;
     shadowRay.origin = float3(traversal.origin);
     shadowRay.direction = float3(traversal.direction);
-    // Zero, because connectLight/connectEnvLight now offset the origin along the
-    // face the ray leaves through. A world-space epsilon standing in for that
-    // offset is the wrong shape for the problem -- too small at architectural
-    // scale, too large at prop scale -- and it was applied to connections whose
-    // origin had already been offset, which is the same self-occlusion
-    // asymmetry from the other side. OptiX runs its occlusion rays at
-    // shadowRayTmin, which both apps seed to 0.
     shadowRay.min_distance = 0.0f;
     shadowRay.max_distance = traversal.maxDistance;
 
@@ -7738,16 +7091,7 @@ static void shadowImpl(uint gid,
         return;
     }
 
-    // Cutouts make occlusion a product rather than a nearest-hit predicate. The
-    // default paths accumulate against one threshold; the payload-free static
-    // IFT performs an independent Bernoulli decision per candidate, whose
-    // survival expectation is the same product.
     float transmittance;
-    // Sample the binary visibility of the entire alpha stack with the random
-    // number already carried by every shadow ray. For BLEND foliage this can
-    // reject at the first partially covered texel instead of visiting every
-    // layer to evaluate their product. MASK materials remain exact because
-    // their resolved opacity is either zero or one.
     const float alphaCutoff = SPEC_STOCHASTIC_ALPHA_VISIBILITY ? traversal.alphaThreshold :
                                                                  traversal.alphaThreshold * kShadowTransmittanceCutoff;
     if (!CutoutShadowWalk<T, T::kInlineQuery != 0, T::kHardwareAlpha != 0>::run(
@@ -7987,14 +7331,6 @@ kernel void sharcResolve(uint tid [[thread_position_in_grid]],
     }
     if (previous.sampleCount == 0u)
     {
-        // A cell whose first insertion lost the race for its slot is re-inserted
-        // further along the same bucket, and its history is sitting in the older
-        // copy. Adopt it rather than restarting temporal accumulation from
-        // nothing every time the hash map shuffles an entry.
-        // Bounded by the region this entry lives in. Responsive companions carry
-        // the same spatial key as their persistent partner -- the two are told
-        // apart by which half of the table they sit in -- so a window that ran
-        // past the split would adopt the wrong signal's history.
         const uint32_t regionEnd = responsiveEntry ? uniforms.sharcCapacity : mainCapacity;
         const uint32_t searchEnd = min(tid + 1u + kSharcLinearProbeWindow, regionEnd);
         for (uint32_t i = tid + 1u; i < searchEnd; ++i)
@@ -8133,11 +7469,6 @@ kernel void wavefrontShadowDirectStatic(uint gid [[thread_position_in_grid]],
                                       indexBuffer, 0u, sharcUpdates, sharcAccumulation, directGeometryBase, bounce);
 }
 
-// ---------------------------------------------------------------------------
-// resolve -- average the samples and fold into the accumulation buffer
-//
-// Fold this launch into the persistent accumulation buffer.
-// ---------------------------------------------------------------------------
 kernel void wavefrontResolve(uint tid [[thread_position_in_grid]],
                              constant Uniforms& uniforms [[buffer(0)]],
                              device const float4* radianceIn [[buffer(1)]],
@@ -8229,13 +7560,6 @@ kernel void wavefrontResolve(uint tid [[thread_position_in_grid]],
     res[tid] = float4(result, 1.0f);
 }
 
-// ---------------------------------------------------------------------------
-// aovResolve -- spread the packed guide records into the textures MetalFX wants
-//
-// One kernel so every pixel-format decision lives in one place; `shade` stays
-// free of texture bindings, which matters because it is the kernel with the
-// least register headroom.
-// ---------------------------------------------------------------------------
 kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
                                 constant Uniforms& uniforms [[buffer(0)]],
                                 device const AovSample* aov [[buffer(1)]],
@@ -8259,25 +7583,8 @@ kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
     const uint32_t i = tid.y * uniforms.width + tid.x;
     const AovSample a = aov[i];
 
-    // Linear radiance, not the tonemapped image: the denoiser works in the space
-    // the light actually arrived in and exposure comes after it.
-    //
-    // Divided by the sample count, as the resolve pass does. The radiance buffer
-    // holds the *sum* over this launch's samples, so handing it over raw makes the
-    // denoiser's input brighter by a factor of spp -- invisible at one sample per
-    // launch, which is why it survived, and wrong the moment anyone raises it.
-    //
-    // This launch is the MetalFX frame stream. PT accumulation is resolved into
-    // its own buffer by wavefrontResolve and deliberately does not enter here:
-    // the current color and the current auxiliary buffers must describe one and
-    // the same jittered visibility sample.
     float3 color = radiance[i].xyz / (float)max(sampleCount, 1u);
 
-    // Firefly clamp, in exposed units so the threshold means the same thing at
-    // any exposure. A single unbounded sample is a bright dot that a temporal
-    // filter then smears across many frames -- it costs far more than the energy
-    // it carries. Clamped rather than dropped, so the pixel keeps its hue and
-    // most of its brightness. Off when the threshold is zero.
     if (uniforms.denoiseFireflyClamp > 0.0f)
     {
         const float3 exposed = color * float3(uniforms.exposureValue);
@@ -8299,10 +7606,6 @@ kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
     // than becoming +inf and poisoning the network input.
     specHitTex.write(float4(clamp(a.specularHitDistance, 0.0f, 65504.0f), 0.0f, 0.0f, 0.0f), tid);
     reactiveTex.write(float4(saturate(a.reactive), 0.0f, 0.0f, 0.0f), tid);
-    // Negative marks a noise-free primary: a camera ray that missed or directly
-    // visible emission. Reactive pixels are deliberately not reused here:
-    // invalid reprojection should reject history, not disable spatial denoising
-    // of the current sample.
     const float denoiseStrength = a.guideStateOrBounceDepth < 0.0f ? 1.0f : 0.0f;
     denoiseStrengthTex.write(float4(denoiseStrength, 0.0f, 0.0f, 0.0f), tid);
 }

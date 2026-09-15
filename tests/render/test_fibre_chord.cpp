@@ -4,17 +4,6 @@
 
 #include <cmath>
 
-// ---------------------------------------------------------------------------
-// Where a ray that scattered through a strand comes out.
-//
-// The transport side of this cannot be a unit test -- its instrument is the
-// isolated-strand depth ladder in tools/feature_tests/strand_probe.py, which had
-// to go flat past two bounces and instead climbed 1.00 -> 1.29. What *can* be
-// pinned here is the geometry underneath it: the chord across a cylinder, and
-// the two degenerate cases the closest-hit program relies on falling back to an
-// ordinary surface offset.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 
@@ -96,10 +85,6 @@ TEST_CASE("a radius of zero is not a fibre")
 
 TEST_CASE("the chord scales with the radius")
 {
-    // -2r(n.u) with n and u opposed is 2r, so twice the strand is twice the
-    // distance travelled inside it. This is what makes absorption over the
-    // crossing track the exported diameter -- the half-radius bug in
-    // docs/open-defects.md doubled exactly this.
     const FibreExit thin = crossing(make_float3(-1.0f, 0.0f, 0.0f), 0.25f);
     const FibreExit thick = crossing(make_float3(-1.0f, 0.0f, 0.0f), 0.5f);
     REQUIRE(thin.crossed);

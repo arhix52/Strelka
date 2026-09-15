@@ -12,9 +12,6 @@
 #include <cmath>
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)
-//
-// NVCC and host tests compile this header. Initialising immediate out-parameters
-// adds dead stores, while default member initialisers alter GPU-copyable structs.
 
 namespace oka::medium
 {
@@ -48,10 +45,6 @@ STRELKA_MEDIUM_FN float dot3(const Spectrum& a, const Spectrum& b)
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-/// Extinction per channel from the mean free path.
-///
-/// The colour of subsurface scattering lives here rather than in an albedo: red
-/// travels furthest, so a thin edge goes red before it goes bright.
 STRELKA_MEDIUM_FN Spectrum sigmaTFromRadius(const Spectrum& radius)
 {
     const float rx = radius.x > 1e-5f ? radius.x : 1e-5f;
@@ -60,11 +53,6 @@ STRELKA_MEDIUM_FN Spectrum sigmaTFromRadius(const Spectrum& radius)
     return makeSpectrum(1.0f / rx, 1.0f / ry, 1.0f / rz);
 }
 
-/// Which channel drives the next free flight, in proportion to what the path is
-/// still carrying.
-///
-/// Weighting by throughput times albedo avoids compounding balance-heuristic
-/// weights when channel extinction differs.
 STRELKA_MEDIUM_FN Spectrum channelPdf(const Spectrum& throughput, const Spectrum& albedo)
 {
     const float wx = std::fabs(throughput.x * albedo.x);
@@ -94,15 +82,6 @@ STRELKA_MEDIUM_FN int selectChannel(const Spectrum& pdf, float u)
     return 2;
 }
 
-/// Free flight, with one channel chosen per step.
-///
-/// A single scalar extinction would lose the colour the medium is for, and
-/// sampling all three at once is not a thing free flight can do -- so one
-/// channel drives the distance and the weights below are multiple-importance-
-/// sampled across all three, which is what keeps the estimator unbiased for the
-/// other two.
-///
-/// Returns true when the walk scatters before reaching `surfaceT`.
 STRELKA_MEDIUM_FN bool sampleDistance(const Spectrum& sigmaT,
                                       const Spectrum& pdf,
                                       float surfaceT,
@@ -122,11 +101,6 @@ STRELKA_MEDIUM_FN bool sampleDistance(const Spectrum& sigmaT,
     return t < surfaceT;
 }
 
-/// Throughput weight for scattering at `t`, balance-heuristic over the three
-/// channels that could have produced that distance. `pdf` has to be the same
-/// distribution the channel was drawn from, or the two stop cancelling --
-/// sampling from one density and weighting by another is how an unbiased
-/// estimator stops being one.
 STRELKA_MEDIUM_FN Spectrum scatterWeight(const Spectrum& sigmaT,
                                          const Spectrum& albedo,
                                          const Spectrum& pdf,
@@ -147,10 +121,6 @@ STRELKA_MEDIUM_FN Spectrum scatterWeight(const Spectrum& sigmaT,
                         albedo.z * pdfPerChannel.z / density);
 }
 
-/// Throughput weight for reaching a boundary at `t` without scattering, over
-/// the same three channels.
-///
-/// This is one for grey extinction and preserves spectral throughput otherwise.
 STRELKA_MEDIUM_FN Spectrum boundaryWeight(const Spectrum& sigmaT, const Spectrum& pdf, float t)
 {
     const Spectrum tr =
@@ -173,14 +143,6 @@ STRELKA_MEDIUM_FN float hgPhase(float cosTheta, float g)
     return (1.0f - gg) / (4.0f * 3.14159265358979323846f * denom * std::sqrt(safe));
 }
 
-/// The cosine HG puts a canonical sample at, measured against the direction of
-/// *travel*.
-///
-/// The standard inversion returns the cosine against the direction the ray came
-/// from, and at g = 0.8 the median draw is -0.944 -- so taken at face value a
-/// forward-scattering medium scatters backwards. It does not show up in single
-/// scattering, where the outgoing direction is fixed by the camera; only once a
-/// path continues does the lobe point the wrong way.
 STRELKA_MEDIUM_FN float hgSampleCosine(float g, float u)
 {
     float cosTheta;
@@ -197,6 +159,5 @@ STRELKA_MEDIUM_FN float hgSampleCosine(float g, float u)
 }
 
 } // namespace oka::medium
-
 
 // NOLINTEND(cppcoreguidelines-pro-type-member-init, cppcoreguidelines-init-variables)

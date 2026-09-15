@@ -11,48 +11,13 @@
 #include <unordered_map>
 #include <vector>
 
-
 namespace oka::curvesidecar
 {
 
-// Curves ride beside the glTF, the way the analytic lights already do.
-//
-// glTF has no curve primitive and no extension that adds one, and hair is the
-// one thing in these scenes that must not be triangulated: a strand is eight
-// control points, and the ribbon that would replace it is at least a hundred
-// bytes of vertices for a worse silhouette. Both backends already take curves
-// natively -- OptiX builds a curve GAS, Metal has a curve geometry descriptor --
-// so what was missing was only a way to get them off disk.
-//
-// Binary rather than JSON because the payload is millions of floats: the kids
-// bedroom's two particle systems are 3.6 M control points, which is 60 MB packed
-// and roughly 400 MB as text.
-//
-//   char[8]  "STRKCRV1"
-//   uint32   setCount
-//   per set:
-//     uint32   materialNameLength
-//     char[]   materialName        -- matched against Scene::MaterialDescription
-//     uint32   basis               -- 0 linear, 1 cubic B-spline
-//     uint32   strandCount
-//     uint32   pointCount
-//     float[16] objectToWorld      -- column-major, as glm stores it
-//     uint32[strandCount] controlPointsPerStrand
-//     float[3 * pointCount] points
-//     float[pointCount] radii
-//
-// Radii, not diameters: that is what both OptiX's width buffer and Metal's
-// radius buffer mean, and converting at every consumer is how the two ended up
-// disagreeing about curve type in the first place.
 inline constexpr char kMagic[8] = { 'S', 'T', 'R', 'K', 'C', 'R', 'V', '1' };
 
 struct Reader
 {
-    /// A view over the caller's buffer, deliberately: the sidecar is read once,
-    /// in one scope, and copying a multi-megabyte groom to walk it would be the
-    /// whole cost of loading it. Non-copyable as a consequence, which is what
-    /// cppcoreguidelines-avoid-const-or-ref-data-members is warning about and
-    /// what is wanted here.
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     const std::vector<char>& data;
     size_t offset = 0;

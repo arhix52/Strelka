@@ -239,10 +239,6 @@ bool OptixDenoiserContext::denoise(CUstream stream,
     if (flow != 0)
     {
         guideLayer.flow = makeImage(flow, w, h, OPTIX_PIXEL_FORMAT_FLOAT2);
-        // Where the motion vector is known to be a lie -- a mirror, a pane of
-        // glass, anything whose guides describe a surface the camera cannot see
-        // directly -- the reactive mask says so, and this is the input that acts
-        // on it. Only meaningful alongside a flow layer.
         if (flowTrust != 0)
         {
             guideLayer.flowTrustworthiness = makeImage(flowTrust, w, h, OPTIX_PIXEL_FORMAT_FLOAT1);
@@ -266,10 +262,6 @@ bool OptixDenoiserContext::denoise(CUstream stream,
     layer.type = OPTIX_DENOISER_AOV_TYPE_BEAUTY;
     if (mPlan.temporal)
     {
-        // The first frame of a sequence has no denoised predecessor. The SDK
-        // sample seeds it with the noisy input, which is a better starting point
-        // than black; the upscaling models size their previous output
-        // differently and are given nothing instead.
         if (mFirstFrame && !mPlan.upscale)
         {
             CUDA_CHECK(cudaMemcpyAsync(optix::devicePtr<void>(mPreviousOutput), optix::devicePtr<const void>(color),
@@ -286,10 +278,6 @@ bool OptixDenoiserContext::denoise(CUstream stream,
     // the unit the flow layer is defined in, so no rescale.
     params.flowMulX = 1.0f;
     params.flowMulY = 1.0f;
-    // Null hdrIntensity / hdrAverageColor: the denoiser computes its own, which
-    // is what an accumulating render wants -- the exposure of the image changes
-    // as it converges, and pinning it to a value measured on the first frame
-    // would make the network's idea of "bright" wrong for every frame after.
 
     const OptixResult result = optixDenoiserInvoke(mDenoiser, stream, &params, mState, mStateSize, &guideLayer, &layer,
                                                    1u, 0u, 0u, mScratch, mScratchSize);

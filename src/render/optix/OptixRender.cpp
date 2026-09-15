@@ -170,10 +170,6 @@ inline void optixCheckLog(OptixResult res,
     {
         const char* errorName = optixGetErrorName(res);
         const char* errorString = optixGetErrorString(res);
-        // OptiX reports how much log it wanted to write. Saying so matters here:
-        // a module that fails to compile produces far more than the 16 KB buffer
-        // holds, and silently printing the first 16 KB has sent people looking at
-        // the wrong error more than once.
         const char* truncated = (sizeof_log_returned > sizeof_log) ? " [log truncated]" : "";
         STRELKA_FATAL("OptiX call {0} failed: {1}:{2} : result={3} ({4}) log={5}{6}", call, file, line, errorName,
                       errorString, log, truncated);
@@ -183,14 +179,8 @@ inline void optixCheckLog(OptixResult res,
 
 } // namespace
 
-//------------------------------------------------------------------------------
-//
-// OptiX error-checking
-//
-//------------------------------------------------------------------------------
 #define OPTIX_CHECK(call) optixCheck(call, #call, __FILE__, __LINE__)
 #define OPTIX_CHECK_LOG(call) optixCheckLog(call, log, sizeof(log), sizeof_log, #call, __FILE__, __LINE__)
-
 
 using namespace oka;
 namespace fs = std::filesystem;
@@ -198,14 +188,6 @@ namespace fs = std::filesystem;
 namespace
 {
 
-/// How an OpenPBR texture slot is read.
-///
-/// Not derivable from the slot number, and getting it wrong is silent: a
-/// roughness map read as sRGB is smoothly and plausibly wrong, and a normal map
-/// read as colour loses the two-channel encoding the BC5 path depends on. The
-/// same split MetalMaterials::openpbrSlotKind() makes, folded into OptiX's one
-/// enum -- Kind::Color *is* the sRGB reading here, where Metal carries the
-/// colour space as a separate flag.
 oka::optix_tex::Kind openpbrSlotKind(uint32_t slot)
 {
     switch (slot)
@@ -228,13 +210,6 @@ oka::optix_tex::Kind openpbrSlotKind(uint32_t slot)
     }
 }
 
-/// The slot's guess at the encoding, overridden by whatever the document stated.
-///
-/// A slot default is a good guess and no more: it is glTF's convention, which
-/// the Open Chess Set happens to agree with exactly. Only the document knows
-/// that a particular roughness map was authored sRGB-encoded, or that a base
-/// colour is already linear. A normal map is exempt -- what it *is* does not
-/// change with a colour-space attribute.
 oka::optix_tex::Kind openpbrSlotKind(uint32_t slot, oka::TexColorSpace stated)
 {
     const oka::optix_tex::Kind kind = openpbrSlotKind(slot);
@@ -253,11 +228,6 @@ oka::optix_tex::Kind openpbrSlotKind(uint32_t slot, oka::TexColorSpace stated)
     return kind;
 }
 
-/// One image decoded to four float channels, and the deleter it needs.
-///
-/// EXR and an explicitly converted LDR image use libc allocation; stb float
-/// decoding uses stb's allocator. This carries the matching release rather than
-/// handing back a bare pointer and a flag for the caller to remember.
 struct Rgba32fImage
 {
     float* pixels = nullptr;
@@ -291,13 +261,6 @@ struct Rgba32fImage
     }
 };
 
-/// Decode an EXR through tinyexr and anything else through stb, always to RGBA
-/// float. `what` names the image in the error message, which is the only reason
-/// the environment, its backdrop and a projector's slide cannot share one line.
-///
-/// stbi_loadf undoes a gamma of 2.2 on a display-encoded file, which is what
-/// makes an ordinary PNG usable as a light source rather than as a set of code
-/// values.
 Rgba32fImage decodeRgba32f(const std::string& path, const char* what)
 {
     Rgba32fImage img;
@@ -386,17 +349,6 @@ double nowMilliseconds()
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-/// What this process has on the device, as the driver accounts for it.
-///
-/// The counterpart of Metal's `MTLDevice::currentAllocatedSize`, and CUDA has no
-/// equivalent in the runtime API: `cudaMemGetInfo` reports the whole board,
-/// which on a machine that is running anything else is a number about that
-/// machine rather than about this renderer. NVML does answer per process, so it
-/// is loaded by name at runtime -- an optional diagnostic must not become a link
-/// dependency, and a box without the management library still has to render.
-///
-/// Zero means "cannot say", which the Memory panel already understands: it
-/// stops drawing the unaccounted slice rather than inventing one.
 size_t deviceAllocatedBytes()
 {
     // The v2 process record, which is what nvmlDeviceGetComputeRunningProcesses_v3
@@ -420,9 +372,6 @@ size_t deviceAllocatedBytes()
     using HandleFn = int (*)(unsigned int, void**);
     using ProcFn = int (*)(void*, unsigned int*, NvmlProcessInfoV2*);
 
-    // dlsym hands back void*, and POSIX guarantees only that the round trip
-    // through it works; there is no other spelling for looking a function up by
-    // name. The three go together because they are one API being bound.
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     static auto nvmlInit = reinterpret_cast<InitFn>(dlsym(handle, "nvmlInit_v2"));
     static auto nvmlGetHandle = reinterpret_cast<HandleFn>(dlsym(handle, "nvmlDeviceGetHandleByIndex_v2"));
@@ -526,15 +475,6 @@ OptiXRender::OptiXRender() = default;
 
 OptiXRender::~OptiXRender()
 {
-    // Before anything else, and before any member is destroyed: a pipeline build
-    // may be running on a worker, and everything below destroys exactly the
-    // handles it is in the middle of writing.
-    //
-    // The editor reaches here on every scene switch -- checkLoadingComplete()
-    // does m_render.reset() -- so this is a normal path, not a shutdown-only one.
-    // Waiting is what the future's own destructor would do at the end of this
-    // function anyway; doing it first is what makes that wait safe rather than a
-    // race against the destruction above it.
     if (mPipelineBuild.valid())
     {
         mPipelineBuild.wait();
@@ -639,24 +579,6 @@ void OptiXRender::createContext()
     CUcontext cuCtx = nullptr;
     unsigned int reorderFlags = 0;
 
-    // Sleep while the device works instead of spinning on a core.
-    //
-    // The default policy busy-waits, and a wait proportional to how long the GPU
-    // is busy is most of what this process costs: a perf profile of a headless
-    // render put 85% of its CPU samples inside cuStreamSynchronize and another
-    // 11% in the clock_gettime that spin calls, against 0.5% in Strelka's own
-    // code. Blocking instead took 4096 spp of iso_bathroom from 10.8 s of CPU to
-    // 1.5 s, and the editor's 600 frame benchmark from 4.0 s to 0.9 s.
-    //
-    // It is not free: the host has to be woken after each synchronise, and that
-    // latency sits in the frame's serial chain. At one sample per launch it cost
-    // 10% of the render; it is why RenderConfig::sppPerLaunch defaults to a
-    // batch rather than to 1, which amortises the wake-up and brings the wall
-    // clock back to the spinning figure. The editor still submits one frame at a
-    // time and pays about 0.16 ms of it per frame, which is what a frame in
-    // flight would remove.
-    //
-    // Before any CUDA call that would create the context, or it is ignored.
     CUDA_CHECK(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync));
 
     // Initialize CUDA
@@ -674,29 +596,17 @@ void OptiXRender::createContext()
     else
     {
         options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
-        // 2 is error. Raise it to 4 to get OptiX's COMPILE FEEDBACK lines, which
-        // are the only place the pipeline's register count per program is
-        // reported; validation mode also does that but compiles at optLevel 0,
-        // so the counts it prints are not the ones the frame runs.
         options.logCallbackLevel = envUint("STRELKA_OPTIX_LOG_LEVEL", 2);
     }
     // Zero means take the current context.
     OPTIX_CHECK(optixDeviceContextCreate(cuCtx, &options, &mState.context));
 
-    // Ask whether optixReorder() does anything here before paying for its
-    // coherence key. The call is documented as a no-op on hardware without the
-    // sorting unit, so this is not a correctness gate -- it is what keeps two
-    // dependent loads per bounce off a machine that cannot spend them.
     OPTIX_CHECK(optixDeviceContextGetProperty(mState.context,
                                               OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING,
                                               &reorderFlags, sizeof(reorderFlags)));
     mShaderReorderSupported = (reorderFlags & OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD) != 0;
     STRELKA_INFO("Shader execution reordering: {}", mShaderReorderSupported ? "supported" : "not available");
 
-    // Which RT core generation this is, because the opacity micromap engine is
-    // one of them and not the others: Ada resolves a micromap in hardware, and
-    // everything before it makes OptiX emulate the same answer in software,
-    // where the micromap is a cost rather than a shortcut.
     {
         unsigned int rtcoreVersion = 0;
         OPTIX_CHECK(optixDeviceContextGetProperty(mState.context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION,
@@ -715,10 +625,6 @@ void OptiXRender::createContext()
     }
 }
 
-// Returns what the structure occupies afterwards -- the compacted size when
-// compaction happened, the original otherwise. The caller records it, because a
-// bare CUdeviceptr cannot be asked how big it is and the memory report refuses
-// to estimate.
 size_t OptiXRender::compactAccel(CUdeviceptr& buffer,
                                  OptixTraversableHandle& handle,
                                  CUdeviceptr result,
@@ -763,10 +669,6 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
     rcurve->segmentsPerStrand = curve.mSegmentsPerStrand;
 
     const std::vector<uint32_t>& vertexCounts = mScene->getCurvesVertexCounts();
-    // The sidecar reader computes this too. Checking rather than trusting it
-    // costs one pass over the strand counts at load, and the failure it catches
-    // -- a strand coordinate that walks off the end of a strand -- is otherwise
-    // a subtle shading gradient rather than anything that looks like a bug.
     const uint32_t recomputed = oka::curve_layout::segmentsPerStrand(
         vertexCounts, curve.mVertexCountsStart, curve.mVertexCountsCount, isLinear);
     if (recomputed != curve.mSegmentsPerStrand)
@@ -861,10 +763,6 @@ std::unique_ptr<OptiXRender::Curve> OptiXRender::createCurve(const oka::Curve& c
 namespace
 {
 
-/// Level 4 -- 256 microtriangles, 64 bytes -- is the finest a triangle is given.
-/// Past that the array costs more memory than the traversal it saves, and the
-/// classifier's texel scan grows with it while the cutout edge it is resolving
-/// does not.
 constexpr uint32_t kOmmMaxSubdivisionLevel = 4u;
 
 /// What all of one mesh's micromaps may occupy. A cutout card is two triangles
@@ -872,11 +770,6 @@ constexpr uint32_t kOmmMaxSubdivisionLevel = 4u;
 /// other way round.
 constexpr size_t kOmmBytesPerMesh = 64ull << 20;
 
-/// The most texels one microtriangle's classification will look at before it
-/// gives up and says unknown. A microtriangle whose uv footprint covers a
-/// megatexel is not a cutout edge -- it is a texture mapped so coarsely that the
-/// micromap could not resolve it anyway -- and scanning it would turn a scene
-/// load into a stall.
 constexpr int64_t kOmmMaxTexelsPerMicroTriangle = 4096;
 
 /// Padding follows optix_omm::bilinearTexelSpan's host/device boundary invariant.
@@ -904,15 +797,6 @@ Uv barycentricUv(const Uv& a, const Uv& b, const Uv& c, float2 bary)
 
 } // namespace
 
-/// The alpha channel of a material's base-colour texture, as uploaded.
-///
-/// Decoded through `decodeToPayload` with this render's own texture settings, so
-/// the extent, the resampling and the block compression are the ones the device
-/// texture went through. Anything else would be describing a different texture:
-/// a downscale alone moves an eighth of a dotted mask's texels across a cutoff.
-///
-/// Returns nullptr when the material has no base-colour texture, which the
-/// caller reads as a constant alpha of 1.
 const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
 {
     namespace tex = oka::optix_tex;
@@ -1033,11 +917,6 @@ const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
     }
     case tex::Format::BC1:
     case tex::Format::BC5:
-        // BC1 carries either no alpha or a punch-through bit whose reading
-        // depends on the endpoint order, and BC5 has two channels and no alpha
-        // at all. Neither can be read back as the number the sampler returns, so
-        // neither gets a micromap -- the any-hit path answers instead, which is
-        // exactly what happens today.
         break;
     }
 
@@ -1056,13 +935,6 @@ const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
     return &mOmmAlphaCache.at(materialId);
 }
 
-/// Which material each mesh is drawn with.
-///
-/// A micromap is attached to the geometry, and the material is on the instance,
-/// so the two only line up when every instance of a mesh names the same
-/// material. Where they do not, the mesh gets no micromap: describing one
-/// cutout while a second instance draws a different one is the one way this
-/// feature could change an image.
 void OptiXRender::resolveMeshMaterials()
 {
     const auto& meshes = mScene->getMeshes();
@@ -1093,13 +965,6 @@ void OptiXRender::resolveMeshMaterials()
     }
 }
 
-/// Classify one mesh's triangles against its material's alpha test and build the
-/// micromap array that says so.
-///
-/// Every triangle gets an entry in the index buffer. Most of them are one of the
-/// four predefined indices -- a whole triangle inside the cutout, or outside it,
-/// or unresolvable -- and cost four bytes. Only a triangle the cutout edge
-/// actually crosses gets a micromap of its own.
 OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka::Mesh& mesh, size_t meshIndex)
 {
     namespace omm = oka::optix_omm;
@@ -1111,11 +976,6 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
     }
     if (mesh.isSkeletal)
     {
-        // A skeletal mesh is refit every frame and rebuilt every so often, and an
-        // update reads its build input back -- micromaps included, under rules
-        // that need ALLOW_OPACITY_MICROMAP_UPDATE to relax. The uv does not move
-        // under a skeleton, so the micromap would still be right; the update path
-        // is what is not worth getting wrong for a cutout nobody skins.
         return out;
     }
     const int32_t materialId = mMeshMaterialIds[meshIndex];
@@ -1154,10 +1014,6 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
     const std::vector<uint32_t>& indices = mScene->getIndices();
     const std::vector<oka::Scene::Vertex>& vertices = mScene->getVertices();
 
-    /// Bound the base-colour alpha over everything a bilinear fetch inside a uv
-    /// box could read, and hand that to the classifier. Returns Mixed rather
-    /// than a bound whenever the box is too big to scan, which is the safe
-    /// answer to a question this cannot afford to ask.
     auto classifyUvBox = [&](float u0, float u1, float v0, float v1) -> omm::Coverage {
         if (image == nullptr)
         {
@@ -1387,11 +1243,6 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
     OptixTraversableHandle gas_handle = 0;
     CUdeviceptr d_gas_output_buffer = 0;
 
-    // A static mesh no longer asks for ALLOW_UPDATE. Nothing refits one --
-    // updateBottomLevelAccelerationStructures() skips every mesh that is not
-    // skeletal -- and a refittable structure is built with a topology that
-    // survives being moved rather than one built to be traced, which costs both
-    // memory and traversal for a capability this class of geometry never uses.
     const oka::optix_accel::Geometry geometryClass =
         isSkeletal ? oka::optix_accel::Geometry::SkinnedMesh : oka::optix_accel::Geometry::StaticMesh;
 
@@ -1457,10 +1308,6 @@ std::unique_ptr<OptiXRender::Mesh> OptiXRender::createMesh(const oka::Mesh& mesh
             OPTIX_OPACITY_MICROMAP_ARRAY_INDEXING_MODE_INDEXED;
         triangle_input.triangleArray.opacityMicromap.opacityMicromapArray = omm.array;
         triangle_input.triangleArray.opacityMicromap.indexBuffer = omm.indices;
-        // 32-bit indices: the four predefined states are negative, and a mesh
-        // may hold more micromaps than a signed 16-bit index can name. Four
-        // bytes a triangle next to the sixty-four a micromap costs is not the
-        // place to economise.
         triangle_input.triangleArray.opacityMicromap.indexSizeInBytes = 4;
         triangle_input.triangleArray.opacityMicromap.numMicromapUsageCounts = (unsigned int)omm.usage.size();
         triangle_input.triangleArray.opacityMicromap.micromapUsageCounts = omm.usage.empty() ? nullptr : omm.usage.data();
@@ -1561,12 +1408,6 @@ void OptiXRender::createBottomLevelAccelerationStructures()
     }
 }
 
-/// Read the setting once and work out what each mesh is drawn with, before any
-/// structure is built.
-///
-/// Read through contains() because nothing is obliged to set it: a host that
-/// never heard of the feature gets it off, which is the default, rather than the
-/// error getAs() logs for a key nobody wrote.
 void OptiXRender::beginOpacityMicromaps()
 {
     const SettingsManager* settings = getSettings();
@@ -1639,18 +1480,6 @@ void OptiXRender::updateMesh(const oka::Mesh& mesh, int optixMeshesId)
                                 gas_buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
 }
 
-/// Rebuild one skeletal BLAS from scratch, into the storage it already has.
-///
-/// A refit keeps the tree the mesh had when it was built and only moves the
-/// bounds, so a character that walks far enough from its bind pose ends up
-/// traversing a tree that no longer fits it. A rebuild restores the quality,
-/// and the input has not changed shape -- same vertex and index counts, same
-/// flags -- so it produces a structure of exactly the same size and can go
-/// straight back into the same buffer, with no allocation and no free.
-///
-/// The handle is returned by the build and is compared rather than assumed: a
-/// GAS handle that moved invalidates every instance that names it, which is a
-/// TLAS rebuild rather than a refit.
 bool OptiXRender::rebuildMesh(const oka::Mesh& mesh, int optixMeshesId)
 {
     OptixTraversableHandle& gas_handle = mOptixMeshes[optixMeshesId]->gas_handle;
@@ -1692,10 +1521,6 @@ bool OptiXRender::rebuildMesh(const oka::Mesh& mesh, int optixMeshesId)
     return gas_handle != before;
 }
 
-/// Refit skeletal BLASes and rebuild them by bounded round robin.
-///
-/// Returns whether any BLAS handle moved, which the caller needs because an
-/// instance naming a stale handle cannot be fixed by refitting the TLAS.
 bool OptiXRender::updateBottomLevelAccelerationStructures()
 {
     const auto& meshes = mScene->getMeshes();
@@ -1731,18 +1556,7 @@ bool OptiXRender::updateBottomLevelAccelerationStructures()
 
 void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance& instance) const
 {
-    // Whether this instance can skip the shadow any-hit entirely.
-    //
-    // Per instance rather than scene-wide, because the scene-wide question
-    // ("is there a cutout anywhere") is always yes in a forest and would drag
-    // trunks, rocks and ground into the alpha callback with the needles. Curves
-    // are always opaque: a strand has no uv to test.
     bool opaque = true;
-    // Whether this instance is the boundary of a participating medium rather
-    // than a surface. It goes on its own visibility bit, because a shadow ray
-    // must not be stopped by a fog gizmo -- RAY_MASK_SHADOW is the geometry bits
-    // alone -- and because the transmittance walk needs a traversal that finds
-    // the boundaries and nothing else.
     bool mediumBoundary = false;
     if (instance.type == oka::Instance::Type::eMesh)
     {
@@ -1769,11 +1583,6 @@ void OptiXRender::resolveInstanceGeometry(OptixInstance& oi, const oka::Instance
     case oka::Instance::Type::eLight:
     {
         oi.traversableHandle = mOptixMeshes[instance.mMeshId]->gas_handle;
-        // A light's proxy mesh is how the light is picked in the editor and how a
-        // BSDF ray finds an emitter for MIS. It is not always something to look at.
-        //
-        // Punctual and disabled lights have no visible proxy; camera-hidden area
-        // lights remain visible to bounce rays for MIS.
         const auto& descs = mScene->getLightsDesc();
         const bool known = instance.mLightId < descs.size();
         const bool enabled = known ? descs[instance.mLightId].enabled : true;
@@ -1835,10 +1644,6 @@ bool OptiXRender::sceneHasSubsurface() const
         }
         if (p.material_type == MATERIAL_TYPE_OPENPBR)
         {
-            // The map matters as much as the constant: the Open Chess Set leaves
-            // subsurface_weight at zero and drives it from a texture, so judging
-            // on the value alone compiles a pipeline that cannot walk the medium
-            // its own textures ask for.
             const bool weightIsMapped =
                 (material.openpbr.texture_mask & (1u << OPENPBR_TEX_SUBSURFACE_WEIGHT)) != 0u;
             if ((material.openpbr.subsurface_weight > 0.0f || weightIsMapped) &&
@@ -1890,13 +1695,6 @@ void OptiXRender::uploadInstancesToDevice(const std::vector<OptixInstance>& opti
 
 void OptiXRender::createTopLevelAccelerationStructure()
 {
-    // A full rebuild can change the instance count, and the SBT is indexed by
-    // instance -- `sbtOffset = index * RAY_TYPE_COUNT` -- so every record after
-    // the change points at the wrong geometry, and any beyond the end of the
-    // table is read out of bounds. The SBT was built once at frame 0 and never
-    // again, so this was live for every scene that adds or removes an instance.
-    // A refit cannot change the count, which is why updateTopLevelAcceleration-
-    // Structure() does not set this.
     mSbtDirty = true;
 
     // Pool fixed-size motion transforms to avoid per-frame allocation churn.
@@ -1976,10 +1774,6 @@ void OptiXRender::createTopLevelAccelerationStructure()
         OptixInstance oi = {};
         oi.traversableHandle = accel->handle;
         oi.instanceId = static_cast<unsigned int>(optixInstances.size());
-        // The camera-visible set is what a primary ray may hit; the other one is
-        // reached by bounce rays only, so a light authored out of frame still
-        // balances the MIS estimate it is deducted for. That is the same split
-        // the light-table walk used to make per ray, made once at build time.
         oi.visibilityMask = accel == &mVisibleLightAccel ? GEOMETRY_MASK_LIGHT : GEOMETRY_MASK_LIGHT_HIDDEN;
         oi.sbtOffset = static_cast<unsigned int>(optixInstances.size() * RAY_TYPE_COUNT);
         oi.flags = OPTIX_INSTANCE_FLAG_NONE;
@@ -1998,13 +1792,6 @@ void OptiXRender::createTopLevelAccelerationStructure()
     iasInput.instanceArray.instances = mState.d_instances;
     iasInput.instanceArray.numInstances = static_cast<int>(optixInstances.size());
 
-    // With motion blur on, the instance structure is rebuilt every frame rather
-    // than refit -- the motion transforms it points at are rewritten -- so it
-    // takes the static flags and is compacted. Without it, the structure is refit
-    // as transforms move, and a refittable structure must not be compacted: an
-    // update reads its output buffer as the build's own output, at the build's
-    // own size, and optixAccelCompact replaces both. That is what this code used
-    // to do, and it then refit the compacted copy in place.
     const oka::optix_accel::Geometry tlasClass =
         mEnableMotionBlur ? oka::optix_accel::Geometry::StaticTlas : oka::optix_accel::Geometry::RefittableTlas;
 
@@ -2105,10 +1892,6 @@ void oka::OptiXRender::updateTopLevelAccelerationStructure()
     iasInput.instanceArray.instances = mState.d_instances;
     iasInput.instanceArray.numInstances = static_cast<int>(optixInstances.size());
 
-    // The flags the refittable structure was built with -- not a second guess at
-    // them. They used to read PREFER_FAST_BUILD here against a build that said
-    // PREFER_FAST_TRACE | ALLOW_COMPACTION, and an update is documented against
-    // the build's own flags.
     OptixAccelBuildOptions iasOptions = {};
     iasOptions.buildFlags = oka::optix_accel::updateFlags(oka::optix_accel::Geometry::RefittableTlas);
     iasOptions.motionOptions.numKeys = 1;
@@ -2147,11 +1930,6 @@ void OptiXRender::createModule()
     else
     {
         moduleOptions.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-        // MINIMAL keeps the line table the profiler needs and leaves the
-        // optimiser alone; NONE strips it, and the PC samples then land on
-        // addresses no source line claims. Off by default all the same, because
-        // "leaves the optimiser alone" is a documented intent rather than a
-        // measurement, and this is the launch every frame goes through.
         moduleOptions.debugLevel = envFlag("STRELKA_OPTIX_LINEINFO") ? OPTIX_COMPILE_DEBUG_LEVEL_MINIMAL :
                                                                       OPTIX_COMPILE_DEBUG_LEVEL_NONE;
     }
@@ -2159,14 +1937,6 @@ void OptiXRender::createModule()
     // Leave registers unlimited by default; the environment knob is diagnostic.
     moduleOptions.maxRegisterCount = static_cast<int>(envUint("STRELKA_OPTIX_MAX_REGISTERS", 0));
 
-    // Compile the launch parameters that select whole features in as constants,
-    // so the branches they gate -- and everything under those branches -- are
-    // dead code the compiler removes rather than instructions the kernel carries
-    // past. See PipelineSpec for what is bound and, more importantly, what is
-    // deliberately not.
-    //
-    // The values have to outlive optixModuleCreate, which is why they are named
-    // locals rather than temporaries in the initialiser list.
     const PipelineSpec& spec = mPipelineSpec;
     const OptixModuleCompileBoundValueEntry boundValues[] = {
 #define STRELKA_BOUND_VALUE(field)                                                                                     \
@@ -2202,12 +1972,6 @@ void OptiXRender::createModule()
                                                 OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipelineOptions.numPayloadValues = STRELKA_PAYLOAD_COUNT;
     pipelineOptions.numAttributeValues = 2;
-    // A pipeline has to declare that it may traverse a structure carrying opacity
-    // micromaps; one that does not is not told about the arrays the build inputs
-    // attach, and the whole feature is the build cost with none of the shortcut.
-    // Read from the setting rather than from mOpacityMicromapsEnabled, which the
-    // scene build sets and which is not necessarily resolved when a pipeline is
-    // compiled.
     pipelineOptions.allowOpacityMicromaps = (getSettings()->contains("render/pt/opacityMicromaps") &&
                                              getSettings()->getAs<bool>("render/pt/opacityMicromaps"))
                                                 ? 1
@@ -2225,14 +1989,6 @@ void OptiXRender::createModule()
                                              OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;
     pipelineOptions.pipelineLaunchParamsSizeInBytes = sizeof(Params);
 
-    // Load and create main module (raygen, miss, occlusion, light hit).
-    //
-    // Resolved against the executable, not the working directory: the build system
-    // drops the OPTIXIR next to the binary (see CMAKE_RUNTIME_OUTPUT_DIRECTORY in
-    // the root CMakeLists), and resolving against the CWD meant the renderer only
-    // started when launched from the build root -- so a debugger, Finder, or any
-    // harness that cd'd elsewhere got an unexplained "failed to open" instead.
-    // This is the same resolveResourcePath() the Metal backend uses for metallibs.
     const fs::path optixPath = oka::resolveResourcePath("optix/strelka_shaders_generated_OptixRender.cu.optixir");
     std::string optixSource;
     readSourceFile(optixSource, optixPath);
@@ -2252,25 +2008,10 @@ void OptiXRender::createModule()
     OPTIX_CHECK_LOG(optixModuleCreate(mState.context, &moduleOptions, &pipelineOptions, closestHitSource.c_str(),
                                       closestHitSource.size(), log, &sizeof_log, &mState.closest_hit_module));
 
-    // Store options for later use. The bound-value table is a local, so the copy
-    // that outlives this function must not keep pointing at it -- nothing reads
-    // the stored options to compile with, and a dangling pointer that is only
-    // dereferenced by a future caller is the kind that stays hidden.
     mState.pipeline_compile_options = pipelineOptions;
     mState.module_compile_options = moduleOptions;
     mState.module_compile_options.boundValues = nullptr;
     mState.module_compile_options.numBoundValues = 0;
-
-    // mPipelineSpecValid is *not* set here, and this is the one line of this
-    // function that has to know it runs on a worker thread.
-    //
-    // It used to be, back when this ran on the main thread and "the module
-    // exists" and "a launch is safe" were the same instant. They are not any
-    // more: the program groups and the pipeline are built after this returns,
-    // and a main thread that saw the flag flip here launched against half of a
-    // pipeline and got OPTIX_ERROR_INVALID_VALUE ten seconds into the pine
-    // forest -- an error that names no subsystem and arrives nowhere near the
-    // mistake. ensurePipelineSpecialization sets it, once, on delivery.
 
     // Create curve modules. One intersector per basis: the basis is compiled
     // into the built-in intersection program, so a scene that mixes linear and
@@ -2405,12 +2146,6 @@ void OptiXRender::createProgramGroups()
     hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hit_prog_group_desc.hitgroup.moduleCH = mState.ptx_module;
     hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__occlusion";
-    // The alpha test for shadow rays. It lives beside the material lookup in the
-    // closest-hit module rather than with the occlusion closest hit, which is
-    // the whole point of a hit group being able to mix modules. Instances whose
-    // material is opaque carry OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT and never
-    // reach it, so a forest floor is not dragged into the callback with the
-    // leaves.
     hit_prog_group_desc.hitgroup.moduleAH = mState.closest_hit_module;
     hit_prog_group_desc.hitgroup.entryFunctionNameAH = "__anyhit__occlusion";
 
@@ -2553,24 +2288,6 @@ void OptiXRender::destroyPipeline()
     }
 }
 
-// Compiling the modules is the longest thing this renderer does on one thread,
-// and it used to do it on the one the window is on.
-//
-// OptiX compiles the OPTIXIR to SASS the first time it sees a given module plus
-// bound-value set, and caches the result on disk. On a miss that is about ten
-// seconds -- measured on the Cornell box with one instance, so it is the size of
-// the module and not of the scene. mutter's check-alive-timeout is five, so the
-// desktop decided the editor had hung and offered to kill it.
-//
-// So the build runs on a worker and this function is a state machine with three
-// states: idle, in flight, and just-finished. The launch is what waits for it --
-// render() skips while mPipelineSpecValid is false -- and the scene build keeps
-// stepping meanwhile, which is most of what those seconds were being spent on
-// anyway.
-//
-// Nothing else may touch mState's modules, program groups or pipeline while the
-// worker owns them. That holds because the old ones are destroyed here, before
-// the worker starts, and the only reader is the launch.
 void OptiXRender::ensurePipelineSpecialization(const Params& params)
 {
     const PipelineSpec wanted = specFor(params);
@@ -2611,18 +2328,6 @@ void OptiXRender::ensurePipelineSpecialization(const Params& params)
         return;
     }
 
-    // Nothing to trace and nothing to see: the editor before a scene has been
-    // opened. A launch here draws black whether or not there is a pipeline to
-    // launch, so the compile buys nothing -- and it is not free. Measured on a
-    // cold module cache: 40.8 s for the empty scene's specialisation, which the
-    // first scene opened then has to throw away if it differs by so much as
-    // `fog` (45.0 s again). Starting the editor *with* a scene never hit this,
-    // because the scene lands half a second in and wins the race.
-    //
-    // Both terms matter. An environment map with no geometry in front of it is a
-    // frame worth compiling for; geometry with no environment obviously is.
-    // render() already skips the launch while mPipelineSpecValid is false, so
-    // this needs no guard of its own.
     if (!params.hasEnvMap && mScene != nullptr && mScene->getInstances().empty())
     {
         return;
@@ -2662,13 +2367,6 @@ void OptiXRender::ensurePipelineSpecialization(const Params& params)
 
 void OptiXRender::createSbt()
 {
-    // The records carry program group headers, so there is nothing to pack until
-    // the groups exist. Reachable because the first pipeline is now built lazily,
-    // on the first render() that knows the scene's specialisation, while the
-    // scene build stages below run before it and ask for an SBT of their own.
-    // Marked dirty rather than skipped silently: ensurePipelineSpecialization
-    // builds it as soon as the groups land, and the stage that wanted it here is
-    // one that never launches.
     if (mState.raygen_prog_group == nullptr)
     {
         mSbtDirty = true;
@@ -2806,11 +2504,6 @@ void OptiXRender::createSbt()
                     curveReady ? mOptixCurves[instance.mCurveId]->segmentsPerStrand : 0u;
             }
 
-            // Occlusion hit group. It carries the same payload as the radiance
-            // one, which it did not use to: the shadow any-hit needs the
-            // material to know whether the surface is a cutout, and the index
-            // and vertex offsets to find the uv it must test. Left at zero, a
-            // cutout shadow ray read triangle 0 of mesh 0 for every hit.
             HitGroupSbtRecord& occlusion_hit = hit_groups[i * RAY_TYPE_COUNT + RAY_TYPE_OCCLUSION];
             OPTIX_CHECK(optixSbtRecordPackHeader(
                 linearCurve ? mState.occlusion_linear_curve_hit_group : mState.occlusion_hit_group,
@@ -2861,13 +2554,6 @@ void OptiXRender::createSbt()
     mSbtBytes = raygen_record_size + miss_record_size + hit_group_size;
 }
 
-/// Size the radiance cache, decide whether it needs clearing, and hand the
-/// device the four numbers that drive it.
-///
-/// Off is `sharcCapacity == 0`, and the device code reads that before it reads
-/// anything else in the group, so every other field is free to be stale when the
-/// feature is off. That is what makes the default a byte-for-byte no-op instead
-/// of a second code path that happens to agree.
 void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, uint32_t height)
 {
     const SettingsManager& settings = *getSettings();
@@ -2947,10 +2633,6 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
                                       settings.getAs<uint32_t>("render/pt/sharcReadFrames") :
                                       128u;
 
-    // The temporal window, and how long an unvisited entry survives. Both are
-    // frames, both go to the resolve pass, and both are clamped there to the
-    // SDK's bounds -- a stale threshold below kStaleFrameNumMin in particular
-    // costs more in re-insertion than the table it frees is worth.
     mSharcAccumFrames = settings.contains("render/pt/sharcAccumFrames") ?
                             settings.getAs<uint32_t>("render/pt/sharcAccumFrames") :
                             32u;
@@ -2980,14 +2662,6 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
     params.sharcResponsiveLights =
         responsive ? static_cast<const uint32_t*>(mSharcResponsiveLightBuffer->getNativePtr()) : nullptr;
 
-    // Kept for the resolve pass, which runs after the launch and has no camera.
-    //
-    // Derived exactly as the device derives it -- the translation of the inverse
-    // view, which is what params.viewToWorld[3,7,11] holds a few lines below --
-    // rather than from Camera::position. The two agree, but only one of them is
-    // guaranteed to: the voxel level a shading point lands in and the level
-    // reprojection looks for have to be computed from the same eye, and a
-    // discrepancy there would show up as reprojection quietly finding nothing.
     {
         const glm::mat4 viewToWorld = glm::inverse(camera.matrices.view);
         mSharcCameraPosition[0] = viewToWorld[3][0];
@@ -3019,22 +2693,6 @@ void OptiXRender::updateSharcParams(const oka::Camera& camera, uint32_t width, u
     }
 }
 
-/// Fold one frame of deposits into the cache. See sharc_resolve.h.
-///
-/// Ordering is the whole of the correctness here, and it is why this is a
-/// separate pass rather than something the shading path does inline:
-///
-///     launch            paths atomicAdd into `accum`
-///     -- stream order --
-///     resolve           merges `accum` into `resolved`, ages, evicts, zeroes
-///     -- stream order --
-///     next launch       paths read `resolved`
-///
-/// Everything runs on mState.stream, so each stage sees the previous one's
-/// writes without an explicit barrier -- the CUDA stream is the barrier. Moving
-/// either of these off that stream reintroduces the race silently: the symptom
-/// is a cache that reads a frame's partial sums, which looks like noise rather
-/// than like a synchronisation bug.
 void OptiXRender::resolveSharc()
 {
     if (mSharcCapacity == 0 || !mSharcBuffer)
@@ -3412,18 +3070,6 @@ void OptiXRender::applySkinning()
     markStageSubmitted(optix::GpuStage::Skinning, nullptr);
 }
 
-// Bounding-box diagonal of the skinned vertices, read back from the GPU.
-//
-// It exists because a character collapsing to a point is invisible to every
-// whole-frame metric: a skeleton that never got its joint matrices renders as a
-// speck at the origin, which is small next to its surroundings, so coverage and
-// mean brightness barely move. The CI smoke test greps the line the CLI prints
-// from this, so it has to fail loudly rather than return something plausible.
-//
-// -1 when nothing in the scene is skinned, which is the base class's "cannot
-// answer"; -2 when a skinned position came back non-finite, because a NaN in
-// the vertex buffer is a different fault from a collapse and reporting it as a
-// zero extent would send the reader after the wrong one.
 float OptiXRender::skinnedGeometryExtent()
 {
     size_t first = SIZE_MAX, last = 0;
@@ -3439,10 +3085,6 @@ float OptiXRender::skinnedGeometryExtent()
         return -1.0f;
     }
 
-    // The skinning kernel writes into whichever buffer is current, and with
-    // motion blur on applySkinning() swaps the two every frame -- so reading
-    // mVertexBuffer unconditionally is right, and reading the other one would
-    // report the previous pose half the time.
     const size_t count = last - first;
     const size_t bytes = count * sizeof(oka::Scene::Vertex);
     if (count == 0 || mVertexBuffer->size() < (first + count) * sizeof(oka::Scene::Vertex))
@@ -3490,17 +3132,8 @@ void OptiXRender::allocJointMatrices()
 
 void OptiXRender::render(Buffer* output)
 {
-    // Last frame's pair, if it has landed. Read here rather than at the end of
-    // the frame that recorded it: at that point the work has only been enqueued,
-    // so a read would either block -- turning an asynchronous submission into a
-    // synchronous one -- or find nothing and leave the number at zero forever,
-    // which is what it did.
     collectFrameTiming(false);
 
-    // Before the build stages, not after them. They enqueue acceleration builds
-    // and the environment CDF, and clearing the marks in between would wipe the
-    // record of exactly the submissions a loading scene is most likely to fault
-    // in.
     beginFrameBreadcrumbs();
 
     if (mScenePrep.isBuilding())
@@ -3510,11 +3143,6 @@ void OptiXRender::render(Buffer* output)
         // showing; the clock decides how many of them are worth a frame.
         mPublishClock.noteArrivals();
 
-        // The environment -- the lighting map and the separate backdrop both --
-        // is loaded by the build's own Environment stage, in
-        // buildSceneEnvironment(), rather than here: it is one of the stages the
-        // slice above is stepping through. What is left to do here is say how
-        // much of the scene has arrived.
         metal::StreamReadiness readiness;
         readiness.hasOutputTargets = mState.params.accum != nullptr;
         readiness.hasEnvironment = mEnvMapLoaded || !mScene->getEnvLight().has_value();
@@ -3525,35 +3153,13 @@ void OptiXRender::render(Buffer* output)
         const double intervalMs = getSettings()->getAs<float>("render/stream/publishIntervalMs");
         if (!canTracePartial(readiness) || !mPublishClock.shouldPublish(nowMs, intervalMs, complete))
         {
-            // Nothing to trace yet, or nothing new since the last frame. The busy
-            // flag has to come off here: triggerRenderIfIdle sets it before every
-            // call, and a build stage that returns without submitting anything
-            // leaves nothing behind to clear it, so the build would stall one
-            // stage in.
             mRenderBusy.store(false, std::memory_order_release);
             return;
         }
         mPublishClock.notePublished(nowMs);
-        // The "first frame shown" report is not here. Reaching this point means a
-        // partial frame is *publishable*, which stopped being the same thing as
-        // one being drawn when the pipeline moved to a worker thread: on a cold
-        // module cache there is nothing to launch against for the first ten
-        // seconds, and this line cheerfully reported a frame at 415 ms while the
-        // viewport was black. It is reported after the launch instead.
-        // The scene under the accumulated image just changed, so what has been
-        // accumulated is of a different scene.
         getSharedContext().mSubframeIndex = 0;
     }
 
-    // Edits and animation are only meaningful once the scene is on the device.
-    //
-    // Both paths below rebuild the top level, and the top level resolves every
-    // instance to the bottom level it names -- which, mid-build, is a bottom
-    // level that does not exist yet. The load-time `createLight` alone leaves the
-    // Lights bit set, so the very first partial frame of every scene went
-    // straight into resolveInstanceGeometry with an empty mesh list and took the
-    // editor down with it. The build's own Tail stage consumes these bits, so
-    // nothing is dropped by waiting.
     const bool sceneOnDevice = !mScenePrep.isBuilding();
 
     const ChangeBits changes = sceneOnDevice ? mScene->peekChanges() : ChangeBits::None;
@@ -3561,24 +3167,6 @@ void OptiXRender::render(Buffer* output)
     const bool materialsChanged = any(changes & ChangeBits::Materials);
     if (materialsChanged)
     {
-        // The bit was consumed and nothing acted on it, so every material edit
-        // made after load -- everything the editor's material panel does -- was
-        // dropped on the floor: the device-side MaterialParams array is only
-        // ever written by the build's material stages, which ran once while the
-        // scene was streaming in.
-        //
-        // Both halves of that pair have to run: publishMaterialParams() releases
-        // the old texture set and rewrites the parameter table with every slot
-        // empty, and the texture stage is what fills the slots back in. An edit
-        // is not a load -- it happens between two frames rather than across a
-        // build -- so the slices are run to completion here instead of being
-        // spread over frames. Instance flags are derived from alpha_mode, so the
-        // TLAS has to follow.
-        //
-        // The progress sink is put aside for the duration: it belongs to a load,
-        // and its cancellation flag stays set after an abandoned one, which would
-        // otherwise stop this loop after a single material and leave the rest of
-        // the scene's maps unloaded for the life of the session.
         LoadProgress* const progress = mLoadProgress;
         mLoadProgress = nullptr;
         publishMaterialParams();
@@ -3595,10 +3183,6 @@ void OptiXRender::render(Buffer* output)
     }
     if (structuresChanged)
     {
-        // Material alpha textures are baked into optional opacity micromaps,
-        // while alpha mode and medium boundaries are captured in instance
-        // flags/masks. Rebuild both levels after the new material textures are
-        // resident so traversal and shading see one generation of state.
         createBottomLevelAccelerationStructures();
         createTopLevelAccelerationStructure();
         createSbt();
@@ -3609,10 +3193,6 @@ void OptiXRender::render(Buffer* output)
         if (!structuresChanged)
         {
             createTopLevelAccelerationStructure();
-            // The lights are instances now, and their hit records carry the
-            // pointer to the index buffer createLightBuffer() just rewrote.
-            // Rebuilding one level without the other leaves the intersection
-            // program reading whichever table was there last.
             createSbt();
         }
     }
@@ -3660,18 +3240,6 @@ void OptiXRender::render(Buffer* output)
         }
     }
 
-    // Acceleration structure refit / rebuild.
-    //
-    // What decides between them is now a property of the structure rather than
-    // a frame counter: a BLAS is refit unless it is this frame's turn in the
-    // round-robin, and the TLAS is refit unless something a refit cannot express
-    // has changed -- an instance count, or a child handle that moved under it.
-    //
-    // Motion blur is the exception on both. A motion GAS is built from two
-    // vertex buffers and OPTIX_BUILD_OPERATION_UPDATE would have to be given the
-    // same motion options and both buffers again; a motion IAS is built without
-    // ALLOW_UPDATE at all. Both are rebuilt outright, which is what they already
-    // did and why this branch is kept rather than merged.
     if (animStateChanged)
     {
         bool tlasNeedsRebuild = mEnableMotionBlur;
@@ -3709,10 +3277,6 @@ void OptiXRender::render(Buffer* output)
     const uint32_t outputWidth = output->width();
     const uint32_t outputHeight = output->height();
 
-    // What the frame is asked to produce, resolved before anything is sized:
-    // upscaling renders at half the caller's resolution and lets the 2x model
-    // put the missing pixels back, so the launch dimensions, the accumulation
-    // buffers and the guides all follow from this rather than from the output.
     const uint32_t debugMode = settings.getAs<uint32_t>("render/pt/debug");
     const DenoisePlan plan = denoisePlan(settings.getAs<bool>("render/pt/denoise"),
                                          settings.getAs<bool>("render/pt/enableUpscale"),
@@ -3726,11 +3290,6 @@ void OptiXRender::render(Buffer* output)
     const uint32_t width = plan.renderWidth;
     const uint32_t height = plan.renderHeight;
 
-    // Resolved before the buffers are sized, because it decides whether two of
-    // them exist at all. Turning it on mid-render restarts accumulation: the
-    // split's history is memset by the allocation below, and only subframe 0
-    // resets it in the raygen, so the frames before the switch would be missing
-    // from it while the beauty image counted them.
     const bool writeSplitAov =
         settings.contains("render/pt/splitAov") && settings.getAs<bool>("render/pt/splitAov");
     settingsChanged |= writeSplitAov != mState.params.writeSplitAov;
@@ -3758,12 +3317,6 @@ void OptiXRender::render(Buffer* output)
         // need reset
         getSharedContext().mSubframeIndex = 0;
     }
-    // Latched here, where it is read, rather than at the end of the function. A
-    // frame that returns early -- and there is now more than one way to, all of
-    // them failures -- would otherwise leave the previous pose at whatever it
-    // was before, so the next frame compares against a stale camera, calls it a
-    // cut and resets the accumulator. The visible symptom was a render pinned at
-    // one sample: every attempt reset, incremented, and failed again.
     mPrevView = currView;
 
     const uint32_t rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
@@ -3812,13 +3365,6 @@ void OptiXRender::render(Buffer* output)
                                   (float4*)((OptixBuffer*)output)->getNativePtr();
     params.samples_per_launch = settings.getAs<uint32_t>("render/pt/spp");
     params.handle = mState.ias_handle;
-    // Clamped to what PerRayData::depth counts to. That field is nine bits of a
-    // packed word rather than a whole one (see the note on PerRayData), and the
-    // closest hit stops a path by setting it *to* max_depth, which the raygen
-    // then increments once more -- so the ceiling is 255, not 511. The clamp is
-    // here so the narrowing is a bound the renderer states rather than a wrap a
-    // caller discovers; no scene asks for a path 255 bounces long, and the
-    // ladder's deepest row is 16.
     params.max_depth = std::min(settings.getAs<uint32_t>("render/pt/depth"), 255u);
 
     params.rectLightSamplingMethod = settings.getAs<uint32_t>("render/pt/rectLightSamplingMethod");
@@ -3835,10 +3381,6 @@ void OptiXRender::render(Buffer* output)
         mShaderReorderSupported &&
         (!settings.contains("render/pt/shaderReorder") || settings.getAs<bool>("render/pt/shaderReorder"));
 
-    // Estimator controls. Each one resets accumulation when it moves, because the
-    // frames before and after are estimates of different things (estimatorMode,
-    // clampIndirect) or drawn from different densities (risCandidates), and
-    // averaging them together hides the very difference they exist to show.
     const uint32_t risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
     const uint32_t estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
     const float clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
@@ -3851,11 +3393,6 @@ void OptiXRender::render(Buffer* output)
     params.estimatorMode = estimatorMode;
     params.clampIndirect = clampIndirect;
 
-    // How long one random walk may be, and whether any walk can happen at all.
-    // The step ceiling is the same setting that sizes the Metal wavefront's
-    // extra dispatch iterations, so a walk gets the same budget on both
-    // backends; `hasBoundedMedium` gates the second traversal a shadow ray takes
-    // to accumulate optical depth, which is pure cost in a scene with no gizmo.
     params.subsurfaceIterations =
         settings.contains("render/pt/subsurfaceIterations")
             ? std::min(settings.getAs<uint32_t>("render/pt/subsurfaceIterations"), 256u)
@@ -3871,11 +3408,6 @@ void OptiXRender::render(Buffer* output)
     // either wrote an OpenPBR array or left the pointer null.
     params.hasOpenPBR = params.openpbrParams != nullptr;
 
-    // The atmosphere, from the same place and with the same on/off test Metal
-    // uses (MetalFrameUniforms.mm), so a scene with an `atmosphere` sidecar
-    // block hazes identically on the two backends. Density is the switch: a
-    // block that is present and zero is a scene that turned the haze off, and
-    // paying a free-flight draw per segment for it is not free.
     {
         const auto& atmosphere = mScene->getAtmosphere();
         const bool on = atmosphere.has_value() && atmosphere->density > 0.0f;
@@ -3897,10 +3429,6 @@ void OptiXRender::render(Buffer* output)
            sizeof(params.viewToWorld));
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
 
-    // Projection. The half-extents are adapted to the render aspect the same way
-    // the perspective fov is (Camera::magForAspect), so a camera authored square
-    // and rendered wide keeps its framing instead of stretching -- otherwise a
-    // whole-frame comparison measures the reframe rather than the feature.
     params.projectionType = (uint32_t)camera.projection;
     {
         float halfWidth = camera.xmag;
@@ -3949,11 +3477,6 @@ void OptiXRender::render(Buffer* output)
     params.lensRadius = camera.useDof ? camera.focalLengthMm / (2.0f * camera.fStopDof * 1000.0f) : 0.0f;
 
     params.subframe_index = getSharedContext().mSubframeIndex;
-    // Photometric Units from iray documentation
-    // Controls the sensitivity of the "camera film" and is expressed as an index; the ISO number of the film, also
-    // known as "film speed." The higher this value, the greater the exposure. If this is set to a non-zero value,
-    // "Photographic" mode is enabled. If this is set to 0, "Arbitrary" mode is enabled, and all color scaling is then
-    // strictly defined by the value of cm^2 Factor.
     const float filmIso = settings.getAs<float>("render/post/tonemapper/filmIso");
     // The candela per meter square factor
     const float cm2_factor = settings.getAs<float>("render/post/tonemapper/cm2_factor");
@@ -3984,17 +3507,6 @@ void OptiXRender::render(Buffer* output)
 
     const uint32_t totalSpp = settings.getAs<uint32_t>("render/pt/sppTotal");
     const uint32_t samplesPerLaunch = settings.getAs<uint32_t>("render/pt/spp");
-    // Clamped to zero rather than left negative: an AOV debug view forces a
-    // launch even once mSubframeIndex has reached totalSpp (see below), which
-    // pushes mSubframeIndex one step past totalSpp every frame it stays
-    // selected. Left signed, that makes leftSpp negative and samplesThisLaunch
-    // -- stored into a uint32_t -- wraps to ~4.29 billion, which becomes the
-    // raygen's per-pixel sample-loop trip count and hangs the launch (and the
-    // editor, which synchronizes on it every frame).
-    // The subtraction is done in int64_t rather than left to wrap: totalSpp is
-    // uint32_t and mSubframeIndex is size_t, so the natural spelling underflows
-    // to ~1.8e19 and reaches int32_t only through an implementation-defined
-    // conversion that happens to give back the negative number this wants.
     const int64_t remaining =
         static_cast<int64_t>(totalSpp) - static_cast<int64_t>(getSharedContext().mSubframeIndex);
     const int32_t leftSpp = static_cast<int32_t>(std::max<int64_t>(0, remaining));
@@ -4013,10 +3525,6 @@ void OptiXRender::render(Buffer* output)
         samplesThisLaunch = 1;
         enableAccumulation = false;
     }
-    // A guide view needs the guides written this frame, and they are only
-    // written by a launch. Without this the view freezes at whatever the last
-    // launch before convergence produced -- which looks exactly like a correct
-    // static guide, and is how a stale record goes unnoticed.
     if (params.debug >= DEBUG_MODE_FIRST_AOV && samplesThisLaunch == 0 && !mScene->getIndices().empty())
     {
         samplesThisLaunch = 1;
@@ -4035,11 +3543,6 @@ void OptiXRender::render(Buffer* output)
         params.mortonLevels = levels;
     }
 
-    // The same key the Metal backend reads, so a scene or a config selects the
-    // same sampler on both. 2, 3 and 4 are implemented here; Halton (0) and PCG
-    // (1) exist on Metal alone, and saying so once beats returning a silent
-    // default -- which is how this key went unread on this backend entirely
-    // until the sampler was profiled.
     {
         const uint32_t samplerType = settings.getAs<uint32_t>("render/pt/samplerType");
         switch (samplerType)
@@ -4068,10 +3571,6 @@ void OptiXRender::render(Buffer* output)
     // compiled against has to be settled before they are compiled against it.
     ensurePipelineSpecialization(params);
 
-    // The modules are still compiling on a worker. The scene build above has
-    // already stepped, which is the point -- the two used to be serialised behind
-    // one thread -- but there is no pipeline to launch against yet, and the
-    // viewport keeps whatever it last showed.
     if (!mPipelineSpecValid)
     {
         return;
@@ -4079,11 +3578,6 @@ void OptiXRender::render(Buffer* output)
 
     if (mFrameStartEvent)
     {
-        // The legacy default stream, which cudaStreamCreate's blocking streams
-        // synchronise against -- so a pair recorded here brackets the launch on
-        // mState.stream as well as the post kernels on this one, and the number
-        // is the whole frame rather than the part of it that happens to share a
-        // stream with the events.
         latchCudaError(cudaEventRecord(mFrameStartEvent, nullptr), "record the frame start event");
     }
 
@@ -4117,13 +3611,6 @@ void OptiXRender::render(Buffer* output)
             cudaMemsetAsync(params.iorStats, 0, IOR_STAT_COUNT * sizeof(uint32_t), mState.stream);
         }
 
-        // Launch OptiX path tracer.
-        //
-        // Checked rather than OPTIX_CHECK'd: an abort here takes the editor down
-        // with the scene still on the device and leaves the harness nothing to
-        // report. A latch lets StrelkaCLI say the image is not valid and exit
-        // non-zero, which is the logic it has always had and never saw an error
-        // to trigger.
         const OptixResult launchResult =
             optixLaunch(mState.pipeline, mState.stream, mState.mParamsBuffer->getPtr(), sizeof(Params), &mState.sbt,
                         width, height,
@@ -4142,42 +3629,15 @@ void OptiXRender::render(Buffer* output)
         else
         {
             markStageSubmitted(optix::GpuStage::PathTrace, mState.stream);
-            // Time to first pixel is the number this whole path exists to move,
-            // so it is reported rather than inferred from watching a window --
-            // and reported from the one place that means a pixel was actually
-            // traced, which is here.
             if (!mReportedFirstPartialFrame)
             {
                 mReportedFirstPartialFrame = true;
                 STRELKA_INFO("First frame shown {:.0f} ms into the scene build (stage {})",
                              nowMilliseconds() - mBuildStartMs, optix::buildStageName(mScenePrep.stage()));
             }
-            // Update -> resolve -> query, in stream order. The launch above is
-            // the update and the next one is the query; this is what makes the
-            // deposits it just made readable, and ages out what the camera has
-            // left behind. See resolveSharc().
             resolveSharc();
         }
 
-        // Update subframe index for accumulation.
-        //
-        // A non-accumulating launch is finished the moment it returns -- there is
-        // nothing further to converge -- so it reports the full budget rather than
-        // zero. Reporting zero is what hung StrelkaCLI forever on the single-hit
-        // debug views (`render.debug` 1 and 2 disable accumulation): the headless
-        // loop is `while (mSubframeIndex < spp)`, so an index that resets every
-        // frame never lets it exit. The interactive path is unaffected, because
-        // samplesThisLaunch is computed from samplesPerLaunch and ignores the
-        // remaining budget entirely when accumulation is off.
-        //
-        // Advanced whether or not the launch took, which is deliberate and is
-        // what Metal does -- it counts at encode time and asks about validity
-        // separately. The counter says how many samples have been *submitted*;
-        // deviceError() says whether they are worth anything. A counter that
-        // stalled on failure would leave every caller that loops until it
-        // reaches its target -- StrelkaCLI, and the editor's audit modes --
-        // spinning forever on a GPU that will never produce another sample, and
-        // never reaching the check they already have for exactly this.
         getSharedContext().mSubframeIndex =
             enableAccumulation ? getSharedContext().mSubframeIndex + samplesThisLaunch : totalSpp;
         if (mDeviceError)
@@ -4198,28 +3658,8 @@ void OptiXRender::render(Buffer* output)
         }
     }
 
-    // --- Denoise ---------------------------------------------------------
-    //
-    // Before tonemapping, on linear radiance: the network was trained on light
-    // rather than on a display curve, and exposure is a viewing decision that
-    // comes after it. The result goes back into the image the display and the
-    // EXR writer read, which is what makes `render.denoise = true` mean
-    // something in a headless run.
     float4* displayImage = (float4*)((OptixBuffer*)output)->getNativePtr();
     mDenoiserFallback = false;
-    // A guide view is looked at instead of the denoised image, not through it,
-    // so the network is not run -- and the plan handed over is the empty one, so
-    // its state and scratch memory go back to the device while it is not needed.
-    //
-    // That includes the single-hit views (eNormal, eMotionBlur), not only the
-    // AOV ones: `< DEBUG_MODE_FIRST_AOV` let debug values 1 and 2 through, so
-    // the temporal denoiser ran its reprojection on a buffer holding an
-    // encoded normal instead of radiance, blending it against history from
-    // whatever debug view (or none) the previous frame happened to be in.
-    // Wrong-domain history at a disocclusion or an invalid motion vector reads
-    // as a network-shaped blotch with no relation to the scene under it --
-    // fixed to the screen rather than to any surface, because the denoiser
-    // runs in screen space.
     const bool runDenoiser = plan.enabled() && params.debug == (uint32_t)DebugMode::eNone;
     {
         const bool ready = mDenoiser.configure(mState.context, mState.stream, runDenoiser ? plan : DenoisePlan{});
@@ -4254,23 +3694,12 @@ void OptiXRender::render(Buffer* output)
             mDenoiserFallback = true;
         }
     }
-    // An upscaling plan that could not run leaves the caller's buffer holding
-    // nothing at all, since the tracer wrote a half-size image somewhere else.
-    // A nearest-neighbour blow-up is not a good picture, but it is a picture of
-    // the right scene at the right size, which a black frame is not. Every
-    // debug view falls in here now that runDenoiser is eNone-only above --
-    // single-hit views (1, 2) need the same point-sample fallback the AOV
-    // views (>= 3) always did, or a half-size render stays half the display.
     if (plan.upscale && (mDenoiserFallback || params.debug != (uint32_t)DebugMode::eNone))
     {
         upscalePointSample(params.image, width, height, displayImage, outputWidth, outputHeight);
     }
     mResetTemporalHistory = false;
 
-    // Publication stays scene-linear. Presentation state travels with the exact
-    // slot it describes so a display can apply exposure, the curve and gamma
-    // once, after acquiring that slot. Debug views already contain display
-    // values and bypass the complete presentation transform.
     mPendingPresentation.exposure[0] = exposureValue.x;
     mPendingPresentation.exposure[1] = exposureValue.y;
     mPendingPresentation.exposure[2] = exposureValue.z;
@@ -4278,12 +3707,6 @@ void OptiXRender::render(Buffer* output)
         std::max(settings.getAs<float>("render/post/tonemapper/maxEDR"), 1.0f);
     mPendingPresentation.gamma = gamma;
     mPendingPresentation.tonemapper = static_cast<uint32_t>(tonemapperType);
-    // One debug view is not in display values: DebugMode::eSharcRadiance shows
-    // what the radiance cache holds, in scene units. Looking at it is only
-    // useful beside the beauty render at the same exposure, and bypassing the
-    // presentation transform would make every voxel above one the same white.
-    // Everything else the debug menu offers -- normals, motion, the guides, the
-    // cache's grid, occupancy and bounce heatmaps -- is already a colour.
     mPendingPresentation.content = DEBUG_MODE_IS_SCENE_LINEAR(params.debug) ?
                                        PresentationContent::SceneLinear :
                                        PresentationContent::DebugDisplayLinear;
@@ -4384,14 +3807,6 @@ void OptiXRender::buildSceneBuffers()
     createWidthsBuffer();
 }
 
-// The stage that makes a scene visible before it is loaded.
-//
-// Nothing here depends on geometry or on materials, and together these are
-// already a complete picture: somewhere to accumulate, the sky, the lights, a
-// shader binding table, and a top level to trace against. The top level is built
-// empty on purpose -- every ray then misses and reaches the environment, so the
-// first frame is the scene's own lighting with none of its objects in it yet,
-// and the objects appear in that rather than replacing a black screen.
 void OptiXRender::buildSceneEnvironment(Buffer* output)
 {
     updatePathtracerParams(output->width(), output->height());
@@ -4399,10 +3814,6 @@ void OptiXRender::buildSceneEnvironment(Buffer* output)
     updateSceneEnvironment();
 
     createLightBuffer();
-    // Built here rather than with the structures because it does not depend on
-    // them: the records are packed per instance in the same order the top level
-    // will use, so the table the empty top level never reaches is already the one
-    // the real top level wants.
     createSbt();
     buildEmptyTopLevel();
 }
@@ -4412,18 +3823,6 @@ void OptiXRender::updateSceneEnvironment()
     destroyEnvironmentTextures();
 
     const auto& envLight = mScene->getEnvLight();
-    // A dome with no texture is still a light: a uniform sky of one colour, which
-    // is what a V-Ray dome with use_dome_tex off is, and what a furnace test is.
-    // Without this a sidecar of the form {"environment": {"color": [1,1,1]}} lit
-    // nothing at all -- hasEnvMap needs a texture and the miss colour was a hard
-    // zero -- so such a scene rendered black but for its lamps.
-    //
-    // Carried on the miss colour rather than as a sampled light, which is not a
-    // shortcut: next-event estimation exists to importance sample a distribution
-    // the BSDF cannot see, and a constant environment has none. For a Lambertian
-    // surface the cosine-weighted BSDF sample IS the optimal strategy, so what is
-    // left to converge is visibility alone. Same reasoning, and the same place to
-    // put it, as MetalFrameUniforms.
     mMissColor = make_float3(0.0f);
     if (envLight.has_value() && envLight->texturePath.empty())
     {
@@ -4443,10 +3842,6 @@ void OptiXRender::updateSceneEnvironment()
         // factor first would move the result by an ulp.
         mState.params.envMapRotation = static_cast<float>(envLight->rotationY * (M_PI / 180.0));
         mState.params.envMapColorTint = make_float3(envLight->color.x, envLight->color.y, envLight->color.z);
-        // A backdrop the camera sees instead of the lighting environment. The
-        // intensity is the backdrop's own; the auto-calibration scale above is
-        // not applied to it, because it exists to reconcile the *lighting*
-        // map's units with the analytic lights and the backdrop lights nothing.
         if (!envLight->backgroundTexturePath.empty())
         {
             loadEnvBackground((fs::path(resourcePathStr) / envLight->backgroundTexturePath).string());
@@ -4584,13 +3979,6 @@ void OptiXRender::buildSceneTail(Buffer* output)
 // Memory report
 // ---------------------------------------------------------------------------
 
-// Deliberately not a running tally kept at the allocation sites: those drift the
-// moment someone adds a cudaMalloc and forgets the counter, and the first symptom
-// is a total that no longer matches the device's. Every figure below is either
-// the size an OptixBuffer was created with, a size CUDA is asked for by handle,
-// or a size recorded at the one place a bare CUdeviceptr is produced -- and
-// whatever is missed shows up as the unaccounted remainder between the sum and
-// the two totals rather than vanishing.
 bool OptiXRender::memoryReport(MemoryReport& report) const
 {
     report.gpu.clear();
@@ -4704,10 +4092,6 @@ bool OptiXRender::memoryReport(MemoryReport& report) const
     add("Lights", bufBytes(mLightBuffer));
     add("IES profiles", bufBytes(mIesBuffer));
     add("Skinning", bufBytes(mVertexSkinDataBuffer) + mSkinningPtrs.bytes);
-    // The hash table and the per-pixel visit records. Both are zero unless the
-    // cache is on, and neither was in this report before the second one existed
-    // -- a per-pixel allocation that the memory report does not know about is
-    // exactly the kind this report is for.
     add("Radiance cache", bufBytes(mSharcBuffer) + bufBytes(mSharcPathBuffer));
 
     {
@@ -4781,20 +4165,7 @@ void OptiXRender::init()
 
     createContext();
     createTimingEvents();
-    // No pipeline here. It used to be built now, against a PipelineSpec taken
-    // from an empty scene, and then thrown away and rebuilt on the first frame
-    // once fog, motion blur and the rest were known -- two cold-cache compiles
-    // of ten seconds each where the scene only ever needed the second. The first
-    // render() builds it, by which time it knows what to build.
 
-    // Arm the deferred scene build. The first render() call picks it up a stage
-    // at a time; a synchronous caller drives it to the end through renderSync.
-    //
-    // Here rather than on the first render() so isBuildingScene() is true the
-    // moment init() returns. The editor waits on it before it measures auto
-    // exposure and before it calls the scene ready, and a flag that only became
-    // true after the first frame would let both of those happen against a scene
-    // with nothing in it.
     mScenePrep.begin();
 }
 
@@ -4939,10 +4310,6 @@ void OptiXRender::markStageSubmitted(optix::GpuStage stage, CUstream stream)
     {
         return;
     }
-    // Enqueued behind the work it follows, on the same stream, so the byte lands
-    // only if that work ran to completion. A fault takes the stream down with
-    // the memset still in it, which is exactly what makes the absent mark
-    // meaningful.
     cudaMemsetAsync(optix::devicePtr<uint8_t>(mStageMarkBuffer->getPtr()) + index, 1, 1, stream);
 }
 
@@ -4974,10 +4341,6 @@ void OptiXRender::reportGpuStageFailure()
     }
     else if (failure.allSubmittedCompleted)
     {
-        // Everything this frame submitted also finished, so the error came from
-        // outside it. Said out loud because the alternative is blaming whichever
-        // stage happened to be last, which is how an earlier asynchronous fault
-        // gets attributed to the tonemap.
         STRELKA_ERROR("GPU fault: every stage this frame submitted completed; the error is from outside this frame");
     }
     if (mScenePrep.isBuilding())
@@ -5014,10 +4377,6 @@ void OptiXRender::syncFrameAndLatchErrors()
 
 void OptiXRender::renderSync(Buffer* output)
 {
-    // A synchronous caller wants the frame, not a responsive window, so the
-    // build runs to completion here rather than one stage per call -- and that
-    // includes the pipeline, which render() would otherwise leave compiling and
-    // come back for on a next frame this caller is not going to make.
     finishSceneBuild(output);
     mPipelineBuildBlocking = true;
     render(output);
@@ -5032,14 +4391,6 @@ void OptiXRender::renderSync(Buffer* output)
 // Non-blocking editor loop
 // ---------------------------------------------------------------------------
 
-// Submits a frame and waits for it, which reads as a contradiction next to
-// Metal's version and is not one. Metal hands the frame to a completion handler
-// and returns; OptiX has no such callback, and the alternatives are polling an
-// event from the UI thread -- a second loop that has to be kept in step with
-// this one -- or lying about when the frame landed. Everything measuring a frame
-// reads isRenderBusy() as "the frame is there", and returning before it is turns
-// every one of those measurements into a race. The wait is one launch, which at
-// the interactive samples-per-launch this path uses is milliseconds.
 void OptiXRender::triggerRenderIfIdle()
 {
     // Last call's frame, waited for here rather than where it was submitted.
@@ -5080,10 +4431,6 @@ void OptiXRender::triggerRenderIfIdle()
     // this frame never wrote.
     if (mRenderBusy.load(std::memory_order_acquire))
     {
-        // Left in flight. The wait for it happens at the top of the next call,
-        // by which time the editor has drawn a whole UI frame against the
-        // picture that is already on screen -- work that used to run after the
-        // trace had finished, with the device idle for the whole of it.
         mSubmittedIndex = mWriteIndex;
     }
 }
@@ -5112,10 +4459,6 @@ void OptiXRender::reapSubmittedFrame(bool wait)
 
     syncFrameAndLatchErrors();
     collectFrameTiming(true);
-    // A failed frame is not published. Its buffer holds whatever was in it
-    // before, and showing that is how a GPU fault comes out looking like a
-    // lighting bug; the last good frame stays on screen and the editor's
-    // alert says why it stopped moving.
     if (!mDeviceError)
     {
         mFramePresentation[mSubmittedIndex] = mPendingPresentation;
@@ -5147,15 +4490,6 @@ Render::ReadyFrame OptiXRender::getReadyFrame()
 // GPU capture
 // ---------------------------------------------------------------------------
 
-// Nsight rather than Xcode, and a range rather than a file.
-//
-// The CUDA analogue of Metal's .gputrace is the profiler's capture range:
-// launch under `nsys profile --capture-range=cudaProfilerApi` (or
-// `ncu --profile-from-start off`) and these two calls bracket exactly the frame
-// that would otherwise have been averaged together with the acceleration
-// structure build. The path is where the *profiler* was told to write, not
-// something this can choose, so it is reported rather than used -- saying so is
-// what stops the next reader assuming a file appeared and going looking for it.
 void OptiXRender::beginGpuCapture(const std::string& path)
 {
     if (mCaptureActive)
@@ -5268,12 +4602,6 @@ void OptiXRender::createIndexBuffer()
     createOrUpdateBuffer(mIndexBuffer, mScene->getIndices());
 }
 
-/// One AABB per analytic light, in two structures: what a camera ray may hit and
-/// what only a bounce ray may. An instance mask can say exactly that much, which
-/// is why the split is here rather than inside the intersection program.
-///
-/// The boxes themselves are analyticLightAabb()'s, which is where the note on
-/// why they are loose lives.
 void OptiXRender::createAnalyticLightAccel()
 {
     const std::vector<Scene::Light>& lights = mScene->getLights();
@@ -5527,19 +4855,6 @@ void OptiXRender::createEmissiveMeshLights()
     updateEmitterSelectionProbabilities();
 }
 
-/// Upload the images projector lights throw, in the order the scene registered
-/// them, and publish the table each light's points[0].z indexes.
-///
-/// Rebuilt with the light set rather than with the materials, and tracked in its
-/// own resource list, because the two have different lifetimes: editing a
-/// material reloads every material texture, and a projector's slide must not go
-/// with them while a light in the buffer still names it.
-///
-/// The images go up as RGBA float rather than through the block-compressed
-/// material path. A projector's texels are its emission, magnified across a wall
-/// by a factor of ten or more, where the 4x4 block artefacts a BC7 encode leaves
-/// behind are not a subtle quality difference -- and a scene has a handful of
-/// slides, not the thousands of maps that made compression worth its cost there.
 void OptiXRender::createProjectorTextures()
 {
     destroyProjectorTextures();
@@ -5623,16 +4938,6 @@ void OptiXRender::destroyProjectorTextures()
     mState.params.scene.numProjectorTextures = 0;
 }
 
-/// One bit per light, set where the scene marked the light responsive.
-///
-/// Built here rather than in updateSharcParams because it is a property of the
-/// light set and changes only when that does -- and because a per-frame rebuild
-/// would upload a bitset every frame for a feature most scenes never switch on.
-///
-/// The buffer is dropped entirely when no light is responsive, which is what
-/// `params.sharcResponsive` reads, and that value is bound into the pipeline as
-/// a constant: a scene without a responsive light compiles out the second probe
-/// on every cached read and the second deposit on every path.
 void OptiXRender::createSharcResponsiveLightBuffer()
 {
     const auto& descs = mScene->getLightsDesc();
@@ -5660,12 +4965,6 @@ void OptiXRender::createSharcResponsiveLightBuffer()
 
 void OptiXRender::createIesBuffer()
 {
-    // Packed here rather than cached against the scene's profile list because
-    // the tables are small -- a 181x1 luminaire is under a kilobyte -- and this
-    // runs only when the light set changes.
-    // Always upload, even with no profiles: packProfiles() returns a zero-count
-    // header, and a real pointer to one is what lets the shading path multiply
-    // by sampleIesCandela() unconditionally instead of branching per light.
     const std::vector<Scene::IesProfile>& profiles = mScene->getIesProfiles();
     createOrUpdateBuffer(mIesBuffer, oka::ies_pack::packProfiles(profiles));
     if (!profiles.empty())
@@ -5687,10 +4986,6 @@ oka::optix_tex::DecodeSettings OptiXRender::textureDecodeSettings() const
         settings.downscale = std::max(1u, s->getAs<uint32_t>("render/texture/downscale"));
     if (s->contains("render/texture/compress"))
         settings.blockCompress = s->getAs<bool>("render/texture/compress");
-    // Mip chains cost a third of the texture memory and buy nothing until a
-    // level is selected: `tex2D` from a ray tracing program has no derivatives,
-    // so it reads level 0. Off until ray-cone LOD asks for them, which is what
-    // `render/texture/mips` is for.
     if (s->contains("render/texture/mips"))
         settings.wantMips = s->getAs<bool>("render/texture/mips");
     return settings;
@@ -5746,10 +5041,6 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
         }
     }
 
-    // Tracked in the *material* set, not the general one: these are released and
-    // reloaded whenever publishMaterialParams() runs again, which is what makes an
-    // edited material reach the GPU. The general set holds the environment, which
-    // a material reload must not free.
     if (res.array)
         mMaterialTextureArrays.push_back(res.array);
     if (res.mipmapped)
@@ -5802,12 +5093,6 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     mTextureArrays.push_back(envArray);
     mTextureObjects.push_back(envTexObj);
 
-    // The alias table comes from the shared host builder in
-    // render/host/ibl_alias_table.h. It is backend-neutral and
-    // already has a unit test; reusing it rather than writing a second
-    // implementation is what makes the two backends importance-sample the same
-    // HDRI from the same distribution, which is the only way their EXRs can be
-    // compared texel for texel.
     const auto aliasResult = metal::buildSolidAngleIblAliasTable(pixelData, width, height);
     static_assert(sizeof(EnvAliasEntry) == sizeof(metal::EnvAliasEntry),
                   "device EnvAliasEntry must match the host builder's entry");
@@ -5820,10 +5105,6 @@ void OptiXRender::loadEnvMap(const std::string& texturePath)
     mEnvAliasBuffer = std::make_unique<OptixBuffer>(aliasBytes);
     CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mEnvAliasBuffer->getPtr()), aliasResult.alias.data(), aliasBytes,
                           cudaMemcpyHostToDevice));
-    // The stage the breadcrumbs know as EnvCdf is now the alias table: the CDF
-    // kernel it was named for is gone, but it is still the same point in the
-    // frame -- the environment's sampling distribution reaching the device -- so
-    // a fault there is still reported against it.
     markStageSubmitted(optix::GpuStage::EnvCdf, nullptr);
 
     // Store env map params
@@ -5943,14 +5224,6 @@ void OptiXRender::destroyEnvironmentTextures()
     mEnvMapAutoScale = 1.0f;
 }
 
-// The material table, without a single texture in it.
-//
-// Split from the maps on purpose, and the split is what makes a scene appear
-// before it has finished loading: this is a few kilobytes of struct copies and
-// everything the acceleration structures need to know about materials comes out
-// of it, while decoding the maps is minutes of PNG on a large scene. Geometry
-// therefore reaches the screen in flat material colours and the maps fill into
-// the live table behind it, rather than the whole scene waiting on the last JPEG.
 void OptiXRender::publishMaterialParams()
 {
     const auto& matDescs = mScene->getMaterials();
@@ -5960,10 +5233,6 @@ void OptiXRender::publishMaterialParams()
         return;
     }
 
-    // Every texture the texture stage below loads is loaded again when this runs
-    // again, so the previous set is released first. Without this a material edit
-    // -- which now really does re-run this -- leaks a full copy of the scene's
-    // textures each time.
     destroyMaterialTextures();
 
     mMaterials.resize(matDescs.size());
@@ -6040,16 +5309,6 @@ void OptiXRender::publishMaterialParams()
     mTextureCache.clear();
 }
 
-// The OpenPBR half of the material table.
-//
-// Split out rather than folded into the loop above, because the decision it
-// makes is scene-wide and has to be taken before any material is written: either
-// this launch has an OpenPBR array or it has none at all, and the closest-hit
-// program reads the null pointer as "not this launch".
-//
-// Behaviour port of MetalMaterials::publishParameters()'s OpenPBR section, which
-// is where each of the choices below was measured. Not restated here beyond what
-// is needed to read the code.
 void OptiXRender::publishOpenPBRParams()
 {
     const auto& matDescs = mScene->getMaterials();
@@ -6065,19 +5324,8 @@ void OptiXRender::publishOpenPBRParams()
     mState.params.openpbrTranslucency = false;
     mState.params.openpbrMetallic = false;
 
-    // Which material model the scene shades with. A render setting rather than a
-    // scene property on purpose: it makes the two models an A/B on one asset,
-    // which is the only external check on the OpenPBR integration that does not
-    // involve a second renderer -- Blender has no OpenPBR to compare against.
-    // 0 = the glTF model that has always shipped, 1 = OpenPBR.
     const bool openpbrModel = getSettings()->getAs<uint32_t>("render/material/model") == 1u;
 
-    // A material can arrive as OpenPBR already: the <stem>_openpbr.json sidecar
-    // and the MaterialX loader both author the whole parameter block and set the
-    // type at load time. That is a property of the scene, so it holds whatever
-    // the render setting says -- an authored block wins over a translated one,
-    // because it is a statement about the surface rather than a best effort at
-    // re-spelling a different model.
     bool anyAuthored = false;
     for (const auto& desc : matDescs)
     {
@@ -6121,11 +5369,6 @@ void OptiXRender::publishOpenPBRParams()
             openpbrParams.push_back(openpbr_make_default_params());
         }
 
-        // Derived rather than authored, so it cannot disagree with the paths
-        // beside it: it says which slots this material *names a file for*, and
-        // the shading path uses it to skip the handle table entirely for a
-        // material that names none. Whether the file then decoded is a separate
-        // question the null handle answers.
         unsigned int mask = 0u;
         for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
         {
@@ -6149,31 +5392,11 @@ void OptiXRender::publishOpenPBRParams()
             continue;
         }
 
-        // Emission is not the BSDF's job in this integrator: the shade path reads
-        // MaterialParams::emission * emission_strength directly and never
-        // consults OpenPBR_PreparedBsdf::emission. OpenPBR states the same
-        // quantity as a luminance times a tint, so the product has to be mirrored
-        // into those two fields or an authored emitter renders black and nothing
-        // says so. Passed through 1:1 -- the spec calls emission_luminance nits
-        // while Strelka's emitters carry radiance in the light sidecar's units,
-        // and inventing a conversion would be worse than an explicit mismatch.
         const OpenPBRParams& o = openpbrParams.back();
         MaterialParams& gm = mMaterials[i].params;
         gm.emission = make_float3(o.emission_color.r, o.emission_color.g, o.emission_color.b);
         gm.emission_strength = o.emission_luminance;
 
-        // The interior, in the two places the integrator keeps it. OpenPBR states
-        // one medium; this renderer has two mechanisms and they are not
-        // interchangeable: Beer-Lambert absorption over a segment, from the IOR
-        // stack, and a scattering random walk. Split along the same line OpenPBR
-        // itself does -- transmission depth is pure absorption, and volume.h's
-        // glTF reading sigma_t = -ln(C)/d is the formula Adobe derives, so a
-        // transmissive OpenPBR material goes to the existing absorption path
-        // unchanged and nothing is computed twice.
-        //
-        // Note this pins the reading: a scene left on
-        // render/material/volumeModel = cycles would give its OpenPBR glass a
-        // density the specification does not.
         if (o.transmission_depth > 0.0f)
         {
             gm.attenuation_distance = o.transmission_depth;
@@ -6181,11 +5404,6 @@ void OptiXRender::publishOpenPBRParams()
                 make_float3(o.transmission_color.r, o.transmission_color.g, o.transmission_color.b);
         }
 
-        // Scattering is the other half, and only the trigger is mirrored. Its
-        // numbers -- extinction, single-scattering albedo, phase anisotropy --
-        // are read from openpbr_interior_volume() in the shader instead, because
-        // deriving them here would mean reimplementing the van de Hulst mapping
-        // Adobe already has.
         gm.subsurface = o.subsurface_weight;
         gm.thin_walled = o.geometry_thin_walled;
     }
@@ -6211,14 +5429,6 @@ void OptiXRender::publishOpenPBRParams()
                  openpbrModel ? "openpbr" : "gltf", anyAuthored);
 }
 
-// One slice of texture decoding. Returns true when every material has its maps.
-//
-// Each material is patched into the live device table as it finishes -- its six
-// texture-object slots and its own MaterialParams entry, both at their offsets --
-// so a frame traced between two slices is correct for the materials that have
-// arrived and correct-without-maps for the ones that have not. Nothing is ever
-// half-written: the parameters naming a slot go up after the slot holds the
-// object.
 bool OptiXRender::stepMaterialTextures(double budgetMs)
 {
     const auto& matDescs = mScene->getMaterials();
@@ -6260,10 +5470,6 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         cudaTextureObject_t* texSlots = &mHostMaterialTextures[i * MAX_MATERIAL_TEXTURES];
         MaterialParams& params = mMaterials[i].params;
 
-        // The kind per slot is the same split the Metal backend makes: base
-        // colour and emission are sRGB encoded, everything else is linear data
-        // that a transfer function would corrupt, and a normal map is a
-        // direction rather than a colour at all.
         texSlots[0] = loadOrCacheTex(desc.baseColorTexPath, oka::optix_tex::Kind::Color);
         texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath, oka::optix_tex::Kind::NonColor);
         texSlots[2] = loadOrCacheTex(desc.normalTexPath, oka::optix_tex::Kind::Normal);

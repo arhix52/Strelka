@@ -246,10 +246,6 @@ TEST_CASE("texel indices wrap the way cudaAddressModeWrap does")
 
 TEST_CASE("BC4 alpha decodes to what the compressor was handed, within the palette")
 {
-    // Round trip through the encoder this tree ships. A micromap built from the
-    // uncompressed file would describe a texture the renderer does not have, so
-    // the decode has to be the compressed one's -- and the tolerance has to
-    // cover whatever the palette cost.
     auto roundTrip = [](const std::vector<uint8_t>& alphas) {
         REQUIRE(alphas.size() == 16u);
         std::vector<uint8_t> rgba(size_t{ 16 } * 4, 0u);

@@ -1,22 +1,6 @@
 #ifndef STRELKA_RECT_SAMPLING_H
 #define STRELKA_RECT_SAMPLING_H
 
-// ============================================================================
-// rect_sampling.h -- solid-angle sampling of a rectangular light.
-//
-// Urena / Fajardo / King, EGSR 2013, "An Area-Preserving Parametrization for
-// Spherical Rectangles", in the numerically hardened form Cycles uses: the
-// internal angles via asin rather than acos, because the solid angle of a small
-// rectangle is a tiny leftover from ~2pi and acos loses it to cancellation.
-//
-// This existed in three copies -- common/lights.h, metal/lights_metal.h and a
-// host-only scene helper. The host test now includes this file directly, so it
-// covers what ships.
-//
-// Takes a corner and two edge vectors rather than a light struct, so the same
-// code serves a UniformLight on either device and a RectCorners on the host.
-// ============================================================================
-
 #include <strelka/material/material_math.h>
 
 struct SphQuad
@@ -36,10 +20,6 @@ struct SphQuad
     float g2;
     float g3;
     float S;
-    /// True when the solid angle is too small or too grazing to sample in
-    /// float32. Callers fall back to area sampling -- and the pdf has to ask
-    /// this the same way the sampler did, or the two describe different
-    /// densities for the same rectangle.
     bool useAreaFallback;
 };
 
@@ -61,11 +41,6 @@ DEVICE_FUNC SphQuad sphQuadInit(float3 p0, float3 ex, float3 ey, float3 o)
     squad.o = o;
     squad.x = normalizeFiniteVectorOrZero(ex);
     squad.y = normalizeFiniteVectorOrZero(ey);
-    // The Urena/Fajardo/King mapping is for a Euclidean rectangle. A shear
-    // turns it into a general parallelogram whose normalized edges are not an
-    // orthonormal frame; using that frame moves samples off the light plane.
-    // The existing uniform-area sampler is exact for every affine
-    // parallelogram and its PDF path observes this same flag.
     if (dot(squad.x, squad.y) != 0.0f)
     {
         squad.S = 1.0f; // positive sentinel; unused by the area fallback
@@ -144,10 +119,6 @@ DEVICE_FUNC float3 sphQuadSample(const THREAD_REF SphQuad& squad, float u, float
     return squad.o + xu * squad.x + yv * squad.y + squad.z0 * squad.z;
 }
 
-/// The solid angle alone, for the pdf side of the MIS estimate.
-///
-/// The same construction as sphQuadInit(), so the fallback predicate the sampler
-/// applied and the one the pdf applies cannot disagree: they are the same line.
 DEVICE_FUNC float sphQuadSolidAngle(float3 p0, float3 ex, float3 ey, float3 o, THREAD_REF bool& useAreaFallback)
 {
     const SphQuad squad = sphQuadInit(p0, ex, ey, o);

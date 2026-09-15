@@ -1,41 +1,3 @@
-// ============================================================================
-// test_openpbr_energy.cpp
-//
-// A white furnace test for the OpenPBR path: put a surface in a uniform unit
-// radiance field and ask how much of it comes back. The answer is the
-// directional albedo,
-//
-//     rho(wo) = integral over the sphere of  f(wo, wi) * |cos(N, wi)|  dwi
-//
-// and for a passive material it cannot exceed 1. Exceeding it is not a subtle
-// error -- an albedo of 1.05 compounds to 1.6x over eight bounces, and shows up
-// as an interior that will not stop getting brighter the longer it renders.
-//
-// This complements test_openpbr_consistency.cpp rather than repeating it. That
-// file checks sample and eval against each other pointwise; a bridge that
-// dropped an entire lobe would pass it, because the lobe would be missing
-// consistently from both sides. This file integrates, so a missing lobe shows
-// up as albedo that is too low, and a double-counted one as albedo too high.
-//
-// Two estimators, on purpose:
-//
-//   rho_sampled     the mean of bsdf_over_pdf over importance-sampled
-//                   directions. Exact in expectation, and the only one of the
-//                   two that can measure a delta lobe -- a smooth coat has no
-//                   density with respect to solid angle, so quadrature simply
-//                   misses it.
-//   rho_quadrature  a stratified sum of bsdf * |cos| * dwi over the sphere.
-//                   Knows nothing about the sampler, so agreement between the
-//                   two is evidence that neither is lying. Only meaningful for
-//                   rough materials, so it is only asked of those.
-//
-// Both are deterministic: directions come from a radical-inverse sequence, not
-// a random stream, so a failure reproduces exactly rather than on average.
-//
-// The bound is stated as rho <= 1 + tolerance, where the tolerance is Monte
-// Carlo error at the sample count used, not a claim that a few percent of extra
-// energy would be acceptable.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -230,12 +192,6 @@ TEST_CASE("openpbr white furnace: no material returns more energy than it receiv
 
 TEST_CASE("openpbr white furnace: a lossless white surface returns nearly all of it")
 {
-    // The other half of the bound. Without this a bridge that returned zero for
-    // every lobe would pass the test above with room to spare.
-    //
-    // Not asked of the coat or fuzz: with OPENPBR_RECIPROCAL_COAT_AND_FUZZ = 0
-    // the layering is deliberately non-reciprocal and does not conserve energy
-    // exactly, which openpbr_settings.h documents as the chosen trade.
     for (const float roughness : { 0.1f, 0.35f, 0.7f, 1.0f })
     {
         OpenPBRParams p = openpbr_make_default_params();
@@ -263,10 +219,6 @@ TEST_CASE("openpbr white furnace: a lossless white surface returns nearly all of
 
 TEST_CASE("openpbr white furnace: sampling and evaluation integrate to the same albedo")
 {
-    // Two estimators that share no code path beyond the BSDF itself. Agreement
-    // is what says the sampler's density really is the one eval reports --
-    // integrated rather than pointwise, so it catches a lobe whose weight and
-    // pdf are wrong by the same factor.
     for (const NamedMaterial& material : furnaceLadder())
     {
         if (!material.rough)

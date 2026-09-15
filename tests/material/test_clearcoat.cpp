@@ -1,31 +1,3 @@
-// ============================================================================
-// test_clearcoat.cpp
-//
-// The coat is a second specular layer over the base. Two things about it are
-// easy to get wrong and neither is obvious by eye:
-//
-//   1. Its reflectance. KHR_materials_clearcoat fixes the coat at F0 = 0.04, a
-//      clear lacquer, and has no IOR field at all -- but every DCC that lets an
-//      artist author a coat exposes one, and the ceramics in the bathroom scene
-//      are authored at 2.0. That is an F0 of 0.111 against 0.04, most of the
-//      difference between a glazed tile and a painted one.
-//   2. Its energy. The coat used to be summed on top of the base with nothing
-//      taken away, so a glazed white ceramic reflected more light than fell on
-//      it -- the same defect the sheen layer had, and easier to see here,
-//      because the coat sits over a white diffuse base rather than over fabric.
-//
-// Pinned here:
-//   1. clearcoat 0 leaves the material bit-identical to before the layer existed
-//   2. a coat at a higher IOR reflects more, and by less than its own F0 ratio,
-//      because what it reflects is taken from the base rather than added to it
-//   3. an unset IOR behaves as the extension's lacquer rather than as no coat --
-//      MaterialParams is zero-initialised all over this codebase
-//   4. the layer does not manufacture energy at any IOR (at directions where the
-//      uncoated material itself is already under 1 -- grazing dielectrics are a
-//      separate, pre-existing overshoot from additive diffuse+specular)
-//   5. the underside series lifts the base above the single-scatter floor
-//   6. sample and eval agree, since MIS weighs each against the other's density
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -141,11 +113,6 @@ TEST_CASE("clearcoat: weight 0 changes nothing")
 
 TEST_CASE("clearcoat: a higher IOR reflects more, and by less than its own ratio")
 {
-    // The mirror direction, not the view direction. A coat this smooth has a
-    // lobe about a tenth of a degree wide about the half-vector, so evaluating
-    // back along V measures the base with the coat subtracted and never touches
-    // the coat at all -- which is what this test first did, and it read as the
-    // higher IOR making the material darker.
     const float3 wo = dir_at(20.0f);
     const float3 wi = dir_at(-20.0f);
     const BsdfEvalResult lacquer = bsdf_eval(make_si(ceramic_params(1.0f, 1.5f), wo), wi);
@@ -179,11 +146,6 @@ TEST_CASE("clearcoat: an unset IOR is the extension's lacquer, not no coat")
 
 TEST_CASE("clearcoat: does not manufacture energy")
 {
-    // Grazing is excluded from the absolute bound: an uncoated dielectric already
-    // exceeds 1 there because diffuse and the specular floor are additive, and
-    // the old (1-F_L)*(1-F_V) scale was hiding that by crushing the base. What
-    // the coat must not do is push a direction that was under 1 over it, or make
-    // the grazing overshoot worse than the bare material's own.
     for (const float ior : { 1.5f, 2.0f })
     {
         for (const float deg : { 15.0f, 45.0f })
@@ -205,13 +167,6 @@ TEST_CASE("clearcoat: does not manufacture energy")
 
 TEST_CASE("clearcoat: underside bounces return energy that scales with IOR")
 {
-    // Off the coat's specular peak the coat BRDF is ~0, so eval reads the base
-    // through clearcoat_base_scale alone. Single-scatter predicts
-    // (1-F_L)*(1-F_V)*Lambert; the series has to clear that floor, and by more
-    // at IOR 2.0 than at 1.5 because F_avg is larger.
-    //
-    // Measured here rather than against Cycles: the unit test has no scene, and
-    // scenes/feature_tests/15_clearcoat is what closes the image-level gap.
     MaterialParams lacquer = ceramic_params(1.0f, 1.5f);
     MaterialParams glaze = ceramic_params(1.0f, 2.0f);
     lacquer.clearcoat_roughness = 0.05f;
@@ -246,11 +201,6 @@ TEST_CASE("clearcoat: underside bounces return energy that scales with IOR")
 
 TEST_CASE("clearcoat: sample and eval agree")
 {
-    // A rougher coat than the ceramics use. At roughness 0.05 the coat's pdf runs
-    // to several thousand and sample and eval disagree in the third digit purely
-    // because one builds the half-vector and the other recovers it -- which
-    // measures float precision in a near-delta lobe, not whether the two paths
-    // describe the same material.
     MaterialParams glaze = ceramic_params(1.0f, 2.0f);
     glaze.clearcoat_roughness = 0.25f;
     for (const float deg : { 20.0f, 55.0f })

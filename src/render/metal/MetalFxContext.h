@@ -1,17 +1,5 @@
 #pragma once
 
-// MetalFX upscaling.
-//
-// MetalFX has no metal-cpp binding, so this is the one place in the renderer
-// that talks Objective-C directly. Everything crossing the boundary is either a
-// metal-cpp pointer bridged in place or an opaque handle, so the rest of the
-// renderer never sees an ObjC type.
-//
-// The spatial scaler is the simplest of the three effects: colour in, colour out,
-// no history, no guides, no jitter. It is here first because it exercises the
-// whole chain -- framework linkage, texture formats, encoding into our own
-// command buffer -- with nothing else able to go wrong.
-
 #include <Metal/Metal.hpp>
 
 #include <cstdint>
@@ -87,10 +75,6 @@ public:
         MTL::Texture* output = nullptr;   ///< display resolution, linear
         float jitterX = 0.0f;             ///< the offset this frame was rendered with
         float jitterY = 0.0f;
-        /// The same scalar exposure the display transform applies after the
-        /// denoise. MetalFX uses it to put linear scene radiance into the range
-        /// its temporal filter expects; `preExposure` remains one because the
-        /// input color itself is not pre-exposed.
         float exposure = 1.0f;
         bool depthReversed = true;
         bool resetHistory = false;        ///< camera cut, scene change, resize
@@ -100,16 +84,6 @@ public:
         float viewToClip[16] = {};
     };
 
-    /// Create or recreate the temporal denoiser. Bound to its formats and both
-    /// resolutions, like the spatial one.
-    /// Temporal upscaling without denoising: history and jitter, but none of the
-    /// guides the denoiser wants. The middle of the three -- the spatial scaler
-    /// has no history at all and so cannot help a one-sample frame, and the
-    /// denoiser costs a second traced sample for its clean guides.
-    ///
-    /// Unlike the denoiser, this one has a working Metal 4 constructor; the
-    /// repro in tools/ shows spatial and temporal building through the Metal 4
-    /// compiler while only the denoised scaler asserts.
     bool ensureTemporalScaler(MTL::Device* device,
                               MTL::PixelFormat colorFormat,
                               MTL::PixelFormat depthFormat,

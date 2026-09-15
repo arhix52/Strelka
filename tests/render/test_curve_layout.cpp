@@ -1,15 +1,3 @@
-// Curve geometry layout for the OptiX backend: which control points a segment
-// spans, which segments a set of strands produces, and where along its strand a
-// hit landed.
-//
-// These were both wrong and neither was visible as a crash. `createCurve`
-// hardcoded degree 3, so every linear groom in the tree -- which is all of them
-// -- was built as a cubic B-spline over the same control points: a curve that
-// does not pass through them, one segment shorter per strand at each end.
-// And the curve uv was pinned to (0.5, 0.5), so a strand could not be textured
-// and a root-to-tip ramp was a constant.
-//
-// Nothing here needs a GPU, so nothing here is checked by rendering.
 
 #include <doctest/doctest.h>
 
@@ -44,10 +32,6 @@ TEST_CASE("a linear strand of n points makes n-1 segments, a cubic one n-3")
 
 TEST_CASE("segments of consecutive strands do not run into each other")
 {
-    // Two strands of four points each. The linear set must not emit a segment
-    // that starts at the last point of strand 0 and ends at the first of strand
-    // 1 -- that is a strand-long spike across the groom, and the sort of thing
-    // that reads as a rendering artefact rather than an indexing bug.
     const std::vector<uint32_t> counts = { 4, 4 };
     const std::vector<int> linear = segmentIndices(counts, 0, 2, 0, true);
     REQUIRE(linear.size() == 6);

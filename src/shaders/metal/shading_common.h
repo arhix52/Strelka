@@ -23,18 +23,6 @@
 using namespace metal;
 using namespace raytracing;
 
-
-// ---------------------------------------------------------------------------
-// Feature specialisation.
-//
-// Every branch below is on a scene- or settings-level fact that does not change
-// between rays, so leaving it in the instruction stream costs every ray in every
-// scene. Function constants let the compiler delete the untaken side outright,
-// which matters less for the branch itself than for the registers and texture
-// state the dead code was keeping alive.
-//
-// Defaults preserve required behaviour when a pipeline omits a function constant.
-// ---------------------------------------------------------------------------
 constant bool kFcEnvMap [[function_constant(0)]];
 constant bool kFcLights [[function_constant(1)]];
 constant bool kFcMotionBlur [[function_constant(2)]];
@@ -98,23 +86,9 @@ constant bool SPEC_LIGHTS = is_function_constant_defined(kFcLights) ? kFcLights 
 constant bool SPEC_MOTION_BLUR = is_function_constant_defined(kFcMotionBlur) ? kFcMotionBlur : true;
 constant bool SPEC_DOF = is_function_constant_defined(kFcDof) ? kFcDof : true;
 constant bool SPEC_DEBUG = is_function_constant_defined(kFcDebug) ? kFcDebug : true;
-// Only set when the scene actually contains a MASK or BLEND material. Scenes
-// without cutouts then compile the same kernels they compiled before and pay
-// nothing for the feature -- which matters most in the shadow stage, where the
-// alternative to any-hit traversal is a loop over closest hits.
 constant bool SPEC_ALPHA = is_function_constant_defined(kFcAlpha) ? kFcAlpha : true;
-// Whether the scene has curve geometry. The traversal side of this cannot be a
-// constant -- the intersector's tags decide what its result type carries, so a
-// curve-capable traversal is a different kernel entirely -- but `shade` has no
-// intersector, only the branch that rebuilds a hit strand, and that one is worth
-// compiling out of every scene that has no hair in it.
 constant bool SPEC_CURVES = is_function_constant_defined(kFcCurves) ? kFcCurves : false;
 constant bool SPEC_SHARC_UPDATE = is_function_constant_defined(kFcSharcUpdate) ? kFcSharcUpdate : false;
-// OpenPBR Surface. Defaults false, and that default is load-bearing rather than
-// tidy: the branch it guards pulls in ~264 KB of lookup tables and the whole
-// layered lobe stack, and the two room scenes are instruction cache bound.
-// A scene with no OpenPBR material must compile a kernel that does not contain
-// it at all -- see WavefrontFeatures::kOpenPBR.
 constant bool SPEC_OPENPBR = is_function_constant_defined(kFcOpenPBR) ? kFcOpenPBR : false;
 constant bool SPEC_RENDER_WORK_AUDIT = is_function_constant_defined(kFcRenderWorkAudit) ? kFcRenderWorkAudit : false;
 constant bool SPEC_RESTIR_RAY_TRACED_DIAGNOSTIC =
@@ -156,10 +130,6 @@ struct FastNormalTransform
     float orientation;
 };
 
-// Triangle instances have ordinary scene-scale affine transforms. Compute the
-// inverse-transpose numerator once per hit and share it between the interpolated
-// and geometric normals. The robust analytic-light path intentionally remains
-// in analytic_light.h for extreme or nearly singular light transforms.
 static __attribute__((always_inline)) FastNormalTransform makeFastNormalTransform(float3 axisX, float3 axisY, float3 axisZ)
 {
     FastNormalTransform result;
@@ -184,39 +154,11 @@ static float3 unpackNormal(uint32_t val)
     return unpack_unorm10a2_to_float(val).xyz * 2.0f - 1.0f;
 }
 
-// KHR_texture_transform. The spec composes it as a row-vector multiply,
-//   [u v 1] * [ sx*cos(r)  sx*sin(r)  0 ]
-//             [-sy*sin(r)  sy*cos(r)  0 ]
-//             [ tx         ty         1 ]
-// so scale applies before rotation and the translation last. Getting the order
-// wrong is invisible at rotation 0 -- which is what every exporter writes by
-// default -- and wrong everywhere else.
-/// Folds an OpenPBR material's maps into its parameter block.
-///
-/// Replace, not multiply -- and that is the opposite of the glTF path a few
-/// lines below, deliberately. In glTF a texture modulates a factor, so both are
-/// meaningful at once. In MaterialX an input is *either* a value or a nodegraph
-/// output; when a map drives base_color there is no base_color constant to
-/// combine it with. Multiplying instead would silently darken every textured
-/// material by whatever default happened to be left in the block.
-///
-/// The maps are folded before openpbr_prepare() rather than sampled inside the
-/// BSDF because that is how the Metal backend already works: the material
-/// library never sees a texture handle on this platform, only resolved values.
-/// Whether the material names a file for this slot.
-///
-/// Read from the parameter block, which is already loaded, instead of testing
-/// the handle -- the handles live in another buffer, and touching it is the cost
-/// this gate exists to avoid.
 static bool openpbrHasMap(thread const OpenPBRParams& p, uint slot)
 {
     return (p.texture_mask & (1u << slot)) != 0u;
 }
 
-// Ray-cone level of detail, following Akenine-Moller et al: the triangle term
-// carries texels per world unit, the cone term carries how wide the footprint
-// has grown, and the texture contributes its own resolution here because one
-// material's slots are rarely all the same size.
 template <typename Tex2D>
 inline float texLod(Tex2D tex, float lodBase, bool hasLod)
 {
@@ -484,15 +426,6 @@ float2 sampleAperture(thread SamplerState& sampler, const constant Uniforms& par
     return p;
 }
 
-// Bound what a single indirect path may contribute.
-//
-// A firefly is a sample with an enormous weight and a tiny probability -- a
-// caustic that found the light through a specular chain, which is most of what a
-// bathroom full of glass and chrome produces. Averaging it in is unbiased and
-// does converge; the estimator is correct and the sample budget is not. Clamping
-// trades that for bias, so it is off by default and applied only past the first
-// bounce, where those paths live: clamping depth 0 as well would dim every
-// directly visible emitter and the environment behind it.
 inline float3 clampIndirectContribution(float3 radiance, uint depth, float limit)
 {
     if (limit <= 0.0f || depth == 0u)
@@ -510,10 +443,6 @@ void generateCameraRay(uint2 pixelIndex,
                        const constant Uniforms& params,
                        float motionTime)
 {
-    // A temporal upscaler reconstructs detail from a known per-frame shift, so
-    // when one is running the whole image moves together and the per-pixel random
-    // jitter -- which is antialiasing for a still frame -- would only add noise it
-    // has to filter out.
     const float2 subpixel_jitter =
         params.useFrameJitter ?
             float2(params.jitterX + 0.5f, params.jitterY + 0.5f) :
@@ -539,10 +468,6 @@ void generateCameraRay(uint2 pixelIndex,
 
     if (params.projectionType == PROJECTION_ORTHOGRAPHIC)
     {
-        // No centre of projection: every ray runs down the view axis and the
-        // pixel picks where on the film it starts. clipToView is deliberately
-        // unused -- for an orthographic frame it is a scale, and going through it
-        // would only re-derive the half-extents that are already here.
         const float3 filmPos = float3(pixelNDC.x * params.orthoHalfWidth, pixelNDC.y * params.orthoHalfHeight, 0.0f);
         origin = (viewToWorld * float4(filmPos, 1.0f)).xyz;
         direction = normalize((viewToWorld * float4(0.0f, 0.0f, -1.0f, 0.0f)).xyz);
@@ -604,10 +529,6 @@ static void initSurfaceGeometry(thread SurfaceInteraction& si,
     si.bump_normal = worldNormal;
 }
 
-// Project only the OpenPBR values the integrator reads outside the OpenPBR
-// library. The BSDF itself consumes `p` directly. This avoids constructing a
-// generic MaterialParams block, and in an all-native scene avoids the 296-byte
-// Material table altogether in shade.
 static __attribute__((always_inline)) void initOpenPBRSurfaceMaterial(thread SurfaceInteraction& si,
                                                                       device const OpenPBRParams& p,
                                                                       float3 vertexColor)
@@ -616,10 +537,6 @@ static __attribute__((always_inline)) void initOpenPBRSurfaceMaterial(thread Sur
     // shadow coverage. Preserve that contract here; making it coherent across
     // all ray types is a separate correctness change, not part of this fast path.
     si.opacity = 1.0f;
-    // Only these values survive into the common continuation. The OpenPBR BSDF
-    // consumes its own parameter block directly; eagerly filling every generic
-    // Material field kept the whole SurfaceInteraction aggregate live through
-    // prepare, NEE and sample even though those fields were constants.
     si.roughness = 0.0001f;
     si.ior = 0.0f;
     si.transmission = 0.0f;
@@ -654,10 +571,6 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
                             float2 uv,
                             float3 rayDir,
                             float3 vertexColor = float3(1.0f),
-                            // Ray-cone footprint for this hit, in log2 texels-per-unit *before* the
-                            // texture's own resolution is folded in -- each texture adds its own, since
-                            // the slots of one material are rarely the same size. FLT_MAX_10_EXP as the
-                            // sentinel would be cute; -1e30 says "no cone, use level 0" and is checked once.
                             float lodBase = -1e30f,
                             bool uvPretransformed = false)
 {
@@ -712,11 +625,6 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
         resolvedMetallic *= mrTex.b;
     }
 
-    // Sample normal map. Z comes from X and Y rather than from the texture: a
-    // normal map is BC5 when compression is on, which stores two channels only.
-    // For a unit-length tangent-space normal this is the value that was dropped,
-    // and reading it the same way whether or not the texture was compressed
-    // keeps the two paths from disagreeing.
     if ((materialFeatures & MATERIAL_TEX_NORMAL) != 0u && !is_null_texture(material.normalTexture))
     {
         float2 bumpXY = (hasLod ? material.normalTexture.sample(
@@ -735,12 +643,6 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
         // pre-bump normal instead would reject directions no map ever moved.
         si.bump_normal = si.shading_normal;
 
-        // At a grazing angle the map can turn the normal past the viewer, which
-        // no lobe can answer: standard_pbr reads dot(N, wo) <= 0 as a dielectric
-        // exit and an opaque material has no such lobe, so the hit absorbs into
-        // a black pixel. The same correction and the same diffuse suppression as
-        // the OptiX path, from the same header, so the two backends do not
-        // disagree about a surface. See valid_reflection.h.
         if (dot(si.shading_normal, si.wo) <= 0.0f)
         {
             const float3 facingGeom = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
@@ -822,10 +724,6 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     si.metallic = saturate(resolvedMetallic);
 }
 
-// A next-event connection, before the visibility test.
-//
-// The wavefront tracer defers its shadow ray into a separate stage; nothing
-// here depends on that trace's result.
 struct LightConnection
 {
     float3 radiance; // unoccluded Li times the cosine at the surface
@@ -836,10 +734,6 @@ struct LightConnection
     float tMax;
     bool needsRay; // false when the connection is degenerate and contributes nothing
     bool hasVisibilityTarget;
-    // A delta light has no area, so BSDF sampling can never generate a direction
-    // that hits it and there is no second strategy to combine with. Its pdf is a
-    // placeholder of 1, not a solid-angle density, so feeding it to the balance
-    // heuristic would silently scale the contribution by 1/(1 + pdf_bsdf).
     bool isDelta;
     RestirLightSample sample;
 };
@@ -1115,15 +1009,6 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
 
     const float3 Li = emittedLightRadiance(light, -lightSampleData.L, lightSampleData.distToLight, iesBuffer, lightType);
 
-    // For area lights the facing test uses the light's surface normal; for a
-    // sharp point the "normal" is -L, so -dot(L, normal) = 1 always.
-    //
-    // The threshold on the cosine at the light is 0, not 1e-3. Both halves of
-    // the MIS estimate have to agree on which directions next-event estimation
-    // offers, and the light hit in wavefrontShade admits every direction with a
-    // positive cosine there. Rejecting a sliver of grazing ones here while the
-    // light hit still deducts a share for them loses that share outright. OptiX
-    // has always tested against zero.
     const bool lit = lightReachesShadingPoint(si, lightSampleData.L);
     const bool facesLight = lightConnectionFacesVertex(lightType, -dot(lightSampleData.L, lightSampleData.normal),
                                                        lightIsPunctual(lightType) ? light.points[0].x : 0.0f);
@@ -1134,24 +1019,8 @@ LightConnection connectLightSample(constant Uniforms& uniforms,
         // bsdf_sample()'s bsdf_over_pdf which already carries it. See the note on
         // both result structs in bsdf_types.h.
         c.radiance = volumeEvent ? Li : Li * shadingCosine(si, lightSampleData.L);
-        // Offset along the face the shadow ray actually leaves from, exactly as
-        // connectEnvLight() below already did and as the bounce ray does. This
-        // used to be the raw hit position with a fixed 1 mm tMin standing in for
-        // the offset: on a back-face hit that starts the ray inside the surface
-        // it came from, so next-event estimation reports occlusion the BSDF
-        // strategy does not see and the two halves stop summing to the integral.
-        // A world-space constant is also the wrong shape for the problem -- too
-        // small at architectural scale, too large at prop scale -- while
-        // offset_ray() scales with the coordinate itself.
-        //
-        // A medium scattering event has no surface to leave through and no
-        // geometry normal to orient against, so it departs from where it is.
         c.origin = volumeEvent ? si.position :
                                  offset_ray(si.position, orientedFaceNormal(si.geometry_normal, lightSampleData.L));
-        // State the density from the sample just taken. getLightPdf() belongs
-        // to the complementary BSDF-hit path; calling it here repeated
-        // fillLightData() (a full ellipsoid intersection for a sphere) and
-        // rectSolidAngle().
         const LightPdfQuery query = buildLightPdfQuery(light, lightSampleData, lightType);
         c.pdf = marginalLightSolidAnglePdf(query, localSelectionPdf, analyticSelectionPdf, lightSelectionPdf);
         c.tMax = lightSampleData.distToLight;

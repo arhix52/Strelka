@@ -1,24 +1,5 @@
 #pragma once
 
-// Metal 4 submission layer.
-//
-// Metal 4 replaces four things the Metal 3 path relied on, and each replacement
-// is a constraint rather than a convenience:
-//
-//   * There is no setBytes. Every constant reaches a shader through a GPU
-//     address, so small per-dispatch values need a buffer to live in --
-//     ConstantRing below.
-//   * There is no automatic hazard tracking. Dependencies between dispatches are
-//     stated with explicit barriers; forgetting one is a silent data race, not a
-//     validation error.
-//   * Bindings go through an argument table instead of setBuffer, and the table
-//     holds raw addresses, so the caller owns resource lifetime.
-//   * Residency is declared once for the whole queue with a residency set rather
-//     than per encoder with useResource.
-//
-// Command allocators own the memory an encoder writes into, so every in-flight
-// command buffer needs distinct allocator storage until its work completes.
-
 #include <Metal/Metal.hpp>
 #include <dispatch/dispatch.h>
 
@@ -32,16 +13,6 @@
 namespace oka
 {
 
-/// Per-frame bump allocator standing in for setBytes.
-///
-/// Shared storage, written by the CPU and read by the GPU in the same frame; the
-/// caller must not reuse a frame's ring until that frame's commit feedback has
-/// fired, which is the same rule the command allocators follow.
-///
-/// How much one frame needs is not bounded by the frame: a launch carrying many
-/// samples encodes the whole wavefront loop that many times over, and each stage
-/// of each iteration pushes its own constants. So a frame's storage is a chain of
-/// equally sized pages that grows on demand rather than one fixed buffer.
 class ConstantRing
 {
 public:
@@ -79,25 +50,9 @@ private:
     uint32_t mPage = 0;
 };
 
-/// Width of the one argument table every Metal 4 stage shares. Counts, not
-/// indices: the highest binding in wavefront.metal is buffer(30), the shade
-/// stage's medium path state, and texture(9), the denoise-strength guide. Raise these
-/// with the shader, in the same commit -- a bind past the declared count writes
-/// past the end of the table, and only MTL_DEBUG_LAYER=1 will tell you.
 inline constexpr uint32_t kMetal4BufferBindCount = 31;
 inline constexpr uint32_t kMetal4TextureBindCount = 10;
 
-/// Names a Metal 4 command buffer or encoder, for Xcode captures and the debug
-/// layer. A frame here is a dozen command buffers whose only distinguishing
-/// feature is which bounce they carry, and a capture of unnamed ones is
-/// unreadable.
-///
-/// Not a fix for MTL_SHADER_VALIDATION: labelling every encoder was tried for
-/// that and does not help. MetalTools still dereferences a null label while
-/// decoding a GPU error report (resolvedSharedPacketData, just before
-/// setEncoderLabel:), so validation runs still die in the completion handler
-/// before printing what they found. Stepping the program counter past that one
-/// instruction in lldb is what makes the report readable.
 void labelMetal4(MTL4::CommandBuffer* buffer, const std::string& name);
 void labelMetal4(MTL4::CommandEncoder* encoder, const std::string& name);
 
@@ -121,10 +76,6 @@ public:
     {
         return mQueue;
     }
-    /// Schedule work on the serial feedback queue after the currently running
-    /// feedback handler has returned. A commit made recursively from its own
-    /// feedback callback can remain one continuously resident scheduler
-    /// workload even when every command buffer is submitted separately.
     void afterFeedback(std::function<void()> work);
     MTL4::Compiler* compiler() const
     {
@@ -153,12 +104,6 @@ public:
     MTL4::CommandBuffer* beginImmediate();
     void submitAndWait(MTL4::CommandBuffer* commandBuffer);
 
-    /// Per-frame skinning uses its own allocator ring and commits without a mid-frame CPU wait.
-    /// Consumers on either queue order through skinEvent() at the returned value.
-    ///
-    /// The ring must be at least as deep as the frames the renderer keeps in
-    /// flight: beginSkin() resets the allocator for its slot, so a shallower ring
-    /// would overwrite commands the GPU is still reading.
     MTL4::CommandBuffer* beginSkin(uint32_t frameIndex);
     ConstantRing& skinConstants()
     {
@@ -175,14 +120,6 @@ public:
     /// Insert a wait/signal on the Metal 4 queue timeline (cross-queue sync).
     void wait(MTL::SharedEvent* event, uint64_t value);
 
-    /// Frame-loop counterpart of submitAndWait's tail, split in two so the
-    /// caller can commit, do other work, and block later -- which is what an
-    /// interactive loop wants and a headless one does not.
-    ///
-    /// Metal 4 answers a committed command buffer through a commit feedback
-    /// handler, never through the buffer itself, so there is no
-    /// waitUntilCompleted to call. A queue-signalled shared event is the only
-    /// thing a caller can block on.
     uint64_t reserveFrameSignal();
     void signalFrame(uint64_t value);
     /// The event signalFrame(value) signals, for a consumer on another queue to wait on.

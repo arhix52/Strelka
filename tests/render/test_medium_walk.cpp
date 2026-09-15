@@ -1,23 +1,3 @@
-// The arithmetic of the spectral free-flight walk that serves both subsurface
-// scattering and a bounded fog volume on the OptiX backend.
-//
-// Three of these bugs cost 25_subsurface a factor and none of them was visible
-// as a crash:
-//
-//   * choosing the driving channel uniformly rather than in proportion to what
-//     the path carries, which lets a balance-heuristic weight exceed one and
-//     compounds into fireflies over a walk tens of steps long;
-//   * weighting by a distribution other than the one the channel was drawn
-//     from, which is how an unbiased estimator stops being one;
-//   * dropping the boundary weight, which is exactly 1 for a grey medium -- so
-//     a fog gizmo never notices -- and is not 1 at all for mean free paths that
-//     differ threefold, which is what that scene's spheres are.
-//
-// The check that catches all three is the estimator identity: summed over the
-// two outcomes a free flight can have, with each weighted by the density it was
-// actually drawn from, the walk has to transport exactly the medium's albedo
-// per event and exactly the transmittance to the boundary. That is a numerical
-// integral over the sampled distance, and it needs no GPU.
 
 #include <doctest/doctest.h>
 
@@ -178,16 +158,6 @@ TEST_CASE("medium: a coloured extinction does not leave the boundary weight at o
 
 TEST_CASE("medium: the estimator transports exactly the albedo and the transmittance")
 {
-    // The identity that makes the walk unbiased, integrated numerically over the
-    // distance the free flight draws:
-    //
-    //   E[scatterWeight] over the scattering outcomes  ==  albedo
-    //   E[boundaryWeight] over the reaching outcome    ==  exp(-sigma_t * L)
-    //
-    // both per channel, where the expectation is over the *mixture* density the
-    // channel selection produces. Weighting by any other distribution than the
-    // one the channel was drawn from breaks the first of these, which is the bug
-    // this test exists for.
     const Spectrum sigmaT = sigmaTFromRadius(spec(0.05f, 0.025f, 0.015f));
     const Spectrum albedo = spec(0.93f, 0.65f, 0.58f);
     const Spectrum throughput = spec(1.0f, 0.7f, 0.4f);
@@ -234,10 +204,6 @@ TEST_CASE("medium: the estimator transports exactly the albedo and the transmitt
     {
         const float sc = channel(sigmaT, c);
         const float transmittance = std::exp(-sc * L);
-        // Everything that did not scatter reached the boundary, so the two
-        // outcomes have to add up to the medium's albedo plus its transmittance
-        // -- no more, which would be energy the walk invented, and no less,
-        // which is the colour a translucent object loses.
         CHECK(scattered[c] == doctest::Approx(channel(albedo, c) * (1.0 - transmittance)).epsilon(2e-3));
         CHECK(reached[c] == doctest::Approx(transmittance).epsilon(2e-3));
     }
@@ -245,11 +211,6 @@ TEST_CASE("medium: the estimator transports exactly the albedo and the transmitt
 
 TEST_CASE("medium: choosing channels uniformly is what makes the weights blow up")
 {
-    // The uniform choice is unbiased -- the identity above still holds for it --
-    // and unusable, because the individual weights are unbounded where the
-    // proportional choice keeps them near one. That is the difference between a
-    // converging walk and a field of fireflies, and it is not something a mean
-    // can show.
     const Spectrum sigmaT = sigmaTFromRadius(spec(0.05f, 0.025f, 0.015f));
     const Spectrum albedo = spec(0.93f, 0.65f, 0.58f);
     const Spectrum uniform = spec(1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f);
@@ -282,13 +243,6 @@ TEST_CASE("medium: Henyey-Greenstein integrates to one over the sphere")
 
 TEST_CASE("medium: the HG inversion returns the cosine against the direction of travel")
 {
-    // Taken at face value the standard inversion gives the cosine against the
-    // direction the ray came *from*, so a forward-scattering medium reads as a
-    // backward-scattering one -- which does not show up in single scattering,
-    // where the outgoing direction is fixed by the camera, and is worth sixty
-    // times the first event by the second.
-    //
-    // Forward scattering must put the median draw near +1.
     CHECK(hgSampleCosine(0.8f, 0.5f) > 0.9f);
     CHECK(hgSampleCosine(-0.8f, 0.5f) < -0.9f);
     // Isotropic is the linear map, and its median is zero.

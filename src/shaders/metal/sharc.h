@@ -1,11 +1,5 @@
 #pragma once
 
-// Independent Metal implementation of the public SHARC 1.8.3 integration
-// contract. No NVIDIA SDK source is included here. The representation follows
-// the documented split-resource design: a compact hash table, an atomic update
-// buffer, and fp16 persistent resolved data. Update and query never access the
-// same radiance storage.
-
 #include <metal_stdlib>
 
 using namespace metal;
@@ -26,11 +20,6 @@ struct SharcHashEntry
     atomic_uint key;
 };
 
-// The same six 32-bit words carry unsigned RGB in the regular layout and
-// signed YCoCg SH coefficients in the directional layout. Atomic integer add
-// is modulo 2^32, so the regular path stores uint bit patterns in these words
-// and resolves them as uint again. Explicit padding keeps the host-visible
-// stride at 32 bytes.
 struct SharcAccumulationEntry
 {
     atomic_int radiance[3];
@@ -44,10 +33,6 @@ struct SharcAccumulationEntry
 constant uint32_t kSharcDiagnosticAccumulationClamp = 1u << 0u;
 constant uint32_t kSharcDiagnosticNonfiniteReject = 1u << 1u;
 
-// Persistent data is fp16. In the regular layout radiance.xyz stores RGB. In
-// the directional layout radiance stores luminance L1/L0 and direction.xy
-// stores Co/Cg L0. The remaining words carry temporal state and keep the stride
-// at 32 bytes.
 struct SharcResolvedEntry
 {
     half4 radiance;
@@ -148,10 +133,6 @@ static inline SharcAddress sharcAddress(constant Uniforms& uniforms, float3 posi
 
 static inline float3 sharcDebugColoredHash(constant Uniforms& uniforms, float3 position, float3 normal)
 {
-    // Metal equivalent of NVIDIA HashGridDebugColoredHash(): color the compact
-    // spatial key, then modulate it with a second hash of the logarithmic level.
-    // It deliberately touches no cache buffer, so the grid is inspectable with
-    // SHaRC disabled and exposes only address generation.
     const SharcAddress address = sharcAddress(uniforms, position, normal, false);
     return sharcDebugColorFromHash(address.hash) * sharcDebugColorFromHash(sharcHash(uint32_t(address.level)));
 }
@@ -276,22 +257,11 @@ static inline uint32_t sharcBucketBase(uint32_t hash, uint32_t capacity)
     return hash % bucketRange;
 }
 
-// Compact keys consume all 32 bits, so there is no collision-free marker bit
-// for responsive entries. When responsive lighting is enabled, split the table
-// into two disjoint regions that use the same spatial key: persistent entries
-// occupy the first half and responsive companions the second half.
 static inline uint32_t sharcMainCapacity(constant Uniforms& uniforms)
 {
     return (uniforms.sharcFlags & SHARC_FLAG_RESPONSIVE) != 0u ? uniforms.sharcCapacity / 2u : uniforms.sharcCapacity;
 }
 
-// One bucket probe, shared by insertion, lookup and the collision view.
-//
-// Insertion compare-exchanges the key into every slot in turn: an occupied slot
-// simply fails the exchange, and the first empty one wins. Lookup relies on that
-// invariant to stop early -- once the bucket has shown kSharcLimitEmptySlots
-// empty slots the key cannot be deeper in the chain, because insertion would
-// have taken one of them.
 static inline bool sharcFindRange(device SharcHashEntry* hashEntries,
                                   uint32_t rangeOffset,
                                   uint32_t rangeCapacity,
@@ -314,10 +284,6 @@ static inline bool sharcFindRange(device SharcHashEntry* hashEntries,
         device atomic_uint* slot = &hashEntries[index].key;
         if (insert)
         {
-            // Metal has no strong compare-exchange, and a weak one may fail
-            // spuriously. Retry the same slot while it still reads empty:
-            // stepping to the next probe with this one unclaimed would publish
-            // the same key twice and split one voxel's temporal history.
             uint32_t previous = 0u;
             bool exchanged = false;
             for (uint32_t attempt = 0u; attempt < 4u; ++attempt)
@@ -413,10 +379,6 @@ static inline float3 sharcDecode(thread const SharcResolvedEntry& entry, float3 
     {
         return max(float3(entry.radiance.xyz), float3(0.0f));
     }
-    // NVIDIA SHARC 1.8.3 directional representation: first-order luminance
-    // moment plus L0 luminance and YCoCg chroma. Chroma follows the decoded
-    // luminance, preventing a bright colored specular sample from being reused
-    // in an unrelated direction.
     const float3 luminanceMoment = float3(entry.radiance.xyz);
     const float luminanceL0 = float(entry.radiance.w);
     const float directionalLuminance = min(length(luminanceMoment), max(luminanceL0, 0.0f));
@@ -556,19 +518,11 @@ static inline void sharcAccumulate(device SharcAccumulationEntry* accumulationEn
     }
     const float scale = max(uniforms.sharcRadianceScale, 1.0f);
     const bool directional = (uniforms.sharcFlags & SHARC_FLAG_DIRECTIONAL) != 0u;
-    // Match SHARC's 32-bit fixed-point layouts. Only guard the numeric
-    // conversion boundary; the original implementation deliberately relies on
-    // radianceScale, rather than a per-sample radiance heuristic, to keep sums
-    // from overflowing the accumulator.
     const float accumulationLimit = (directional ? 2147480000.0f : 4294960000.0f) / scale;
     if (uniforms.sharcDebug != 0u && any(radiance > accumulationLimit))
     {
         atomic_fetch_or_explicit(&entry.diagnosticFlags, kSharcDiagnosticAccumulationClamp, memory_order_relaxed);
     }
-    // Adding zero is still an atomic. Most deposits have at least one channel
-    // that quantizes to nothing -- and a vertex whose own radiance is entirely
-    // deferred, which is every hit under separate emissive, has three -- so the
-    // upstream guard is worth keeping.
     if (directional)
     {
         const float3 ycocg = sharcRgbToYCoCg(radiance);
@@ -725,10 +679,6 @@ static inline bool sharcUpdateHit(thread SharcUpdateState& state,
     {
         return continueTracing;
     }
-    // The radiance traced through this vertex has already been propagated to
-    // earlier eligible entries. Do not give a glossy/transmissive receiver its
-    // own bandwidth-limited entry, but keep tracing so later light still reaches
-    // those earlier vertices with the intervening BSDF throughput applied.
     if (!cacheableReceiver)
     {
         return true;
@@ -872,10 +822,6 @@ static inline float3 sharcDebugSurface(constant Uniforms& uniforms,
     return sharcDebugColorFromHash(sharcHash(address.key ^ index));
 }
 
-// How deep a path actually went, as the panel describes it: blue none, green
-// one, yellow two, red three or more. Comparing it with the cache off and on is
-// the direct measurement of what the cache buys, and the only one that says
-// where.
 static inline float3 sharcDebugBounceColor(uint32_t depth)
 {
     if (depth == 0u)

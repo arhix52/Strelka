@@ -1,23 +1,3 @@
-// The Sobol' direction numbers, pinned.
-//
-// random.h no longer stores them. Dimensions 0 and 1 are all a padded sampler
-// draws, and both have a closed form -- a bit reversal, and five masked
-// shift-XOR stages standing in for Pascal's triangle mod 2 -- so the 32 KB table
-// that used to be gathered from memory on every draw is gone.
-//
-// What is gone with it is any chance of noticing that the closed forms drifted
-// from the sequence they claim to be. They produce a number for every input
-// either way; a wrong one does not crash and does not look wrong, it silently
-// substitutes a different low-discrepancy sequence, or a merely uniform one, and
-// the image is only biased. So the direction numbers themselves live here now,
-// the two columns of them the sampler can reach, taken from the table this
-// replaced.
-//
-// The shim is what lets a host test read a device header. It is deliberately
-// confined to this file, and clang-tidy is told so once rather than four times:
-// these names are reserved because they belong to the CUDA compiler, which is
-// exactly why they are the ones that have to be defined away here.
-//
 // NOLINTBEGIN(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
 #define __device__
 #define __inline__ inline
@@ -128,14 +108,6 @@ TEST_CASE("the closed-form Sobol' dimensions are the tabulated ones")
 namespace
 {
 
-/// How much of a 16x16 grid two draws cover between them, over `count` indices.
-///
-/// Inequality is not the property that matters and checking it does not catch
-/// the failure: two draws can differ at every index and still lie on a curve,
-/// each uniform on its own, the pair covering none of the square. That is what
-/// scrambling one value with two seeds produces, and what it costs is a light
-/// selection that takes its two coordinates off a diagonal -- measured as
-/// kids_room converging 8.2% dark.
 double gridCoverage(SampleSlot a, SampleSlot b, uint32_t count)
 {
     bool seen[256] = {};
@@ -157,10 +129,6 @@ double gridCoverage(SampleSlot a, SampleSlot b, uint32_t count)
 
 TEST_CASE("padding gives every pair of draws a two-dimensional projection")
 {
-    // 4096 indices into 256 cells: a genuine 2D point set fills essentially all
-    // of them, a curve fills at most a few dozen. The bar is set well below what
-    // an independent pair reaches so that this fails on degeneracy rather than
-    // on the coupon-collector tail.
     CHECK(gridCoverage({ 9u, 0u }, { 12u, 0u }, 4096u) > 0.95);
     CHECK(gridCoverage({ 3u, 0u }, { 4u, 0u }, 4096u) > 0.95);
     CHECK(gridCoverage({ 1u, 0u }, { 2u, 0u }, 4096u) > 0.95);

@@ -11,11 +11,6 @@
 #include <ies_math.h>
 #include <projector.h>
 
-// GPU side structure
-// pad0: spot inner cone (rad) or point soft radius.
-// pad1: KHR attenuation range (0 = infinite).
-// points[0].y for point/spot: IES profile index, or -1 when isotropic.
-// normal.w: analytic intersection visibility bits (camera, secondary).
 struct UniformLight
 {
     float4 points[4];
@@ -31,14 +26,6 @@ struct UniformLight
     unsigned int selectionAlias;
 };
 
-// Packed IES candela tables for the GPU. OptiXRender::createIesBuffer lays the
-// buffer out as:
-//   IesGpuBufferHeader
-//   IesGpuProfileHeader[profileCount]
-//   float blob (angles then candela, offsets relative to the blob start)
-// Sampled by sampleIesCandela() below; intensity on the light is a multiplier
-// on top of the table. Field for field this is the Metal ShaderTypes.h pair, so
-// a profile packed by either backend reads the same on the other.
 struct IesGpuBufferHeader
 {
     unsigned int profileCount;
@@ -70,10 +57,6 @@ struct LightSampleData
     float3 L;
     float distToLight;
 
-    /// The solid angle a spherical-rectangle draw was taken over, or zero for
-    /// every other sampler and for the rect's own area fallback. Carried so the
-    /// caller can state the density of the sample it just took without asking
-    /// rectSolidAngle() a second question it has already answered.
     float solidAngle = 0.0f;
 };
 
@@ -108,10 +91,6 @@ static __inline__ __device__ float calcLightAreaPdf(const UniformLight& l, const
     }
     else if (punctualLightIsSoft(l.points[0].x) && lightIsPunctual(l.type))
     {
-        // A point, spot or projector with a radius is sampled as a sphere, so it needs the
-        // same area the sphere's density divides by. Without this case
-        // fillLightData() left the area at zero and the density collapsed to the
-        // constant it used to be.
         areaPdf = sphereLightAreaPdf(l.points[0].x);
     }
     return areaPdf;
@@ -192,10 +171,6 @@ static __inline__ __device__ bool emitsLight(const float3 radiance)
     return radiance.x > 0.0f || radiance.y > 0.0f || radiance.z > 0.0f;
 }
 
-/// Unpack one light into the scalars lightSolidAnglePdf() needs.
-///
-/// `radius` is only read for punctual types; every area light carries its local
-/// world-area density in `d.areaPdf`.
 static __inline__ __device__ LightPdfQuery buildLightPdfQuery(const UniformLight& l, const LightSampleData& d)
 {
     LightPdfQuery q = makeLightPdfQuery(l.type);
@@ -228,10 +203,6 @@ static __inline__ __device__ float getLightPdf(const UniformLight& l,
     LightPdfQuery q = buildLightPdfQuery(l, d);
     if (l.type == LIGHT_TYPE_RECT && rectLightSamplingMethod != 0)
     {
-        // Which of the two rect densities applies is decided by the same
-        // predicate the sampler uses, from the same rectSolidAngle() call. Ask
-        // it differently here and the two halves weigh against pdfs neither of
-        // them drew from.
         bool useAreaFallback = false;
         const float S = rectSolidAngle(l, surfaceHitPoint, useAreaFallback);
         if (S <= 0.0f)
@@ -355,19 +326,6 @@ static __inline__ __device__ LightSampleData SampleSphereLight(const UniformLigh
     return lightSampleData;
 }
 
-/// An infinitely distant, uniform-radiance dome.
-///
-/// Uniform over the whole sphere rather than the upper hemisphere: a dome is the
-/// analytic form of an environment, and an environment lights a surface from
-/// below as well as above once anything reflects. `color` is radiance, so there
-/// is no distance falloff and no area -- the pdf is the constant 1/4pi, which is
-/// what getLightPdf() returns for this type so that MIS against a BSDF ray that
-/// misses the scene agrees with what was sampled here.
-///
-/// Without this case the switch in sampleLight fell through, leaving a
-/// zero-initialised LightSampleData: direction (0,0,0), pdf 0. The facing test
-/// then rejected it, so a dome light contributed exactly nothing and did so
-/// silently -- no NaN, no red pixel, just an unlit scene.
 static __inline__ __device__ LightSampleData SampleDomeLight(const UniformLight& l, const float2 u, const float3 hitPoint)
 {
     LightSampleData lightSampleData;
@@ -424,10 +382,6 @@ static __inline__ __device__ float spotAttenuation(const UniformLight& l, const 
         return 0.0f;
     if (cosInner <= cosOuter)
         return 1.0f;
-    // clamp(), not saturate(): saturate lives in sutil/vec_math_adv.h, which is
-    // written for nvcc and does not compile in a plain host translation unit --
-    // and this header is reached from host code through OptixRenderParams.h.
-    // clamp() comes from vec_math.h, which is already included above.
     return clamp((cosTheta - cosOuter) / (cosInner - cosOuter), 0.0f, 1.0f);
 }
 
@@ -440,11 +394,6 @@ static __inline__ __device__ float rangeWindow(const UniformLight& l, float dist
     return y * y;
 }
 
-// Blender's "controlled falloff" for area lights: a Light Path "Ray Length"
-// divided by a cutoff distance, run through a smootherstep Map Range, fades the
-// emission out with a Mix Shader. pad1 carries that cutoff distance (0 = none),
-// and only area lights read it -- punctual lights use pad1 as the KHR range in
-// rangeWindow() above, so scaling them here as well would apply two windows.
 static __inline__ __device__ float areaFalloff(const UniformLight& l, float dist)
 {
     if (l.pad1 <= 0.0f)
@@ -461,7 +410,6 @@ static __inline__ __device__ float areaFalloff(const UniformLight& l, float dist
     return 1.0f - s;
 }
 
-
 // The index of the image a projector light throws, or a negative number when it
 // throws a plain white frame. points[0].z, the slot Scene::updateLight fills
 // from UniformLightDesc::projectorImage.
@@ -470,19 +418,6 @@ static __inline__ __device__ int projectorImageIndex(const UniformLight& l)
     return packedNonnegativeIndex(l.points[0].z);
 }
 
-/// Where a direction leaving a projector lands on the image it throws.
-///
-/// The light's own frame is rebuilt from points[2..3] and normal, exactly as
-/// sampleIesCandela does below -- a projector is the same lamp with a different
-/// angular profile, and it inherits that packing rather than a second one.
-/// halfAngle is half the horizontal field of view and points[0].w the frame's
-/// aspect; pad0 is the edge feather.
-///
-/// The texture fetch is deliberately *not* here. This backend indexes
-/// params.scene.projectorTextures with the slot above, Metal keeps the handle
-/// inside its own copy of the light struct, and neither spelling survives being
-/// written down in code the other compiler has to read -- the same split bsdf.h
-/// makes for material maps.
 static __inline__ __device__ ProjectorSample projectorSampleForLight(const UniformLight& l, const float3 dirFromLight)
 {
     const OrthonormalLightFrame frame = makeOrthonormalLightFrame(
@@ -498,11 +433,6 @@ static __inline__ __device__ ProjectorSample projectorSampleForLight(const Unifo
         dot(d, frame.x), dot(d, frame.y), dot(d, frame.emissionAxis), tanX, tanY, l.pad0);
 }
 
-// Bilinear sample of an IES candela table. `dirFromLight` is world-space; the
-// light's local frame is rebuilt from points[2..3] (X/Y axes) and normal (-Z),
-// the same packing Scene::updateLight writes for the CPU sampler in
-// iesloader.cpp. Returns 1.0 when the light carries no profile, so the caller
-// can multiply unconditionally.
 static __inline__ __device__ float sampleIesCandela(const IesGpuBufferHeader* iesBuffer,
                                                     const UniformLight& l,
                                                     const float3 dirFromLight)

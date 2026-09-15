@@ -90,10 +90,6 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
     std::ifstream i(lightJsonPath);
     json root;
     i >> root;
-    // Any one of these is a reason for the file to exist. Requiring "lights"
-    // meant a sidecar carrying only an environment was read, parsed and thrown
-    // away without a word -- and a scene lit entirely by its environment is not
-    // an odd thing to write.
     if (!root.contains("lights") && !root.contains("environment") && !root.contains("atmosphere") &&
         !root.contains("exposure"))
     {

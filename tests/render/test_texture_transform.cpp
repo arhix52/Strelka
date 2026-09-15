@@ -4,16 +4,6 @@
 
 #include <cmath>
 
-// ---------------------------------------------------------------------------
-// KHR_texture_transform, COLOR_0 and glTF alpha modes, on the OptiX side.
-//
-// The composition order is the thing worth pinning. Scale before rotation and
-// translation last is what the spec's row-vector form says, and getting it wrong
-// is invisible at rotation 0 -- which is what every exporter writes by default --
-// and wrong everywhere else. A render test cannot tell the two apart on any scene
-// in the ladder.
-// ---------------------------------------------------------------------------
-
 namespace
 {
 
@@ -45,11 +35,6 @@ TEST_CASE("the identity transform leaves uv alone")
 
 TEST_CASE("a zero-initialised material is not a collapsed texture")
 {
-    // The OptiX backend builds a fallback material by value-initialising
-    // MaterialParams, which leaves the scale at zero. Read literally that maps
-    // every uv onto the offset -- one texel smeared over the whole surface, which
-    // looks like a texture that failed to load rather than like a missing
-    // extension.
     const MaterialParams m = {};
     const float2 uv = apply_texture_transform(make_float2(0.25f, 0.75f), m);
     CHECK(near(uv.x, 0.25f));

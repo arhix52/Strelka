@@ -16,12 +16,6 @@
 namespace oka
 {
 
-/// Directory containing the running executable.
-///
-/// Runtime assets (metallibs, OptiX IR, the fullScreen.metal source) are laid
-/// out next to the binary by the build system. Resolving against the executable
-/// instead of the process working directory lets the app be launched from
-/// anywhere, including via Finder / a debugger with a different CWD.
 inline const std::filesystem::path& getExecutableDir()
 {
     static const std::filesystem::path dir = [] {
@@ -61,19 +55,6 @@ inline const std::filesystem::path& getExecutableDir()
     return dir;
 }
 
-/// Resolve a build-tree-relative asset path (e.g. "metal/shaders/pathtrace.metallib").
-///
-/// Three candidates, in the order they are cheapest to be right about:
-///
-///  1. Next to the executable. This is the build tree, and the macOS package,
-///     where the binaries and their assets share one directory.
-///  2. ../share/strelka, relative to the executable. This is an installed tree
-///     on Linux, where the binary is in bin/ and anything that is not a program
-///     belongs under share/ -- which is what every packaging convention and
-///     every distribution's policy expects, and what lets one prefix hold
-///     several applications.
-///  3. The path as given, relative to the working directory, so that "run it
-///     from the build root" keeps working.
 inline std::string resolveResourcePath(const std::string& relative)
 {
     std::error_code ec;

@@ -1,25 +1,9 @@
 #pragma once
 
-// How a material texture becomes a CUDA array: the arithmetic, with no CUDA in
-// it.
-//
-// Every decision the OptiX texture loader makes that does not need a device --
-// the resampled extent, how many mip levels that extent has, which texel format
-// carries it, whether the texture object does the sRGB decode or the format
-// does, and how many bytes each level occupies -- lives here so it can be
-// tested without a GPU. `OptixTextures.cpp` holds the CUDA calls and nothing
-// else that can be got wrong arithmetically.
-//
-// The extent rule is deliberately identical to MetalTextures::decodeToPayload:
-// divide by `downscale`, then halve until the longest edge fits `maxDimension`.
-// Two backends that disagree about which pixels they are filtering cannot be
-// compared, and the ladder compares them.
-
 #include <algorithm>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
-
 
 namespace oka::optix_tex
 {
@@ -132,10 +116,6 @@ inline uint32_t fullMipLevelCount(int width, int height)
     return levels;
 }
 
-/// Levels for `format`. A block-compressed chain stops at the last level whose
-/// shorter edge is still a whole 4x4 block: below that a level is mostly the
-/// encoder's padding, and CUDA's block-compressed arrays are the one place
-/// where a 2x2 level buys a driver-side special case for 8 bytes of saving.
 inline uint32_t mipLevelCount(Format format, int width, int height)
 {
     const uint32_t full = fullMipLevelCount(width, height);
@@ -212,31 +192,6 @@ struct Plan
     }
 };
 
-/// The whole decision, in one place.
-///
-/// Rules, in the order they bind:
-///  * Only Kind::Color is sRGB encoded. A roughness or an occlusion map read
-///    through a transfer function is the classic silent shading error, and a
-///    normal map read through one is not a direction any more.
-///  * Float and 16-bit sources are never block compressed: BC1/3/5 are 8-bit
-///    formats, and a source that bothered to carry more than 8 bits is the last
-///    thing to quantise.
-///  * A 16-bit sRGB source is decoded on the host, because CUDA's sRGB texture
-///    flag is defined for 8-bit unorm formats only. The plan says so by leaving
-///    `srgbTextureFlag` clear on a RGBA16 colour texture; the loader is
-///    responsible for having linearised the bytes.
-///  * Normal maps take BC5 when compressed, which stores X and Y only, and are
-///    re-normalised at every level whether compressed or not so the two paths
-///    shade alike. This is the same rule MetalTextures applies.
-///
-///    READ THIS BEFORE SAMPLING SLOT 2. A BC5 texture returns z = 0. Whoever
-///    wires normal mapping into the OptiX closest-hit program must rebuild Z
-///    from X and Y -- `sqrt(saturate(1 - dot(xy, xy)))`, before the glTF
-///    normal scale is applied to X and Y -- exactly as
-///    src/shaders/metal/shading_common.h does. Reading .xyz straight out of the
-///    texture gives a flat normal on every compressed map and a correct one on
-///    every uncompressed map, which is the kind of difference that gets blamed
-///    on the tangent frame.
 inline Plan planTexture(const PlanInputs& in)
 {
     Plan plan;

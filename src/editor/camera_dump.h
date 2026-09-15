@@ -1,28 +1,6 @@
 #ifndef STRELKA_EDITOR_CAMERA_DUMP_H
 #define STRELKA_EDITOR_CAMERA_DUMP_H
 
-// ============================================================================
-// camera_dump.h -- the viewport's state, printed as something that renders it.
-//
-// A defect that only shows from one angle is a defect nobody else can look at.
-// Describing the angle in prose does not survive the trip: "the rock, from
-// slightly above" is not a camera, and a screenshot cannot be re-rendered with
-// the debug view changed or the sample count raised.
-//
-// So the dump is not a report, it is an input. Every key it emits is one
-// HeadlessApp::parseConfig() already reads, in the section it reads it from, so
-// the block can be pasted into a .toml and handed to StrelkaCLI -c unchanged.
-// What the CLI cannot express rides along as comments rather than being
-// silently dropped -- the orientation quaternion above all, because the CLI
-// rebuilds the view with glm::lookAt against world up, which is the same camera
-// only while the viewport has no roll on it.
-//
-// Deliberately free of ImGui, the settings map and the scene: values in, string
-// out, so tests/editor/test_camera_dump.cpp can hold it to the one property
-// that matters -- that what comes out is the camera that went in, to enough
-// digits to land on the same pixel.
-// ============================================================================
-
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -77,11 +55,6 @@ struct CameraDumpState
     float shutterSpeed = 100.0f;
 };
 
-/// `render.sampler` takes a name, not the enum the editor carries.
-///
-/// The order is HeadlessApp::parseSamplerName()'s, and it is not the obvious
-/// one -- halton is 0, sobol is 2 -- so this is written against that function
-/// and asserted against its spelling in the test.
 inline const char* cameraDumpSamplerName(uint32_t samplerType)
 {
     switch (samplerType)
@@ -119,29 +92,8 @@ inline const char* cameraDumpTonemapName(uint32_t tonemapperType)
     }
 }
 
-/// The shortest spelling of `v` that reads back as exactly `v`.
-///
-/// Both halves matter. Nine significant digits always round-trip a float, and
-/// printing nine of them unconditionally is what the whole point of the dump
-/// needs -- a position rounded to six digits at forest scale moves the camera
-/// by more than a pixel, and the re-render then looks like the right frame
-/// while being a different one. But it also spells an f-stop of 1.8 as
-/// "1.79999995", and a block full of that is one a reader stops trusting.
-///
-/// So: the fewest digits that still survive the trip back through strtof.
-/// std::to_chars would say the same thing in one call, but its floating-point
-/// overloads are the ones libc++ was last to ship, and only the macOS build is
-/// in CI to notice.
-///
-/// `defaultfloat` rather than `fixed`, so a coordinate near zero comes out as
-/// an exponent rather than a screenful of zeroes.
 inline std::string cameraDumpFloat(float v)
 {
-    // `defaultfloat` goes scientific as soon as the exponent reaches the
-    // precision, so the shortest round-trip of 100 is "1e+02" -- true, and not
-    // what anyone wants to read in a camera position. Inside the range these
-    // numbers live in, keep raising the precision until the plain spelling
-    // appears; outside it (a coordinate at 1e-5) scientific is the readable one.
     const float magnitude = (v < 0.0f) ? -v : v;
     const bool plainRange = (v == 0.0f) || (magnitude >= 1e-4f && magnitude < 1e9f);
     for (int precision = 1; precision < 9; ++precision)

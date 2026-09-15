@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 
-
 namespace oka::metal
 {
 
@@ -78,10 +77,6 @@ inline constexpr uint32_t kWavefrontMinDiagnosticTraversalBatchThreads = 4 * 102
 // dispatch; shadow is a distinct any-hit workload and keeps its own policy.
 inline constexpr uint32_t kWavefrontCurveTraversalBatchThreads = 128 * 1024;
 inline constexpr uint32_t kWavefrontCurveTraversalBatchesPerGroup = 4;
-// A Metal 4 command buffer may contain this many traversal dispatches before it
-// is retired. Four batches cap one curve-extend scheduler workload at roughly a
-// megapath; the remaining batches append into the same hit/miss queues from the
-// following command buffer.
 inline constexpr uint32_t kWavefrontTraversalBatchesPerCommandBuffer = 4;
 
 inline constexpr uint32_t wavefrontTraversalBatchCount(uint32_t pixels,

@@ -7,7 +7,6 @@
 #include <strelka/scene/camera.h>
 #include <strelka/scene/glm_wrapper.hpp>
 
-
 namespace oka::editor_overlay
 {
 
@@ -16,14 +15,6 @@ namespace oka::editor_overlay
 // projecting through its w=0 singularity.
 inline constexpr float kEyePlaneDistance = 1e-4f;
 
-/// Build the projection ImGuizmo needs for a path-traced target.
-///
-/// ImGuizmo rejects a perspective target when its projected reverse-Z depth is
-/// below 0.001. That includes valid path-traced geometry before an authored near
-/// plane (the bathroom camera uses 10 m). Worse, that early return leaks
-/// ImGuizmo's draw-list clip rect and hides every viewport overlay drawn
-/// afterwards. Keep the current screen-space projection, but fit a private depth
-/// range around the gizmo origin.
 inline bool prepareGizmoCamera(Camera& camera, const glm::float3& worldTarget)
 {
     if (camera.projection == Camera::ProjectionType::orthographic)
@@ -54,17 +45,6 @@ inline bool prepareGizmoCamera(Camera& camera, const glm::float3& worldTarget)
     return true;
 }
 
-/// Trim a segment to the part of it the camera can see, given the view-space
-/// depth of both endpoints, and report whether anything is left.
-///
-/// The test is on view depth rather than on clip w, which is what the selection
-/// box used to do. For a perspective frame the two are the same thing (w is the
-/// distance down the view axis), but an orthographic clip w is always 1: every
-/// endpoint read as visible, so a box behind the camera projected through the
-/// origin and drew over the frame as if it were in front of it.
-///
-/// Clip space is an affine function of the view position for both projections, so
-/// the crossing found by interpolating depth is the same point in clip space.
 inline bool trimSegmentToNearPlane(
     glm::float4& clipA, glm::float4& clipB, const float viewZa, const float viewZb, const float nearZ)
 {

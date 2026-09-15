@@ -1,22 +1,6 @@
 #ifndef STRELKA_IRIDESCENCE_H
 #define STRELKA_IRIDESCENCE_H
 
-// ============================================================================
-// iridescence.h -- thin-film interference over the specular lobe
-//
-// A soap bubble, an oil slick, the burnt colour on steel. Light reflects off
-// both faces of a film thinner than a wavelength, the two paths interfere, and
-// which wavelengths survive depends on the film's optical thickness -- so the
-// colour turns with the viewing angle even though nothing about the material is
-// coloured.
-//
-// This is Belcour & Barla, "A Practical Extension to Microfacet Theory for the
-// Modeling of Varying Iridescence" (2017), in the form KHR_materials_iridescence
-// is specified against. It is not a spectral renderer: the Airy summation is
-// projected onto CIE XYZ through a fitted Gaussian sensitivity and converted to
-// linear sRGB, which is what lets an RGB path tracer carry it at all.
-// ============================================================================
-
 #include "material_math.h"
 #include "fresnel.h"
 
@@ -42,12 +26,6 @@ DEVICE_FUNC float3 iridescence_ior_to_f0(float3 transmitted, float incident)
                        iridescence_ior_to_f0(transmitted.z, incident));
 }
 
-// The film's spectral response projected onto CIE XYZ, then to linear sRGB.
-//
-// The six constants are Belcour & Barla's Gaussian fit of the colour matching
-// functions; the extra term on X is the second lobe that X has and the other two
-// do not. Doing this properly would mean tracking wavelengths, which an RGB path
-// tracer cannot; the fit is what makes the effect available at all.
 DEVICE_FUNC float3 iridescence_sensitivity(float opd, float3 shift)
 {
     const float phase = 2.0f * M_PI_F * opd * 1.0e-9f;
@@ -71,20 +49,9 @@ DEVICE_FUNC float3 iridescence_sensitivity(float opd, float3 shift)
                        0.0556434f * xyz.x - 0.2040259f * xyz.y + 1.0572252f * xyz.z);
 }
 
-// Reflectance of the film-over-base stack, replacing the specular Fresnel.
-//
-// `cos_theta1` is the cosine at the outer interface, `thickness` is in
-// nanometres, and `base_f0` is the F0 the lobe would have used without a film.
 DEVICE_FUNC float3 iridescence_fresnel(float outside_ior, float film_ior, float cos_theta1,
                                        float thickness, float3 base_f0)
 {
-    // A film of no thickness is no film. The extension handles this by fading the
-    // film's IOR to the outside medium's, and that alone does not get there: with
-    // both IORs equal the outer interface reflects nothing, the series collapses
-    // to its m = 0 term, and what is left is the m = 1 fringe scaled by the floor
-    // r123 is clamped to -- about 60% of the base reflectance, out of nowhere.
-    // Recovering the base exactly is not something a clamped series can be asked
-    // to do, so it is stated instead.
     if (thickness <= 0.0f)
     {
         return fresnel_schlick(base_f0, cos_theta1);

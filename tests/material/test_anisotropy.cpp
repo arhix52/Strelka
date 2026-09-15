@@ -1,25 +1,3 @@
-// ============================================================================
-// test_anisotropy.cpp -- anisotropic GGX: the helper, and the wiring that
-// is missing around it.
-//
-// Scene 05_anisotropy is the worst of the "geometry is right, shading is not"
-// failures in the Cycles harness (rel 0.1030). The reason is not a subtle
-// numeric one: anisotropy is simply not connected. anisotropic_alpha() exists
-// in microfacet.h and is called by nothing; SurfaceInteraction::anisotropy is
-// filled in by bsdf_init() and read by no BxDF; si.tangent / si.bitangent never
-// reach a distribution function at all. Every "anisotropic" material in the
-// harness therefore renders as a plain isotropic GGX.
-//
-// This file is in two halves:
-//   * the first half pins down anisotropic_alpha() itself, which is correct
-//     today and must stay correct once it is finally called;
-//   * the second half is marked RED and fails on purpose. It states what the
-//     BSDF is supposed to do with si.anisotropy, so that wiring anisotropy into
-//     standard_pbr.h turns the suite green instead of silently changing pixels.
-//
-// No define of DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN here: test_bsdf.cpp owns
-// main() for the whole unit_tests binary.
-// ============================================================================
 
 #include <doctest/doctest.h>
 
@@ -38,10 +16,6 @@
 namespace
 {
 
-// A shading frame with an explicit, right-handed tangent basis:
-//   N = +Y, T = +X, B = +Z, and B == cross(N, T).
-// The view direction looks straight down the normal, which is what makes the
-// symmetry argument in the second half of the file exact.
 SurfaceInteraction make_aniso_si(float roughness, float metallic, float anisotropy)
 {
     MaterialParams p = {};
@@ -90,10 +64,6 @@ float3 dir_along_tangent(const SurfaceInteraction& si, float theta)
     return normalize(std::sin(theta) * si.tangent + std::cos(theta) * si.shading_normal);
 }
 
-// Same polar angle, leaning toward the bitangent instead. This is the tangent
-// direction reflected across the N-B plane and then across the N-T plane -- i.e.
-// the pair only differ in *which* tangent axis they are tilted along, so an
-// isotropic lobe cannot tell them apart and an anisotropic one must.
 float3 dir_along_bitangent(const SurfaceInteraction& si, float theta)
 {
     return normalize(std::sin(theta) * si.bitangent + std::cos(theta) * si.shading_normal);
@@ -161,11 +131,6 @@ TEST_CASE("anisotropic_alpha separates the two axes monotonically")
 
 TEST_CASE("anisotropic_alpha is energy-preserving: alpha_x * alpha_y == alpha^2")
 {
-    // aspect enters as a reciprocal pair (alpha/aspect, alpha*aspect), so the
-    // geometric mean of the two axes is the isotropic alpha for every
-    // anisotropy. Without this the lobe would gain or lose energy as the slider
-    // moves, which is exactly the artefact the harness would report as a
-    // brightness ratio drift on 05_anisotropy.
     for (float roughness : { 0.15f, 0.35f, 0.6f, 1.0f })
     {
         const float iso = alpha_from_roughness(roughness);
@@ -218,23 +183,6 @@ TEST_CASE("anisotropic_alpha flips the long axis for negative anisotropy")
     CHECK(std::isfinite(ny));
 }
 
-// ===========================================================================
-// Part 2 -- the BSDF's response to si.anisotropy.
-//
-// *** RED: every CHECK below this line fails today. ***
-//
-// They stay red until anisotropy is wired into standard_pbr.h: the specular
-// lobe must build a tangent-frame anisotropic GGX from anisotropic_alpha(),
-// si.tangent and si.bitangent instead of calling ggx_ndf/ggx_smith_g2/
-// ggx_vndf_pdf with the single isotropic alpha_from_roughness(si.roughness).
-// Right now si.anisotropy is copied into the SurfaceInteraction by bsdf_init()
-// and then read by nobody, so the two directions below evaluate bit-identically
-// no matter what the slider says.
-//
-// These are CHECKs, not REQUIREs, so the run reports the missing behaviour by
-// name and keeps going rather than aborting the binary.
-// ===========================================================================
-
 TEST_CASE("bsdf_init carries anisotropy into the SurfaceInteraction")
 {
     // The plumbing up to the BSDF boundary does work -- this one is green, and
@@ -246,12 +194,6 @@ TEST_CASE("bsdf_init carries anisotropy into the SurfaceInteraction")
 
 TEST_CASE("isotropic control: tangent and bitangent directions match at anisotropy 0")
 {
-    // With wo == N, a direction tilted toward T and the same direction tilted
-    // toward B are related by a 90-degree rotation about the normal. An
-    // isotropic lobe is invariant under that rotation, so these must agree
-    // exactly. GREEN today (trivially, since anisotropy is ignored), but it is
-    // the control that stops a future anisotropy patch from perturbing
-    // isotropic materials.
     const SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.0f);
 
     for (float theta : { 0.15f, 0.35f, 0.5f, 0.8f })
@@ -267,10 +209,6 @@ TEST_CASE("isotropic control: tangent and bitangent directions match at anisotro
 
 TEST_CASE("RED: anisotropy 0.9 must split the specular lobe along tangent vs bitangent")
 {
-    // Same two directions, same everything, only si.anisotropy differs from the
-    // control above. A tangent-frame GGX with alpha_x / alpha_y about 4.8:1
-    // spreads energy along T and starves it along B, so off the specular peak
-    // the two evaluations must differ by far more than noise.
     const SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
     REQUIRE(si.anisotropy == doctest::Approx(0.9f));
 
@@ -297,10 +235,6 @@ TEST_CASE("RED: anisotropy 0.9 must split the specular lobe along tangent vs bit
 
 TEST_CASE("RED: the anisotropic sampling density must follow the anisotropic lobe")
 {
-    // A wired-up implementation has to move the VNDF density with the
-    // distribution, not just the value of f. If only the NDF is made
-    // anisotropic and ggx_vndf_pdf() is left isotropic, MIS weights and the
-    // sample/eval consistency check in test_bsdf.cpp go quietly wrong.
     const SurfaceInteraction si = make_aniso_si(0.25f, 1.0f, 0.9f);
 
     const BsdfEvalResult t = bsdf_eval(si, dir_along_tangent(si, 0.5f));
@@ -338,11 +272,6 @@ TEST_CASE("RED: flipping the sign of anisotropy must swap the two axes")
 
 TEST_CASE("RED: rotating the tangent frame must rotate the specular lobe with it")
 {
-    // The strongest statement of the defect: si.tangent / si.bitangent are
-    // never read, so today the lobe is completely insensitive to the frame.
-    // Swapping T and B is a 90-degree rotation of the frame about N; with
-    // anisotropy held fixed, the value along the world direction +X has to
-    // follow the frame.
     const SurfaceInteraction a = make_aniso_si(0.25f, 1.0f, 0.9f);
 
     SurfaceInteraction rotated = a;

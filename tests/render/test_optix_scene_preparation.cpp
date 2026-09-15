@@ -13,10 +13,6 @@ using oka::optix::SceneBuildHooks;
 
 namespace
 {
-// Records the order stages ran in, and lets the two sliced stages be told how
-// many calls they should take before reporting themselves finished. That is the
-// whole contract the renderer depends on: the cursor must stay on a sliced stage
-// until it says it is done, and must not run the next stage in the same call.
 struct Recorder
 {
     std::vector<std::string> ran;
@@ -47,10 +43,6 @@ struct Recorder
 };
 } // namespace
 
-// The order is not cosmetic. Environment runs second so a scene has its sky and
-// the light it casts on screen while the structures -- the long pole -- build
-// into it; it used to run last, which is why a large scene showed nothing at all
-// until every last byte of it was resident.
 TEST_CASE("the environment is ready before the structures start")
 {
     Recorder rec;
