@@ -11,7 +11,7 @@
             "env": {
                 "SPDLOG_LEVEL": "trace"
             },
-            "preLaunchTask": "CMake Build (Debug)"
+            "preLaunchTask": "Build StrelkaEditor (Debug)"
         },
         {
             "name": "Launch StrelkaEditor (Release)",
@@ -23,7 +23,7 @@
             "env": {
                 "SPDLOG_LEVEL": "info"
             },
-            "preLaunchTask": "CMake Build (Release)"
+            "preLaunchTask": "Build StrelkaEditor (Release)"
         },
         {
             "name": "Launch StrelkaEditor (Debug + Metal validation)",
@@ -37,7 +37,7 @@
                 "MTL_DEBUG_LAYER": "1",
                 "MTL_SHADER_VALIDATION": "1"
             },
-            "preLaunchTask": "CMake Build (Debug)"
+            "preLaunchTask": "Build StrelkaEditor (Debug)"
         },
         {
             "name": "Run unit tests (Debug)",
@@ -46,7 +46,7 @@
             "program": "${workspaceFolder}/build/Debug/unit_tests",
             "args": [],
             "cwd": "${workspaceFolder}/build/Debug",
-            "preLaunchTask": "CMake Build (Debug)"
+            "preLaunchTask": "Build unit_tests (Debug)"
         },
         {
             "name": "(Windows) Launch StrelkaEditor (Debug)",
@@ -62,7 +62,7 @@
                 }
             ],
             "stopAtEntry": false,
-            "preLaunchTask": "CMake Build (Debug)"
+            "preLaunchTask": "Build StrelkaEditor (Debug)"
         }
     ],
     "inputs": [
