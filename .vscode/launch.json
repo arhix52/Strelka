@@ -2,28 +2,75 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Run StrelkaEditor",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Release/StrelkaEditor.exe",
+            "cwd": "${workspaceFolder}/build/Release",
+            "env": {
+                "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0"
+            },
+            "windows": {
+                "type": "lldb",
+                "program": "${workspaceFolder}/build/Release/StrelkaEditor.exe",
+                "cwd": "${workspaceFolder}/build/Release",
+                "env": {
+                    "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0"
+                }
+            }
+        },
+        {
             "name": "Launch StrelkaEditor (Debug)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/Strelka.app/Contents/MacOS/Strelka",
+            "program": "${workspaceFolder}/build/Release/StrelkaEditor.exe",
             "args": ["-s", "${input:sceneFile}"],
-            "cwd": "${workspaceFolder}/build/Debug",
-            "env": {
-                "SPDLOG_LEVEL": "trace"
+            "cwd": "${workspaceFolder}/build/Release",
+            "stopAtEntry": false,
+            "preLaunchTask": "Build StrelkaEditor (Debug)",
+            "hidden": true,
+            "osx": {
+                "type": "lldb",
+                "program": "${workspaceFolder}/build/Debug/Strelka.app/Contents/MacOS/Strelka",
+                "cwd": "${workspaceFolder}/build/Debug",
+                "env": {
+                    "SPDLOG_LEVEL": "trace"
+                },
+                "preLaunchTask": "Build StrelkaEditor (Debug)"
             },
-            "preLaunchTask": "Build StrelkaEditor (Debug)"
+            "windows": {
+                "preLaunchTask": "Build StrelkaEditor (Release)",
+                "env": {
+                    "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0",
+                    "SPDLOG_LEVEL": "trace"
+                }
+            }
         },
         {
             "name": "Launch StrelkaEditor (Release)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Release/Strelka.app/Contents/MacOS/Strelka",
+            "program": "${workspaceFolder}/build/Release/StrelkaEditor.exe",
             "args": ["-s", "${input:sceneFile}"],
             "cwd": "${workspaceFolder}/build/Release",
-            "env": {
-                "SPDLOG_LEVEL": "info"
+            "stopAtEntry": false,
+            "preLaunchTask": "Build StrelkaEditor (Release)",
+            "hidden": true,
+            "osx": {
+                "type": "lldb",
+                "program": "${workspaceFolder}/build/Release/Strelka.app/Contents/MacOS/Strelka",
+                "cwd": "${workspaceFolder}/build/Release",
+                "env": {
+                    "SPDLOG_LEVEL": "info"
+                },
+                "preLaunchTask": "Build StrelkaEditor (Release)"
             },
-            "preLaunchTask": "Build StrelkaEditor (Release)"
+            "windows": {
+                "env": {
+                    "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0",
+                    "SPDLOG_LEVEL": "info"
+                }
+            }
         },
         {
             "name": "Launch StrelkaEditor (Debug + Metal validation)",
@@ -37,7 +84,8 @@
                 "MTL_DEBUG_LAYER": "1",
                 "MTL_SHADER_VALIDATION": "1"
             },
-            "preLaunchTask": "Build StrelkaEditor (Debug)"
+            "preLaunchTask": "Build StrelkaEditor (Debug)",
+            "hidden": true
         },
         {
             "name": "Run unit tests (Debug)",
@@ -46,23 +94,18 @@
             "program": "${workspaceFolder}/build/Debug/unit_tests",
             "args": [],
             "cwd": "${workspaceFolder}/build/Debug",
-            "preLaunchTask": "Build unit_tests (Debug)"
-        },
-        {
-            "name": "(Windows) Launch StrelkaEditor (Debug)",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/Debug/StrelkaEditor.exe",
-            "args": ["-s", "${input:sceneFile}"],
-            "cwd": "${workspaceFolder}/build/Debug",
-            "environment": [
-                {
-                    "name": "SPDLOG_LEVEL",
-                    "value": "info"
-                }
-            ],
-            "stopAtEntry": false,
-            "preLaunchTask": "Build StrelkaEditor (Debug)"
+            "preLaunchTask": "Build unit_tests (Debug)",
+            "hidden": true,
+            "osx": {
+                "type": "lldb",
+                "program": "${workspaceFolder}/build/Debug/unit_tests",
+                "cwd": "${workspaceFolder}/build/Debug"
+            },
+            "windows": {
+                "program": "${workspaceFolder}/build/Release/unit_tests.exe",
+                "cwd": "${workspaceFolder}/build/Release",
+                "preLaunchTask": "Build unit_tests (Debug)"
+            }
         }
     ],
     "inputs": [

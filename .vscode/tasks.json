@@ -19,27 +19,101 @@
         },
         {
             "label": "Build StrelkaEditor (Debug)",
-            "type": "process",
-            "command": "ninja",
-            "args": ["-C", "${workspaceFolder}/build/Debug", "StrelkaEditor"],
+            "type": "shell",
+            "command": "ninja -C ${workspaceFolder}/build/Debug StrelkaEditor",
+            "options": {"cwd": "${workspaceFolder}"},
             "group": {"kind": "build", "isDefault": true},
-            "problemMatcher": ["$gcc"]
+            "problemMatcher": ["$gcc"],
+            "windows": {
+                "type": "process",
+                "command": "powershell",
+                "args": [
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "${workspaceFolder}/scripts/build_editor_win.ps1"
+                ],
+                "options": {
+                    "cwd": "${workspaceFolder}",
+                    "env": {
+                        "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0"
+                    }
+                },
+                "problemMatcher": ["$msCompile"]
+            }
         },
         {
             "label": "Build StrelkaEditor (Release)",
-            "type": "process",
-            "command": "ninja",
-            "args": ["-C", "${workspaceFolder}/build/Release", "StrelkaEditor"],
+            "type": "shell",
+            "command": "ninja -C ${workspaceFolder}/build/Release StrelkaEditor",
+            "options": {"cwd": "${workspaceFolder}"},
             "group": "build",
-            "problemMatcher": ["$gcc"]
+            "problemMatcher": ["$gcc"],
+            "windows": {
+                "type": "process",
+                "command": "powershell",
+                "args": [
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "${workspaceFolder}/scripts/build_editor_win.ps1"
+                ],
+                "options": {
+                    "cwd": "${workspaceFolder}",
+                    "env": {
+                        "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0"
+                    }
+                },
+                "problemMatcher": ["$msCompile"]
+            }
         },
         {
             "label": "Build unit_tests (Debug)",
-            "type": "process",
-            "command": "ninja",
-            "args": ["-C", "${workspaceFolder}/build/Debug", "unit_tests"],
+            "type": "shell",
+            "command": "ninja -C ${workspaceFolder}/build/Debug unit_tests",
+            "options": {"cwd": "${workspaceFolder}"},
             "group": "test",
-            "problemMatcher": ["$gcc"]
+            "problemMatcher": ["$gcc"],
+            "windows": {
+                "command": "cmd",
+                "args": [
+                    "/c",
+                    "call build\\Release\\generators\\conanbuild.bat && cmake --build build\\Release --target unit_tests -j 24"
+                ],
+                "options": {"cwd": "${workspaceFolder}"},
+                "problemMatcher": ["$msCompile"]
+            }
+        },
+        {
+            "label": "Run StrelkaEditor",
+            "type": "process",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/run_editor_win.ps1",
+                "-Build"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0"
+                }
+            },
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": false
+            }
         },
         {
             "label": "Run unit_tests (Debug)",
@@ -48,7 +122,11 @@
             "dependsOn": "Build unit_tests (Debug)",
             "options": {"cwd": "${workspaceFolder}/build/Debug"},
             "group": "test",
-            "problemMatcher": []
+            "problemMatcher": [],
+            "windows": {
+                "command": "${workspaceFolder}/build/Release/unit_tests.exe",
+                "options": {"cwd": "${workspaceFolder}/build/Release"}
+            }
         }
     ]
 }

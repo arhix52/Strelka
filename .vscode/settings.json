@@ -24,5 +24,12 @@
     "files.associations": {
         "*.ipp": "cpp",
         "*.tcc": "cpp"
-    }
+    },
+
+    "terminal.integrated.env.windows": {
+        "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0"
+    },
+
+    "lldb.showDisassembly": "never",
+    "debug.openDebug": "neverOpen"
 }
