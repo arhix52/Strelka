@@ -474,11 +474,6 @@ TEST_CASE("finite analytic light surfaces block only the open shadow segment")
         const float bsdfPdf = 0.2f;
         CHECK(computeMisWeight(lightPdf, bsdfPdf, 0) + computeMisWeight(bsdfPdf, lightPdf, 0) == doctest::Approx(1.0f));
     }
-
-    // Mutation: the old shadow mask enumerated ordinary geometry only, hence
-    // no light surface above could ever have blocked the connection.
-    constexpr bool oldShadowMaskCouldHitAnalyticLight = false;
-    CHECK_FALSE(oldShadowMaskCouldHitAnalyticLight);
 }
 
 TEST_CASE("selected sphere light keeps near-side self-occlusion")
@@ -2077,12 +2072,6 @@ TEST_CASE("OptiX arbitrates analytic lights against a nearer hardware hit")
     REQUIRE(analytic.hit);
     CHECK(analytic.distance == doctest::Approx(1.0f));
     CHECK(analytic.distance < hardwareDistance);
-
-    // Frozen mutation: the former OptiX path searched analytic surfaces only
-    // from __miss__. Any hardware hit, even one behind the light, therefore
-    // suppressed this valid light event.
-    const bool oldMissOnlyPathSelectsAnalytic = false;
-    CHECK_FALSE(oldMissOnlyPathSelectsAnalytic);
 }
 
 TEST_CASE("the nearest of two area emitters is the visible hit")
