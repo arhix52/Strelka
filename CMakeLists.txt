@@ -79,18 +79,8 @@ option(STRELKA_BUILD_EDITOR "Build interactive editor application" ON)
 option(STRELKA_BUILD_CLI    "Build headless CLI renderer" ON)
 option(STRELKA_BUILD_TESTS  "Build unit tests" ON)
 
-# --- MaterialX (third_party/materialx, pinned to v1.39.5) -------------------
-#
-# Only MaterialXCore and MaterialXFormat: the document model and its XML reader.
-# Every shader generator is off, and that is a decision rather than thrift --
-# see docs/material_api_proposal.md's successor and the plan behind
-# openpbr/openpbr_shim.h. MaterialXGenMsl exists and MaterialXGenCuda does not,
-# so generating shader code from a .mtlx would make the feature Metal-only,
-# which is exactly the constraint that ruled codegen out. What the loader needs
-# instead is the parsed document, which Core and Format alone provide.
-#
-# EXCLUDE_FROM_ALL so MaterialX's own install rules and samples stay out of this
-# build; the two libraries are still built because the loader links them.
+# MaterialX is used only for its document model and XML reader. Shader codegen
+# stays disabled because it cannot provide the same implementation on all backends.
 set(MATERIALX_BUILD_GEN_GLSL      OFF CACHE BOOL "" FORCE)
 set(MATERIALX_BUILD_GEN_OSL       OFF CACHE BOOL "" FORCE)
 set(MATERIALX_BUILD_GEN_MDL       OFF CACHE BOOL "" FORCE)
