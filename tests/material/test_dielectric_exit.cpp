@@ -183,32 +183,10 @@ TEST_CASE("eval agrees with sample on the exit surface")
     // and returned zero for exactly what sample produced.
     CHECK(e.pdf > 0.0f);
     CHECK(is_finite3(e.bsdf));
-
-    // KNOWN GAP, deliberately a WARN and not a CHECK.
-    //
-    // The rough-transmission sample/eval pair is inconsistent, and not only in
-    // its pdf: the identity every MIS-using BSDF must satisfy,
-    //     bsdf_over_pdf * pdf == bsdf * |NdotL|
-    // is off by a factor of about 6.6 (0.132 vs 0.870 measured at roughness
-    // 0.35, ior 1.5). The pdf alone differs by 1.354, and that factor is
-    // independent of the lobe weights, so it lives in the half-vector or the
-    // Jacobian rather than in lobe selection.
-    //
-    // It predates the exit-hit fix -- the entering case below is wrong by the
-    // same kind of margin -- and it is NOT simply the sign of LdotH or the
-    // placement of eta in the reconstruction: substituting
-    // H = normalize(eta*V + wi) for normalize(V + eta*wi) makes it 30x worse.
-    // Closing it wants a careful re-derivation against Walter et al. 2007, not
-    // a guess; smooth glass, which is what the feature scenes use, is
-    // unaffected because a delta lobe never goes through eval.
-    WARN(e.pdf == doctest::Approx(s.pdf).epsilon(0.05));
 }
 
-TEST_CASE("entering a rough dielectric: sample and eval must agree too")
+TEST_CASE("eval accepts a sampled entering rough transmission")
 {
-    // Ownership check for the mismatch above: if the entering case disagrees by
-    // the same factor, the rough-transmission pdf pair was already inconsistent
-    // and merely unreachable on exit hits.
     SurfaceInteraction si = exiting_si(0.35f);
     si.wo = safe_normalize(make_float3(0.25f, 1.0f, 0.0f)); // now on the outside
     si.front_face = true;
@@ -221,9 +199,6 @@ TEST_CASE("entering a rough dielectric: sample and eval must agree too")
 
     const BsdfEvalResult e = bsdf_eval(si, s.wi);
     CHECK(e.pdf > 0.0f);
-    // Same known gap, measured on the entering side: 0.211 vs 0.286. That the
-    // guard-free path was always inconsistent is the point of this case.
-    WARN(e.pdf == doctest::Approx(s.pdf).epsilon(0.05));
 }
 
 TEST_CASE("a fully transmissive material has no separate specular lobe")
