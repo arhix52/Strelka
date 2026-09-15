@@ -1,15 +1,15 @@
 #include <doctest/doctest.h>
 
-#include "OptixScenePreparation.h"
+#include "host/scene_preparation.h"
 
 #include <string>
 #include <vector>
 
-using oka::optix::BuildStage;
-using oka::optix::buildProgressBefore;
-using oka::optix::buildStageName;
-using oka::optix::OptixScenePreparation;
-using oka::optix::SceneBuildHooks;
+using oka::scene_preparation::buildProgressBefore;
+using oka::scene_preparation::BuildStage;
+using oka::scene_preparation::buildStageName;
+using oka::scene_preparation::SceneBuildHooks;
+using oka::scene_preparation::ScenePreparation;
 
 namespace
 {
@@ -47,7 +47,7 @@ TEST_CASE("the environment is ready before the structures start")
 {
     Recorder rec;
     SceneBuildHooks hooks = rec.hooks();
-    OptixScenePreparation prep;
+    ScenePreparation prep;
     prep.begin();
     prep.finish(hooks, nullptr);
 
@@ -59,7 +59,7 @@ TEST_CASE("the environment is ready before the structures start")
 
 TEST_CASE("a machine that has not begun is not building")
 {
-    OptixScenePreparation prep;
+    ScenePreparation prep;
     CHECK(prep.isDone());
     CHECK_FALSE(prep.isBuilding());
 
@@ -76,7 +76,7 @@ TEST_CASE("one stage per step, and a sliced stage keeps the cursor")
     Recorder rec;
     rec.structureSlices = 3;
     SceneBuildHooks hooks = rec.hooks();
-    OptixScenePreparation prep;
+    ScenePreparation prep;
     prep.begin();
 
     CHECK_FALSE(prep.step(hooks, nullptr)); // buffers
@@ -102,10 +102,10 @@ TEST_CASE("the slice budget the stages are handed is the published one")
 {
     Recorder rec;
     SceneBuildHooks hooks = rec.hooks();
-    OptixScenePreparation prep;
+    ScenePreparation prep;
     prep.begin();
     prep.finish(hooks, nullptr);
-    CHECK(rec.lastStructureBudget == doctest::Approx(OptixScenePreparation::kBuildSliceMs));
+    CHECK(rec.lastStructureBudget == doctest::Approx(ScenePreparation::kBuildSliceMs));
 }
 
 // finish() is what renderSync and the CLI take, and it must not be able to spin
@@ -116,7 +116,7 @@ TEST_CASE("finish drives a many-sliced build all the way to done")
     rec.structureSlices = 17;
     rec.textureSlices = 9;
     SceneBuildHooks hooks = rec.hooks();
-    OptixScenePreparation prep;
+    ScenePreparation prep;
     prep.begin();
     prep.finish(hooks, nullptr);
 
@@ -131,7 +131,7 @@ TEST_CASE("finish drives a many-sliced build all the way to done")
 TEST_CASE("unset hooks do not stall the build")
 {
     SceneBuildHooks empty;
-    OptixScenePreparation prep;
+    ScenePreparation prep;
     prep.begin();
     for (int i = 0; i < 16 && !prep.isDone(); ++i)
     {

@@ -16,8 +16,8 @@
 #include "optix_denoise_plan.h"
 #include "texture_upload_plan.h"
 
-#include "OptixScenePreparation.h"
 #include "gpu_stage_breadcrumb.h"
+#include <host/scene_preparation.h>
 #include <host/scene_stream.h>
 
 #include <cuda_runtime.h>
@@ -328,8 +328,8 @@ private:
     // Temporary buffers for GAS building
     // These buffers are reused across multiple GAS builds to reduce allocations
     // They are automatically resized if needed but never shrink
-    std::unique_ptr<OptixBuffer> mTempAccelBuffer;        // Temporary buffer for acceleration structure building
-    std::unique_ptr<OptixBuffer> mCompactedSizeBuffer;  // Buffer for storing compaction size results
+    std::unique_ptr<OptixBuffer> mTempAccelBuffer; // Temporary buffer for acceleration structure building
+    std::unique_ptr<OptixBuffer> mCompactedSizeBuffer; // Buffer for storing compaction size results
     std::unique_ptr<OptixBuffer> mSegmentIndicesBuffer; // Buffer for curve segment indices
 
     void createVertexBuffer();
@@ -448,16 +448,13 @@ private:
     std::unique_ptr<OptixBuffer> mRenderImageBuffer;
     /// The last completed linear image. readDisplayTexture() copies this into a
     /// scratch allocation and presents the copy, preserving the published data.
-    void *mDisplayImage = nullptr;
+    void* mDisplayImage = nullptr;
     uint32_t mDisplayWidth = 0;
     uint32_t mDisplayHeight = 0;
     std::unique_ptr<OptixBuffer> mDisplayReadbackBuffer;
     PresentationMetadata mDisplayPresentation{};
     PresentationMetadata mPendingPresentation{};
-    bool readDisplayTextureWithMaxOutput(std::vector<float>& out,
-                                         uint32_t& width,
-                                         uint32_t& height,
-                                         float maxOutput);
+    bool readDisplayTextureWithMaxOutput(std::vector<float>& out, uint32_t& width, uint32_t& height, float maxOutput);
     /// Raised by resetTemporalHistory() and consumed by the next render().
     bool mResetTemporalHistory = true;
     /// True when denoising was asked for and could not be provided.
@@ -502,7 +499,7 @@ private:
     void reportIorStackStats();
 
     // ------------------------------------------------------------- scene build --
-    optix::OptixScenePreparation mScenePrep;
+    scene_preparation::ScenePreparation mScenePrep;
     metal::PublishClock mPublishClock;
     double mBuildStartMs = 0.0;
     bool mReportedFirstPartialFrame = false;
@@ -516,7 +513,7 @@ private:
     std::vector<cudaTextureObject_t> mHostMaterialTextures;
     std::unordered_map<std::string, cudaTextureObject_t> mTextureCache;
 
-    optix::SceneBuildHooks makeSceneBuildHooks();
+    scene_preparation::SceneBuildHooks makeSceneBuildHooks();
     void buildSceneBuffers();
     void buildSceneEnvironment(Buffer* output);
     void publishMaterialParams();
@@ -540,7 +537,7 @@ private:
     std::atomic<int> mReadyIndex{ -1 };
     int mWriteIndex = 0;
     int mCudaDeviceOrdinal = -1;
-    Buffer *mAsyncOutputBuffers[2] = { nullptr, nullptr };
+    Buffer* mAsyncOutputBuffers[2] = { nullptr, nullptr };
     uint64_t mFrameSerials[2] = {};
     PresentationMetadata mFramePresentation[2] = {};
     uint64_t mNextFrameSerial = 1;
@@ -607,8 +604,7 @@ public:
         {
             return -1.0;
         }
-        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mPipelineBuildBegin)
-            .count();
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mPipelineBuildBegin).count();
     }
 
     bool isBuildingScene() const override
@@ -675,7 +671,6 @@ public:
     /// order. Leaves the handles null so a failed rebuild cannot launch against
     /// a destroyed pipeline.
     void destroyPipeline();
-
 };
 
 } // namespace oka
