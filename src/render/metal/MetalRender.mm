@@ -2759,9 +2759,8 @@ void MetalRender::render(Buffer* output)
                 // have opposite signs: "the subpixel sampling coordinate you use to
                 // generate the color texture input" is what we applied, while "the
                 // pixel offset this scaler samples to return to the frame's
-                // reference frame" is its negation. Measured rather than reasoned
-                // about -- see runJitterTest; the sign that wins is recorded in the
-                // default of render/pt/jitterSign. The Y term carries our own flip
+                // reference frame" is its negation. The measured sign is recorded
+                // in the default of render/pt/jitterSign. The Y term carries our own flip
                 // as well (generateCameraRay builds pixelPos.y as height - y), so
                 // the two axes are switched independently.
                 const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");

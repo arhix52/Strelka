@@ -1405,7 +1405,7 @@ same one.
   (`kIOGPUCommandBufferCallbackErrorInnocentVictim`) and buried the cause.
   Ranked now by `metal4FailureRank()`, which is what made the queue timeout
   visible at all.
-- `STRELKA_STAGES=1` was read in `runBenchmark()` alone, so following the failure
+- `STRELKA_STAGES=1` was read in the old editor benchmark alone, so following the failure
   path's own advice on the editor changed nothing and it printed "stage diagnosis
   disabled" a second time. It applies to interactive runs now, and it is what
   named the shadow stage.

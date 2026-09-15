@@ -22,8 +22,7 @@ namespace oka
 /// below happens while the process is still setting itself up, so the NOLINTs
 /// on the three call sites record that rather than repeating it.
 
-/// True when the variable is present, whatever its value. For the knobs that
-/// select a mode by existing at all (STRELKA_BENCH, STRELKA_REF, ...).
+/// True when the variable is present, whatever its value.
 inline bool envFlag(const char* name)
 {
     // NOLINTNEXTLINE(concurrency-mt-unsafe)

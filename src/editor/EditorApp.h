@@ -191,10 +191,7 @@ private:
                              const glm::float3& bbMax,
                              const glm::mat4& worldFromLocal,
                              Camera& cam);
-    bool computeNodeBounds(const Scene::Node& node,
-                           glm::float3& outMin,
-                           glm::float3& outMax,
-                           glm::mat4& outWorldFromLocal);
+    bool computeNodeBounds(const Scene::Node& node, glm::float3& outMin, glm::float3& outMax, glm::mat4& outWorldFromLocal);
     /// World AABB of the current selection (node, instance, or light). False when
     /// nothing selectable is selected, or the selection has no geometry to frame.
     bool computeSelectionWorldBounds(glm::float3& outMin, glm::float3& outMax);
@@ -252,15 +249,7 @@ public:
     void applySceneExposure();
     void loadAnimSettings();
     void checkLoadingComplete();
-    void waitForSceneLoad();
     void run();
-    void runReferenceCapture();
-    void runConvergenceSweep();
-    void runBenchmark();
-    void runJitterTest();
-    void runDenoiseAudit();
-    void runPauseBlurCheck();
-    void runLightAudit();
     void playAnimations(float deltaTime);
 
     // --- UI drawing ---

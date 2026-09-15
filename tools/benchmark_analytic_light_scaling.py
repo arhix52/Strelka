@@ -2,7 +2,6 @@
 import argparse
 import json
 import math
-import os
 import re
 import shutil
 import subprocess
@@ -34,32 +33,55 @@ def lights(count: int, shape: str) -> dict:
     return {"lights": result}
 
 
-def run(binary: Path, scene: Path, count: int, width: int, height: int, frames: int) -> tuple[float, float]:
-    env = os.environ.copy()
-    env.update(
-        STRELKA_BENCH=str(frames),
-        STRELKA_BENCH_W=str(width),
-        STRELKA_BENCH_H=str(height),
-        STRELKA_REF_DEPTH="4",
-        STRELKA_BENCH_RESTIR_COMPARE="1",
-        STRELKA_RESTIR_DI="1",
-        STRELKA_RESTIR_CANDIDATES="1",
-        STRELKA_RESTIR_TEMPORAL="1",
-        STRELKA_RESTIR_SPATIAL="1",
-        STRELKA_RESTIR_NEIGHBORS="2",
-    )
-    completed = subprocess.run(
-        [str(binary), "-s", str(scene)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-    )
-    match = re.search(r"BENCH  NEE=([0-9.]+) ms ReSTIR=([0-9.]+) ms", completed.stdout)
+def run_mode(binary: Path, scene: Path, width: int, height: int, frames: int, restir: bool) -> float:
+    output = scene.with_name(f"bench-{'restir' if restir else 'nee'}.exr")
+    command = [
+        str(binary),
+        str(scene),
+        "--output",
+        str(output),
+        "--width",
+        str(width),
+        "--height",
+        str(height),
+        "--spp",
+        "1",
+        "--depth",
+        "4",
+        "--tonemap",
+        "none",
+        "--audit-frames",
+        str(frames),
+        "--audit-motion-sequence",
+        "6",
+    ]
+    if restir:
+        command += [
+            "--restir-di",
+            "--restir-candidates",
+            "1",
+            "--restir-temporal",
+            "--restir-spatial",
+            "--restir-neighbors",
+            "2",
+        ]
+    completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    match = re.search(r"STRELKA_AUDIT_GPU_MEDIAN ([0-9.]+) ms", completed.stdout)
     if completed.returncode or not match:
-        raise RuntimeError(f"benchmark failed for {count} lights at {width}x{height}\n{completed.stdout[-2000:]}")
-    return float(match.group(1)), float(match.group(2))
+        mode = "ReSTIR" if restir else "NEE"
+        raise RuntimeError(f"{mode} benchmark failed at {width}x{height}\n{completed.stdout[-2000:]}")
+    return float(match.group(1))
+
+
+def run(binary: Path, scene: Path, width: int, height: int, frames: int) -> tuple[float, float]:
+    return run_mode(binary, scene, width, height, frames, False), run_mode(
+        binary, scene, width, height, frames, True
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Metal analytic-light traversal scaling regression")
-    parser.add_argument("--binary", type=Path, default=Path("build/Release/StrelkaEditor"))
+    parser.add_argument("--binary", type=Path, default=Path("build/Release/StrelkaCLI"))
     parser.add_argument("--frames", type=int, default=32)
     parser.add_argument("--counts", default="1,32,128,512,2048")
     parser.add_argument("--resolutions", default="320x240,1920x1080")
@@ -83,7 +105,7 @@ def main() -> None:
         for count in counts:
             sidecar.write_text(json.dumps(lights(count, args.shape)), encoding="utf-8")
             for width, height in resolutions:
-                nee, restir = run(binary, scene, count, width, height, args.frames)
+                nee, restir = run(binary, scene, width, height, args.frames)
                 print(f"{count},{width}x{height},{nee:.2f},{restir:.2f}", flush=True)
                 baseline.setdefault((width, height), nee)
                 latest[(width, height)] = nee
