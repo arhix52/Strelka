@@ -28,12 +28,6 @@ struct WavefrontChunk
     bool operator==(const WavefrontChunk&) const = default;
 };
 
-struct WavefrontChunkGroup
-{
-    size_t begin = 0;
-    size_t end = 0;
-};
-
 inline uint32_t wavefrontChunkIterations(uint32_t width, uint32_t height)
 {
     // Keep each command buffer near ten million pixel-iterations. Curve traversal
@@ -80,17 +74,6 @@ inline std::vector<WavefrontChunk> makeWavefrontChunkPlan(uint32_t sampleCount,
     }
     chunks.back().resolve = true;
     return chunks;
-}
-
-inline std::vector<WavefrontChunkGroup> makeWavefrontChunkGroups(const std::vector<WavefrontChunk>& chunks)
-{
-    std::vector<WavefrontChunkGroup> groups;
-    groups.reserve(chunks.size());
-    for (size_t i = 0; i < chunks.size(); ++i)
-    {
-        groups.push_back({ i, i + 1 });
-    }
-    return groups;
 }
 
 inline std::vector<WavefrontChunk> makeMetal4WavefrontChunkPlan(const std::vector<WavefrontChunk>& chunks,

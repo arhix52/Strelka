@@ -96,11 +96,10 @@ struct Metal4FrameFeedbackState
 {
     // Commit feedback is delivered on Metal4Context's serial feedback queue.
     double gpuMs = 0.0;
-    double slowestGroupGpuMs = 0.0;
-    size_t slowestGroup = 0;
+    double slowestChunkGpuMs = 0.0;
+    size_t slowestChunk = 0;
     std::vector<const MTL4::CommandBuffer*> buffers;
     std::vector<metal::WavefrontChunk> chunks;
-    std::vector<metal::WavefrontChunkGroup> groups;
     std::function<void(size_t)> submit;
 };
 
@@ -2182,13 +2181,12 @@ void MetalRender::render(Buffer* output)
                 auto feedbackState = std::make_shared<Metal4FrameFeedbackState>();
                 feedbackState->buffers = std::move(integrateBuffers);
                 feedbackState->chunks = wavefrontChunks;
-                feedbackState->groups = metal::makeWavefrontChunkGroups(wavefrontChunks);
                 mMetal4FrameValue = mMetal4.reserveFrameSignal();
                 const uint64_t frameSignalValue = mMetal4FrameValue;
                 const std::weak_ptr<Metal4FrameFeedbackState> weakFeedbackState = feedbackState;
                 feedbackState->submit = [this, weakFeedbackState, writeIdx4, asyncPresent, commitStartedAt, profileStages,
                                          width, height, maxDepth, samplesThisLaunch, features, traversalBatchThreads,
-                                         frameSignalValue, reportSharcDiagnostics](size_t groupIndex) {
+                                         frameSignalValue, reportSharcDiagnostics](size_t chunkIndex) {
                     const std::shared_ptr<Metal4FrameFeedbackState> state = weakFeedbackState.lock();
                     if (!state)
                     {
@@ -2197,7 +2195,7 @@ void MetalRender::render(Buffer* output)
                     MTL4::CommitOptions* options = MTL4::CommitOptions::alloc()->init();
                     options->addFeedbackHandler(MTL4::CommitFeedbackHandlerFunction(
                         [this, state, writeIdx4, asyncPresent, commitStartedAt, profileStages, width, height, maxDepth,
-                         samplesThisLaunch, features, traversalBatchThreads, groupIndex, frameSignalValue,
+                         samplesThisLaunch, features, traversalBatchThreads, chunkIndex, frameSignalValue,
                          reportSharcDiagnostics](MTL4::CommitFeedback* fb) {
                             const NS::Error* error = fb ? fb->error() : nullptr;
                             double chunkGpuMs = 0.0;
@@ -2205,10 +2203,10 @@ void MetalRender::render(Buffer* output)
                             {
                                 chunkGpuMs = (fb->GPUEndTime() - fb->GPUStartTime()) * 1000.0;
                                 state->gpuMs += chunkGpuMs;
-                                if (chunkGpuMs > state->slowestGroupGpuMs)
+                                if (chunkGpuMs > state->slowestChunkGpuMs)
                                 {
-                                    state->slowestGroupGpuMs = chunkGpuMs;
-                                    state->slowestGroup = groupIndex;
+                                    state->slowestChunkGpuMs = chunkGpuMs;
+                                    state->slowestChunk = chunkIndex;
                                 }
                             }
                             if (error)
@@ -2237,7 +2235,7 @@ void MetalRender::render(Buffer* output)
                                     STRELKA_ERROR(
                                         "Metal 4 frame chunk group {}/{} failed after {:.1f} ms wall / "
                                         "{:.1f} ms group GPU: {} (domain {}, code {}){}",
-                                        groupIndex + 1, state->groups.size(), wallMs, chunkGpuMs,
+                                        chunkIndex + 1, state->chunks.size(), wallMs, chunkGpuMs,
                                         error->localizedDescription() ? error->localizedDescription()->utf8String() :
                                                                         "unknown error",
                                         error->domain() ? error->domain()->utf8String() : "?", (long)error->code(),
@@ -2252,26 +2250,21 @@ void MetalRender::render(Buffer* output)
                                     }
                                     STRELKA_ERROR("Metal 4 failed workload: PT={}x{} spp={} depth={} features=0x{:x}",
                                                   width, height, samplesThisLaunch, maxDepth, features);
-                                    if (groupIndex < state->groups.size())
+                                    if (chunkIndex < state->chunks.size())
                                     {
-                                        const metal::WavefrontChunkGroup& failedGroup = state->groups[groupIndex];
-                                        if (failedGroup.begin < failedGroup.end && failedGroup.end <= state->chunks.size())
+                                        const metal::WavefrontChunk& chunk = state->chunks[chunkIndex];
+                                        STRELKA_ERROR(
+                                            "Metal 4 failed chunk: sample={} bounce={}..{} phase={} "
+                                            "traversal_batches={}..{}",
+                                            chunk.sampleIndex, chunk.bounceBegin, chunk.bounceEnd,
+                                            metal::wavefrontChunkPhaseName(chunk.phase), chunk.traversalBatchBegin,
+                                            chunk.traversalBatchEnd);
+                                        if (chunk.phase == metal::WavefrontChunkPhase::Extend)
                                         {
-                                            const metal::WavefrontChunk& first = state->chunks[failedGroup.begin];
-                                            const metal::WavefrontChunk& last = state->chunks[failedGroup.end - 1];
-                                            STRELKA_ERROR(
-                                                "Metal 4 failed chunk: sample={}..{} bounce={}..{} phase={} "
-                                                "traversal_batches={}..{}",
-                                                first.sampleIndex, last.sampleIndex, first.bounceBegin, last.bounceEnd,
-                                                metal::wavefrontChunkPhaseName(first.phase), first.traversalBatchBegin,
-                                                last.traversalBatchEnd);
-                                            if (first.phase == metal::WavefrontChunkPhase::Extend)
-                                            {
-                                                STRELKA_ERROR("Metal 4 failed traversal queue gids={}..{}",
-                                                              first.traversalBatchBegin * traversalBatchThreads,
-                                                              std::min(last.traversalBatchEnd * traversalBatchThreads,
-                                                                       width * height));
-                                            }
+                                            STRELKA_ERROR("Metal 4 failed traversal queue gids={}..{}",
+                                                          chunk.traversalBatchBegin * traversalBatchThreads,
+                                                          std::min(chunk.traversalBatchEnd * traversalBatchThreads,
+                                                                   width * height));
                                         }
                                     }
                                     if (profileStages)
@@ -2290,9 +2283,9 @@ void MetalRender::render(Buffer* output)
                                 return;
                             }
 
-                            if (groupIndex + 1 < state->groups.size())
+                            if (chunkIndex + 1 < state->chunks.size())
                             {
-                                mMetal4.afterFeedback([state, groupIndex]() { state->submit(groupIndex + 1); });
+                                mMetal4.afterFeedback([state, chunkIndex]() { state->submit(chunkIndex + 1); });
                                 return;
                             }
 
@@ -2303,22 +2296,16 @@ void MetalRender::render(Buffer* output)
                             mMetal4.signalFrame(frameSignalValue);
                             const double frameGpuMs = state->gpuMs;
                             mLastRenderTimeMs.store(frameGpuMs, std::memory_order_relaxed);
-                            if (profileStages && state->slowestGroup < state->groups.size())
+                            if (profileStages && state->slowestChunk < state->chunks.size())
                             {
-                                const metal::WavefrontChunkGroup& slowGroup = state->groups[state->slowestGroup];
-                                if (slowGroup.begin < slowGroup.end && slowGroup.end <= state->chunks.size())
-                                {
-                                    const metal::WavefrontChunk& first = state->chunks[slowGroup.begin];
-                                    const metal::WavefrontChunk& last = state->chunks[slowGroup.end - 1];
-                                    STRELKA_INFO(
-                                        "STAGES Metal4 slowest group {}/{}: sample={}..{} bounce={}..{} "
-                                        "phase={} traversal_batches={}..{} GPU={:.2f} ms, "
-                                        "frame chunks={:.2f} ms",
-                                        state->slowestGroup + 1, state->groups.size(), first.sampleIndex,
-                                        last.sampleIndex, first.bounceBegin, last.bounceEnd,
-                                        metal::wavefrontChunkPhaseName(first.phase), first.traversalBatchBegin,
-                                        last.traversalBatchEnd, state->slowestGroupGpuMs, frameGpuMs);
-                                }
+                                const metal::WavefrontChunk& chunk = state->chunks[state->slowestChunk];
+                                STRELKA_INFO(
+                                    "STAGES Metal4 slowest chunk {}/{}: sample={} bounce={}..{} "
+                                    "phase={} traversal_batches={}..{} GPU={:.2f} ms, frame chunks={:.2f} ms",
+                                    state->slowestChunk + 1, state->chunks.size(), chunk.sampleIndex, chunk.bounceBegin,
+                                    chunk.bounceEnd, metal::wavefrontChunkPhaseName(chunk.phase),
+                                    chunk.traversalBatchBegin, chunk.traversalBatchEnd, state->slowestChunkGpuMs,
+                                    frameGpuMs);
                             }
                             if (asyncPresent)
                             {
@@ -2330,9 +2317,7 @@ void MetalRender::render(Buffer* output)
                                 mRenderBusy.store(false, std::memory_order_release);
                             }
                         }));
-                    const metal::WavefrontChunkGroup& group = state->groups[groupIndex];
-                    mMetal4.queue()->commit(state->buffers.data() + group.begin,
-                                            static_cast<NS::UInteger>(group.end - group.begin), options);
+                    mMetal4.queue()->commit(state->buffers.data() + chunkIndex, 1, options);
                     options->release();
                 };
                 feedbackState->submit(0);

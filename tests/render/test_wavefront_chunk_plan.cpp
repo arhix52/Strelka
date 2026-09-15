@@ -3,7 +3,6 @@
 #include "wavefront_chunk_plan.h"
 
 using oka::metal::makeMetal4WavefrontChunkPlan;
-using oka::metal::makeWavefrontChunkGroups;
 using oka::metal::makeWavefrontChunkPlan;
 using oka::metal::wavefrontChunkIterations;
 using oka::metal::WavefrontChunkPhase;
@@ -44,16 +43,6 @@ TEST_CASE("long wavefront paths use short early and wider tail chunks")
     CHECK(chunks[15].bounceEnd == 16);
     CHECK(chunks[16].bounceEnd == 32);
     CHECK(chunks[19].bounceEnd == 80);
-
-    const auto groups = makeWavefrontChunkGroups(chunks);
-    REQUIRE(groups.size() == chunks.size());
-    CHECK(groups[0].begin == 0);
-    CHECK(groups[0].end == 1);
-    CHECK(groups[15].end == 16);
-    CHECK(groups[16].begin == 16);
-    CHECK(groups[16].end == 17);
-    CHECK(groups.back().begin == chunks.size() - 1);
-    CHECK(groups.back().end == chunks.size());
 }
 
 TEST_CASE("wavefront chunk size follows pixel workload")
