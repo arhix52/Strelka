@@ -15,8 +15,15 @@
 #    define STRELKA_SHARC_FN inline
 #endif
 
+#if defined(__CUDACC__)
+namespace oka
+{
+namespace sharc
+{
+#else
 namespace oka::sharc
 {
+#endif
 
 constexpr float kScale = 64.0f;
 
@@ -534,6 +541,11 @@ STRELKA_SHARC_FN ResolveOutput resolveEntry(const ResolveInput& input, uint32_t 
     return output;
 }
 
+#if defined(__CUDACC__)
+} // namespace sharc
+} // namespace oka
+#else
 } // namespace oka::sharc
+#endif
 
 // NOLINTEND(cppcoreguidelines-init-variables)

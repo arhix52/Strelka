@@ -75,6 +75,7 @@ if(WIN32)
     add_compile_definitions(NOMINMAX)
     add_compile_definitions(_USE_MATH_DEFINES)
     add_compile_definitions(_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
 set(ROOT_HOME ${CMAKE_CURRENT_LIST_DIR})

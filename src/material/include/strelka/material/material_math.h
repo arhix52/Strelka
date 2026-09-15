@@ -7,6 +7,13 @@
 
 #if defined(__CUDA_ARCH__) || defined(__CUDACC__) || defined(STRELKA_MATERIAL_CUDA_HOST)
 #    include <math.h>
+#    if defined(__CUDACC__)
+#        include <vector_types.h>
+#        ifndef STRELKA_CUDA_UINT_TYPEDEF
+#            define STRELKA_CUDA_UINT_TYPEDEF
+typedef unsigned int uint;
+#        endif
+#    endif
 #    include <sutil/vec_math_adv.h>
 #    ifdef __CUDA_ARCH__
 #        define DEVICE_FUNC __device__ __forceinline__

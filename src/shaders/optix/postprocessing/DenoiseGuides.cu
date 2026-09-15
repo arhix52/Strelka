@@ -4,6 +4,13 @@
 
 #include <sutil/vec_math.h>
 
+// OptixRenderParams pulls in random.h, which expects each translation unit to
+// supply this hook. Denoise guide kernels do not use blue-noise sampling.
+static __device__ bool samplerBlueNoiseEnabled()
+{
+    return false;
+}
+
 __global__ void resolveDenoiseGuidesKernel(const AovSample* __restrict__ aov,
                                            const float4* __restrict__ color,
                                            uint32_t width,

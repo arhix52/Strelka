@@ -1199,7 +1199,12 @@ void EditorApp::drawRenderSettingsPanel()
                 // Generate default filename with timestamp
                 const std::time_t now = std::time(nullptr);
                 std::tm localTime{};
+#if defined(_WIN32)
+                localtime_s(&localTime, &now);
+                const std::tm* tm = &localTime;
+#else
                 const std::tm* tm = localtime_r(&now, &localTime);
+#endif
                 // localtime() returns null for a clock it cannot convert, and strftime()
                 // returns 0 when the result would not fit; either way the dialog still
                 // needs a name to open with.

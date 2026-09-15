@@ -24,12 +24,20 @@ enum : uint32_t
 
 /// Below this a surface reflects rather than scatters, and its own albedo is not
 /// what the pixel's colour comes from. Same number as the Metal integrator uses.
+#if defined(__CUDACC__)
+constexpr float kGuideRoughnessFloor = 0.05f;
+#else
 inline constexpr float kGuideRoughnessFloor = 0.05f;
+#endif
 
 /// Never walk forever looking for a describable surface: past a couple of
 /// bounces the reflected surface has little to do with this pixel, and no guides
 /// at all is worse than imperfect ones.
+#if defined(__CUDACC__)
+constexpr uint32_t kGuideLastChanceDepth = 2u;
+#else
 inline constexpr uint32_t kGuideLastChanceDepth = 2u;
+#endif
 
 /// What the background writes into the depth guide. Device depth has a finite
 /// far plane, so the sentinel has to match the convention or the denoiser reads

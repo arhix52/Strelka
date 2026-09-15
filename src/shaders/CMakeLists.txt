@@ -5,6 +5,7 @@ set(SHADER_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/common)
 if(WIN32 OR LINUX)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
     set(OptiX_INSTALL_DIR $ENV{OPTIX_DIR})
     find_package(OptiX REQUIRED)
@@ -26,7 +27,7 @@ if(WIN32 OR LINUX)
         ${CMAKE_SOURCE_DIR}/third_party/openpbr_bsdf/*.h)
     add_custom_command(
         OUTPUT ${OPENPBR_DEVICE_INCLUDE_DIR}/openpbr.h
-        COMMAND ${CMAKE_COMMAND} -E env python3
+        COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/tools/openpbr_device_headers.py
             ${CMAKE_SOURCE_DIR}/third_party/openpbr_bsdf
             ${OPENPBR_DEVICE_INCLUDE_DIR}
@@ -52,7 +53,7 @@ if(WIN32 OR LINUX)
 
     # Target Ada for the OptiX IR baseline and keep line tables for Nsight.
     # `-c` lets ccache recognise the custom command as compilation.
-    set(OPTIX_NVCC_FLAGS --gpu-architecture=compute_89 --use_fast_math --relocatable-device-code=true
+    set(OPTIX_NVCC_FLAGS --gpu-architecture=compute_89 --std=c++20 --use_fast_math --relocatable-device-code=true
         --expt-relaxed-constexpr --generate-line-info -c)
 
     # Keep OpenPBR device assertions in Debug; release assertions abort a whole launch.

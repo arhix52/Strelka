@@ -93,8 +93,10 @@ static_assert((uint32_t)oka::optix_omm::kAlphaBlend == (uint32_t)ALPHA_MODE_BLEN
 
 #include <cuda_profiler_api.h>
 
-#include <dlfcn.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+#    include <dlfcn.h>
+#    include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -350,6 +352,9 @@ double nowMilliseconds()
 
 size_t deviceAllocatedBytes()
 {
+#if defined(_WIN32)
+    return 0;
+#else
     // The v2 process record, which is what nvmlDeviceGetComputeRunningProcesses_v3
     // fills. Declared here rather than by including nvml.h so this stays a
     // runtime lookup with no build-time dependency at all.
@@ -413,6 +418,7 @@ size_t deviceAllocatedBytes()
         }
     }
     return 0;
+#endif
 }
 
 /// What the OS charges this process. VmRSS rather than VmSize: the mapped size
@@ -420,6 +426,9 @@ size_t deviceAllocatedBytes()
 /// hundreds of gigabytes and says nothing about memory anybody is using.
 size_t processFootprintBytes()
 {
+#if defined(_WIN32)
+    return 0;
+#else
     std::ifstream status("/proc/self/status");
     std::string key;
     while (status >> key)
@@ -436,6 +445,7 @@ size_t processFootprintBytes()
         status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     }
     return 0;
+#endif
 }
 
 } // namespace

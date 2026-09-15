@@ -70,7 +70,7 @@ def main() -> int:
     for path in sorted(src.rglob("*.h")):
         out = dst / path.relative_to(src)
         out.parent.mkdir(parents=True, exist_ok=True)
-        lines = path.read_text().splitlines(keepends=True)
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         for i, line in enumerate(lines):
             table = TABLE_MACRO.match(line)
             if table:
@@ -81,7 +81,7 @@ def main() -> int:
             if ONE_LINE.match(line) or two_line:
                 lines[i] = "__device__ inline " + line
                 patched += 1
-        out.write_text("".join(lines))
+        out.write_text("".join(lines), encoding="utf-8")
 
     # A count that drops after a submodule update means the regexes stopped
     # matching a form upstream now uses, and the build will fail with "calling a
