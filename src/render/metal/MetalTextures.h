@@ -1,5 +1,6 @@
 #pragma once
 
+#include <host/texture_asset.h>
 #include <host/texture_cache_key.h>
 
 #include <Metal/Metal.hpp>
@@ -12,7 +13,9 @@
 namespace oka::metal
 {
 
-// Material texture domain: decode → mip/BC → GPU texture + disk cache.
+using TextureKind = texture::Semantic;
+
+// Material texture domain: decode -> mip/native format -> GPU texture + disk cache.
 // Does not own IBL or bind into the integrator.
 class MetalTextures
 {
@@ -20,7 +23,7 @@ public:
     MetalTextures() = default;
     ~MetalTextures();
 
-    void init(MTL::Device* device, MTL::CommandQueue* queue, SettingsManager* settings);
+    void init(MTL::Device* device, SettingsManager* settings);
 
     MTL::Texture* loadFromFile(const std::string& absolutePath, bool srgb, TextureKind kind = TextureKind::Color);
 
@@ -35,14 +38,24 @@ public:
         bool srgb = false;
         TextureKind kind = TextureKind::Color;
     };
-    bool prewarmStep(const std::vector<Request>& requests, double budgetMs);
+    /// Resolve and deduplicate the texture plan once for a material pass.
+    void beginMaterialPass(const std::vector<Request>& requests);
+    /// Decode/cache-read the prepared plan a batch at a time. Returns true when complete.
+    bool prewarmStep(double budgetMs);
 
     // Deduped load for material build. Tracks ownership in materialTextures().
     MTL::ResourceID loadMaterialTexture(const std::string& absolutePath, bool srgb, TextureKind kind = TextureKind::Color);
 
-    void beginMaterialPass();
-    void generateMips();
     void releaseAll();
+
+    size_t prewarmDone() const
+    {
+        return mPrewarmCursor;
+    }
+    size_t prewarmTotal() const
+    {
+        return mPrewarmQueue.size();
+    }
 
     const std::vector<MTL::Texture*>& materialTextures() const
     {
@@ -66,6 +79,7 @@ private:
         int height = 0;
         uint32_t levels = 0;
         uint32_t pixelFormat = 0;
+        uint32_t blockExtent = 0;
         uint32_t blockBytes = 0;
         std::vector<std::vector<uint8_t>> data;
         bool fromCache = false;
@@ -78,7 +92,7 @@ private:
         uint32_t maxDimension = 0;
         uint32_t downscale = 1;
         bool compress = true;
-        bool deviceSupportsBC = false;
+        bool deviceSupportsAstc = false;
     };
     DecodeParams readDecodeParams() const;
     Payload decodeToPayload(const std::string& fileName,
@@ -90,21 +104,15 @@ private:
     MTL::Texture* createFromPayload(const Payload& payload, const std::string& cacheFileToWrite);
 
     std::string cacheKey(const std::string& fileName, bool srgb, TextureKind kind) const;
-    MTL::Texture* loadCached(const std::string& cachePath);
-
+    static std::string materialTextureKey(const std::string& fileName, bool srgb, TextureKind kind);
     MTL::Device* mDevice = nullptr;
-    MTL::CommandQueue* mQueue = nullptr;
     SettingsManager* mSettings = nullptr;
     std::vector<MTL::Texture*> mMaterialTextures;
-    std::vector<MTL::Texture*> mTexturesNeedingMips;
     std::unordered_map<std::string, MTL::Texture*> mDedupCache;
-    /// Payloads produced by prewarm(), keyed by cache key, consumed by loadFromFile().
-    std::unordered_map<std::string, Payload> mPrewarmed;
     /// Deduplicated request list and how far through it the fan-out has got.
     std::vector<Request> mPrewarmQueue;
     std::vector<std::string> mPrewarmKeys;
     size_t mPrewarmCursor = 0;
-    bool mPrewarmPrepared = false;
     uint32_t mCacheHits = 0;
     uint32_t mCacheMisses = 0;
 };

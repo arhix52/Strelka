@@ -718,29 +718,35 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         if (!st.prewarmStarted)
         {
             st.prewarmStarted = true;
-            mTextures->beginMaterialPass();
-        }
-        std::vector<MetalTextures::Request> requests;
-        requests.reserve(matDescs.size() * 5);
-        auto want = [&](const std::string& path, bool srgb, TextureKind kind) {
-            if (!path.empty())
-                requests.push_back({ (resourcePath / path).string(), srgb, kind });
-        };
-        for (const Scene::MaterialDescription& d : matDescs)
-        {
-            want(d.baseColorTexPath, true, TextureKind::Color);
-            want(d.metallicRoughnessTexPath, false, TextureKind::NonColor);
-            want(d.normalTexPath, false, TextureKind::Normal);
-            want(d.emissionTexPath, true, TextureKind::Color);
-            want(d.occlusionTexPath, false, TextureKind::NonColor);
-            for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
+            std::vector<MetalTextures::Request> requests;
+            requests.reserve(matDescs.size() * 5);
+            auto want = [&](const std::string& path, bool srgb, TextureKind kind) {
+                if (!path.empty())
+                    requests.push_back({ (resourcePath / path).string(), srgb, kind });
+            };
+            for (const Scene::MaterialDescription& d : matDescs)
             {
-                const auto kind = openpbrSlotKind(slot, d.openpbrTexColorSpace[slot]);
-                want(d.openpbrTexPaths[slot], kind.first, kind.second);
+                want(d.baseColorTexPath, true, TextureKind::Color);
+                want(d.metallicRoughnessTexPath, false, TextureKind::NonColor);
+                want(d.normalTexPath, false, TextureKind::Normal);
+                want(d.emissionTexPath, true, TextureKind::Color);
+                want(d.occlusionTexPath, false, TextureKind::NonColor);
+                for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
+                {
+                    const auto kind = openpbrSlotKind(slot, d.openpbrTexColorSpace[slot]);
+                    want(d.openpbrTexPaths[slot], kind.first, kind.second);
+                }
             }
+            mTextures->beginMaterialPass(requests);
         }
-        if (!mTextures->prewarmStep(requests, budgetMs))
+
+        if (!mTextures->prewarmStep(budgetMs))
         {
+            if (progress)
+            {
+                progress->total.store((uint32_t)(mTextures->prewarmTotal() + matDescs.size()), std::memory_order_relaxed);
+                progress->done.store((uint32_t)mTextures->prewarmDone(), std::memory_order_relaxed);
+            }
             return false;
         }
     }
@@ -798,14 +804,13 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         {
             if (progress)
             {
-                progress->total.store((uint32_t)matDescs.size(), std::memory_order_relaxed);
-                progress->done.store((uint32_t)st.cursor, std::memory_order_relaxed);
+                progress->total.store((uint32_t)(mTextures->prewarmTotal() + matDescs.size()), std::memory_order_relaxed);
+                progress->done.store((uint32_t)(mTextures->prewarmTotal() + st.cursor), std::memory_order_relaxed);
             }
             return false;
         }
     }
 
-    mTextures->generateMips();
     {
         // What the texture set costs on the device, since which formats the
         // encoder picked is otherwise only visible in the editor's memory panel.

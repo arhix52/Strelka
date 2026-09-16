@@ -23,6 +23,9 @@ class StrelkaRecipe(ConanFile):
         # 0.3 s. The option's name -- and tinyexr's own default comment -- only
         # mention threaded loading; the save path reads the same macro.
         "tinyexr/*:with_thread": True,
+        # Only the library is needed for ASTC encoding. The CLI tools add fmt
+        # and reject the C++20 profile used by Strelka.
+        "ktx/*:tools": False,
     }
 
     def requirements(self):
@@ -36,6 +39,8 @@ class StrelkaRecipe(ConanFile):
         self.requires("nlohmann_json/3.12.0")
         self.requires("stb/cci.20240531")
         self.requires("tinyexr/1.0.7")
+        if self.settings.os == "Macos":
+            self.requires("ktx/4.4.2")
 
         # Editor (conditional via options)
         # 1.92.9b-docking is the first release carrying imgui_impl_metal4, which is

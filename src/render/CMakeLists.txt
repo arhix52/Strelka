@@ -13,6 +13,7 @@ set(RENDER_SOURCES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/host/ibl_alias_table.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/ies_pack.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/light_selection.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/texture_asset.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/texture_cache_key.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/texture_compress.h
     ${CMAKE_CURRENT_SOURCE_DIR}/host/integrator_buffer_sizes.h
@@ -84,6 +85,7 @@ if(WIN32 OR LINUX)
 endif()
 
 if(APPLE)
+    find_package(Ktx REQUIRED)
     find_package(tinyexr REQUIRED)
 
     set(RENDER_SOURCES
@@ -142,6 +144,7 @@ if(APPLE)
             "-framework Metal"
             "-framework MetalFX"
             "-framework MetalKit"
+            KTX::ktx
     )
     target_link_libraries(strelka_render
         PUBLIC

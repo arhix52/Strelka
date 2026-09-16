@@ -890,7 +890,7 @@ void MetalRender::init()
         STRELKA_FATAL("Metal 4 is required by the Metal renderer");
         return;
     }
-    mTextures.init(mDevice, mCommandQueue, getSettings());
+    mTextures.init(mDevice, getSettings());
     mEnvironment.init(mDevice, getSettings());
     mGeometry.init(mDevice);
     mMaterials.init(mDevice, &mTextures, getSettings());
@@ -3359,7 +3359,7 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
     };
     hooks.onStageTimed = [](metal::BuildStage stage, double elapsedMs) {
-        STRELKA_DEBUG("Scene build stage '{}' took {:.0f} ms", metal::buildStageName(stage), elapsedMs);
+        STRELKA_DEBUG("Scene build slice '{}' took {:.0f} ms", metal::buildStageName(stage), elapsedMs);
     };
     hooks.onBuffersEnter = [this]() {
         mBuildStartMs =
@@ -3387,9 +3387,9 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
     hooks.buildEnvironment = [this](Buffer* output) { buildSceneEnvironment(output); };
     hooks.publishMaterialParams = [this]() { mMaterials.publishParameters(mScene); };
     hooks.onMaterialTexturesEnter = [this]() {
-        if (mLoadProgress && !mMaterials.buildActive())
+        if (mLoadProgress && mLoadProgress->currentStage() != LoadProgress::Stage::Textures)
         {
-            mLoadProgress->beginStage(LoadProgress::Stage::Textures, (uint32_t)mScene->getMaterials().size());
+            mLoadProgress->beginStage(LoadProgress::Stage::Textures);
         }
     };
     hooks.stepMaterialTextures = [this](double budgetMs) { return stepMetalMaterials(budgetMs); };

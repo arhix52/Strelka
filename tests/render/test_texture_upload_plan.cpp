@@ -148,8 +148,7 @@ TEST_CASE("the cache file's format tags are fixed, because files outlive builds"
     CHECK((int)Format::BC3 == 4);
     CHECK((int)Format::BC5 == 5);
 
-    // Kind is cast straight to oka::metal::TextureKind to build the shared cache
-    // key, so the two enumerations have to line up.
+    // These are shared artifact semantics, not backend-local tags.
     CHECK((int)Kind::Color == 0);
     CHECK((int)Kind::NonColor == 1);
     CHECK((int)Kind::Normal == 2);

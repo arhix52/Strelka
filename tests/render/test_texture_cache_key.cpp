@@ -2,9 +2,10 @@
 
 #include <host/texture_cache_key.h>
 
-using oka::metal::textureCacheKey;
-using oka::metal::TextureCacheKeyInputs;
-using oka::metal::TextureKind;
+using oka::texture::Semantic;
+using oka::texture::TargetProfile;
+using oka::texture::textureCacheKey;
+using oka::texture::TextureCacheKeyInputs;
 
 TEST_CASE("textureCacheKey is stable for identical inputs")
 {
@@ -15,7 +16,10 @@ TEST_CASE("textureCacheKey is stable for identical inputs")
     in.maxDimension = 2048;
     in.downscale = 1;
     in.srgb = true;
-    in.kind = TextureKind::Color;
+    in.semantic = Semantic::Color;
+    in.target = TargetProfile::AppleAstc;
+    in.compressed = true;
+    in.encoderVersion = 3;
 
     const std::string a = textureCacheKey(in);
     const std::string b = textureCacheKey(in);
@@ -33,7 +37,8 @@ TEST_CASE("textureCacheKey changes when any input changes")
     base.maxDimension = 1024;
     base.downscale = 1;
     base.srgb = false;
-    base.kind = TextureKind::NonColor;
+    base.semantic = Semantic::NonColor;
+    base.target = TargetProfile::NvidiaBc;
     const std::string k0 = textureCacheKey(base);
 
     {
@@ -68,7 +73,31 @@ TEST_CASE("textureCacheKey changes when any input changes")
     }
     {
         auto in = base;
-        in.kind = TextureKind::Normal;
+        in.semantic = Semantic::Normal;
         CHECK(textureCacheKey(in) != k0);
     }
+    {
+        auto in = base;
+        in.target = TargetProfile::AppleAstc;
+        CHECK(textureCacheKey(in) != k0);
+    }
+    {
+        auto in = base;
+        in.compressed = true;
+        CHECK(textureCacheKey(in) != k0);
+    }
+    {
+        auto in = base;
+        in.encoderVersion = 2;
+        CHECK(textureCacheKey(in) != k0);
+    }
+}
+
+TEST_CASE("textureCacheKey gives relative and absolute spellings one identity")
+{
+    TextureCacheKeyInputs relative;
+    relative.fileName = "textures/../textures/albedo.png";
+    TextureCacheKeyInputs absolute = relative;
+    absolute.fileName = (std::filesystem::current_path() / "textures/albedo.png").string();
+    CHECK(textureCacheKey(relative) == textureCacheKey(absolute));
 }

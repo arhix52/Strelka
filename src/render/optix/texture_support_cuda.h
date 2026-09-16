@@ -27,9 +27,7 @@ struct Texture
     Texture() = default;
 
     Texture(cudaTextureObject_t filtered, uint3 dimensions, uint32_t mipLevels)
-        : filtered_object(filtered)
-        , size(dimensions)
-        , levels(mipLevels)
+        : filtered_object(filtered), size(dimensions), levels(mipLevels)
     {
     }
 
@@ -88,13 +86,6 @@ struct CachedHeader
 // format. If padding ever appears the version must move with it.
 static_assert(sizeof(CachedHeader) == 32, "cache header layout changed; bump kOptixPayloadVersion");
 
-// Kind is cast to oka::metal::TextureKind to build the shared cache key. The
-// two enumerations agreeing is what keeps a colour texture from being keyed as
-// a normal map.
-static_assert((int)Kind::Color == (int)oka::metal::TextureKind::Color);
-static_assert((int)Kind::NonColor == (int)oka::metal::TextureKind::NonColor);
-static_assert((int)Kind::Normal == (int)oka::metal::TextureKind::Normal);
-
 inline uint32_t packFlags(const Plan& plan)
 {
     return (plan.srgbTextureFlag ? 1u : 0u) | (plan.srgbBlockFormat ? 2u : 0u);
@@ -124,13 +115,7 @@ inline void linearizeSrgb16(uint16_t* rgba, size_t texels)
     }
 }
 
-inline bool resampleLevel(const Plan& plan,
-                          const uint8_t* src,
-                          int srcW,
-                          int srcH,
-                          uint8_t* dst,
-                          int dstW,
-                          int dstH)
+inline bool resampleLevel(const Plan& plan, const uint8_t* src, int srcW, int srcH, uint8_t* dst, int dstW, int dstH)
 {
     switch (plan.format)
     {
@@ -142,8 +127,8 @@ inline bool resampleLevel(const Plan& plan,
                                            STBIR_COLORSPACE_LINEAR, nullptr) != 0;
     default:
         // 8-bit, compressed or not: the bytes being resampled are still RGBA8.
-        return (plan.resampleInSrgb ? stbir_resize_uint8_srgb(src, srcW, srcH, 0, dst, dstW, dstH, 0, 4, 3, 0)
-                                    : stbir_resize_uint8(src, srcW, srcH, 0, dst, dstW, dstH, 0, 4)) != 0;
+        return (plan.resampleInSrgb ? stbir_resize_uint8_srgb(src, srcW, srcH, 0, dst, dstW, dstH, 0, 4, 3, 0) :
+                                      stbir_resize_uint8(src, srcW, srcH, 0, dst, dstW, dstH, 0, 4)) != 0;
     }
 }
 
@@ -182,13 +167,11 @@ inline cudaChannelFormatDesc channelDesc(const Plan& plan)
     case Format::RGBA16:
         return cudaCreateChannelDesc<ushort4>();
     case Format::BC1:
-        return plan.srgbBlockFormat ?
-                   cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed1SRGB>() :
-                   cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed1>();
+        return plan.srgbBlockFormat ? cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed1SRGB>() :
+                                      cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed1>();
     case Format::BC3:
-        return plan.srgbBlockFormat ?
-                   cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed3SRGB>() :
-                   cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed3>();
+        return plan.srgbBlockFormat ? cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed3SRGB>() :
+                                      cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed3>();
     case Format::BC5:
         return cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed5>();
     default:
@@ -202,7 +185,10 @@ inline size_t levelPitch(const Plan& plan, int width)
 {
     const size_t w = (size_t)std::max(1, width);
     if (isCompressed(plan.format))
-        return ((w + 3) / 4) * blockBytes(plan.format);
+    {
+        const texture::FormatInfo info = texture::formatInfo(plan.format);
+        return ((w + info.blockExtent - 1) / info.blockExtent) * info.bytesPerBlock;
+    }
     return w * texelBytes(plan.format);
 }
 
@@ -211,37 +197,38 @@ inline size_t levelRows(const Plan& plan, int height)
 {
     const size_t h = (size_t)std::max(1, height);
     if (isCompressed(plan.format))
-        return (h + 3) / 4;
+    {
+        const texture::FormatInfo info = texture::formatInfo(plan.format);
+        return (h + info.blockExtent - 1) / info.blockExtent;
+    }
     return h;
 }
 
 } // namespace detail
 
-/// The cache file name. Salted so that the Metal backend's payload for the same
-/// source file, settings and kind hashes somewhere else: the two encode into
-/// different containers and would otherwise collide in a shared cache directory.
-inline std::string cacheKey(const std::string& fileName,
-                            Kind kind,
-                            uint32_t maxDimension,
-                            uint32_t downscale,
-                            bool blockCompress)
+/// The cache file name. Target profile and payload version keep CUDA artifacts
+/// separate from the Metal representation in a shared cache directory.
+inline std::string cacheKey(
+    const std::string& fileName, Kind kind, uint32_t maxDimension, uint32_t downscale, bool blockCompress)
 {
-    std::error_code ec;
+    std::error_code sizeError;
+    std::error_code stampError;
     namespace fs = std::filesystem;
-    const auto size = fs::file_size(fileName, ec);
-    const auto stamp = fs::last_write_time(fileName, ec).time_since_epoch().count();
+    const auto size = fs::file_size(fileName, sizeError);
+    const auto stamp = fs::last_write_time(fileName, stampError).time_since_epoch().count();
 
-    oka::metal::TextureCacheKeyInputs in;
-    // The salt goes in the file name field rather than in a new struct member so
-    // that texture_cache_key.h does not need a backend-specific field.
-    in.fileName = "optix|v" + std::to_string(kOptixPayloadVersion) + (blockCompress ? "|bc|" : "|raw|") + fileName;
-    in.fileSize = ec ? 0 : (uint64_t)size;
-    in.writeTimeCount = ec ? 0 : (int64_t)stamp;
+    texture::TextureCacheKeyInputs in;
+    in.fileName = fileName;
+    in.fileSize = sizeError ? 0 : (uint64_t)size;
+    in.writeTimeCount = stampError ? 0 : (int64_t)stamp;
     in.maxDimension = maxDimension;
     in.downscale = downscale;
     in.srgb = kind == Kind::Color;
-    in.kind = (oka::metal::TextureKind)(int)kind;
-    return oka::metal::textureCacheKey(in);
+    in.compressed = blockCompress;
+    in.semantic = kind;
+    in.target = texture::TargetProfile::NvidiaBc;
+    in.encoderVersion = kOptixPayloadVersion;
+    return texture::textureCacheKey(in);
 }
 
 inline Payload readCachedPayload(const std::string& cachePath)
@@ -374,8 +361,7 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
     if (plan.extent.width != srcW || plan.extent.height != srcH)
     {
         std::vector<uint8_t> scaled((size_t)plan.extent.width * plan.extent.height * texelBytesRaw);
-        if (detail::resampleLevel(plan, base.data(), srcW, srcH, scaled.data(), plan.extent.width,
-                                  plan.extent.height))
+        if (detail::resampleLevel(plan, base.data(), srcW, srcH, scaled.data(), plan.extent.width, plan.extent.height))
         {
             base = std::move(scaled);
         }
@@ -392,10 +378,10 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
 
     Payload payload;
     payload.plan = plan;
-    payload.levels.push_back(isCompressed(plan.format) ?
-                                 oka::bc::compressImage(base.data(), plan.extent.width, plan.extent.height,
-                                                        detail::bcFormat(plan.format)) :
-                                 std::move(base));
+    payload.levels.push_back(
+        isCompressed(plan.format) ?
+            oka::bc::compressImage(base.data(), plan.extent.width, plan.extent.height, detail::bcFormat(plan.format)) :
+            std::move(base));
     payload.valid = true;
     return payload;
 }

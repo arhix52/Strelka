@@ -1,21 +1,15 @@
 #pragma once
 
+#include "texture_asset.h"
+
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
-
-namespace oka::metal
+namespace oka::texture
 {
 
-// Bumped whenever the .btex cache layout or encoder changes.
-inline constexpr uint32_t kTextureCacheVersion = 2;
-
-enum class TextureKind : int
-{
-    Color = 0,
-    NonColor = 1,
-    Normal = 2,
-};
+inline constexpr uint32_t kTextureCacheKeyVersion = 2;
 
 struct TextureCacheKeyInputs
 {
@@ -23,22 +17,31 @@ struct TextureCacheKeyInputs
     uint64_t fileSize = 0;
     int64_t writeTimeCount = 0; // last_write_time epoch count
     uint32_t maxDimension = 0;
-    uint32_t downscale = 0;
+    uint32_t downscale = 1;
     bool srgb = false;
-    TextureKind kind = TextureKind::Color;
+    bool compressed = false;
+    Semantic semantic = Semantic::Color;
+    TargetProfile target = TargetProfile::AppleAstc;
+    uint32_t encoderVersion = 0;
 };
 
 // FNV-1a over a stable description of how the texture will be uploaded. Returns
 // a cache file name like "0123abcd....btex".
 inline std::string textureCacheKey(const TextureCacheKeyInputs& in)
 {
-    std::string blob = in.fileName;
+    std::error_code error;
+    const std::filesystem::path absolute = std::filesystem::absolute(in.fileName, error);
+    std::string blob =
+        error ? std::filesystem::path(in.fileName).lexically_normal().string() : absolute.lexically_normal().string();
     blob += "|" + std::to_string((unsigned long long)in.fileSize);
     blob += "|" + std::to_string((long long)in.writeTimeCount);
     blob += "|" + std::to_string(in.maxDimension) + "|" + std::to_string(in.downscale);
     blob += in.srgb ? "|srgb" : "|linear";
-    blob += "|" + std::to_string((int)in.kind);
-    blob += "|v" + std::to_string(kTextureCacheVersion);
+    blob += in.compressed ? "|compressed" : "|raw";
+    blob += "|" + std::to_string(static_cast<int>(in.semantic));
+    blob += "|" + std::to_string(static_cast<int>(in.target));
+    blob += "|encoder" + std::to_string(in.encoderVersion);
+    blob += "|key" + std::to_string(kTextureCacheKeyVersion);
 
     uint64_t hash = 1469598103934665603ull;
     for (const char c : blob)
@@ -60,5 +63,4 @@ inline std::string textureCacheKey(const TextureCacheKeyInputs& in)
     return name;
 }
 
-} // namespace oka::metal
-
+} // namespace oka::texture

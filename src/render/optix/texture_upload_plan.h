@@ -1,108 +1,29 @@
 #pragma once
 
+#include <host/texture_asset.h>
+
 #include <algorithm>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 
 namespace oka::optix_tex
 {
 
-/// What the texture is for. Decides the transfer function and, when the texture
-/// is compressed, the block format.
-enum class Kind : int
-{
-    Color = 0, // base colour, emission -- sRGB encoded on disk
-    NonColor = 1, // metallic-roughness, occlusion -- linear on disk
-    Normal = 2, // tangent-space normal -- linear, and unit length
-};
-
-/// The texel format the CUDA array is created with.
-enum class Format : int
-{
-    RGBA8 = 0, // uchar4, read as normalized float
-    RGBA16 = 1, // ushort4, read as normalized float
-    RGBA32F = 2, // float4, read as element type
-    BC1 = 3, // opaque colour, 8 bytes / block
-    BC3 = 4, // colour + alpha, 16 bytes / block
-    BC5 = 5, // two channels, 16 bytes / block -- normal maps
-};
+using Kind = texture::Semantic;
+using Extent = texture::Extent;
+using Format = texture::NativeFormat;
+using texture::resolveExtent;
 
 inline bool isCompressed(Format f)
 {
-    return f == Format::BC1 || f == Format::BC3 || f == Format::BC5;
-}
-
-/// Bytes per 4x4 block; 0 for uncompressed formats.
-inline size_t blockBytes(Format f)
-{
-    switch (f)
-    {
-    case Format::BC1:
-        return 8;
-    case Format::BC3:
-    case Format::BC5:
-        return 16;
-    default:
-        return 0;
-    }
+    return texture::formatInfo(f).compressed;
 }
 
 /// Bytes per texel; 0 for compressed formats.
 inline size_t texelBytes(Format f)
 {
-    switch (f)
-    {
-    case Format::RGBA8:
-        return 4;
-    case Format::RGBA16:
-        return 8;
-    case Format::RGBA32F:
-        return 16;
-    default:
-        return 0;
-    }
-}
-
-/// Bytes one mip level of `width` x `height` occupies.
-inline size_t levelBytes(Format f, int width, int height)
-{
-    const size_t w = (size_t)std::max(1, width);
-    const size_t h = (size_t)std::max(1, height);
-    if (isCompressed(f))
-        return ((w + 3) / 4) * ((h + 3) / 4) * blockBytes(f);
-    return w * h * texelBytes(f);
-}
-
-struct Extent
-{
-    int width = 0;
-    int height = 0;
-
-    bool operator==(const Extent& o) const
-    {
-        return width == o.width && height == o.height;
-    }
-};
-
-/// `downscale` first, then halve until the longest edge is within
-/// `maxDimension`. `maxDimension == 0` means unbounded, `downscale == 0` is read
-/// as 1. Never returns an edge below 1.
-inline Extent resolveExtent(int srcWidth, int srcHeight, uint32_t maxDimension, uint32_t downscale)
-{
-    const int divisor = (int)std::max(1u, downscale);
-    // Both bounds in one signedness: a texture edge that does not fit in an int
-    // is past every limit a GPU has anyway, so the clamp cannot change a
-    // decision.
-    const int maxEdge = (int)std::min<uint32_t>(maxDimension, (uint32_t)INT_MAX);
-    int w = std::max(1, srcWidth / divisor);
-    int h = std::max(1, srcHeight / divisor);
-    while (maxEdge > 0 && std::max(w, h) > maxEdge && (w > 1 || h > 1))
-    {
-        w = std::max(1, w / 2);
-        h = std::max(1, h / 2);
-    }
-    return Extent{ w, h };
+    const texture::FormatInfo info = texture::formatInfo(f);
+    return info.compressed ? 0 : info.bytesPerBlock;
 }
 
 /// Decode settings read once per texture.
@@ -147,8 +68,7 @@ struct Plan
 
     size_t levelBytes(uint32_t level) const
     {
-        return oka::optix_tex::levelBytes(format, std::max(1, extent.width >> level),
-                                          std::max(1, extent.height >> level));
+        return texture::levelBytes(format, std::max(1, extent.width >> level), std::max(1, extent.height >> level));
     }
 
     size_t totalBytes() const
@@ -165,27 +85,14 @@ inline Plan planTexture(const PlanInputs& in)
     const bool wantsSrgb = in.kind == Kind::Color;
     const bool eightBit = !in.sourceIsFloat && !in.sourceIs16Bit;
 
-    if (in.sourceIsFloat)
-    {
-        plan.format = Format::RGBA32F;
-    }
-    else if (in.sourceIs16Bit)
-    {
-        plan.format = Format::RGBA16;
-    }
-    else if (in.blockCompress)
-    {
-        if (in.kind == Kind::Normal)
-            plan.format = Format::BC5;
-        else if (in.hasAlpha)
-            plan.format = Format::BC3;
-        else
-            plan.format = Format::BC1;
-    }
-    else
-    {
-        plan.format = Format::RGBA8;
-    }
+    texture::Recipe recipe;
+    recipe.semantic = in.kind;
+    recipe.target = texture::TargetProfile::NvidiaBc;
+    recipe.hasAlpha = in.hasAlpha;
+    recipe.sourceIsFloat = in.sourceIsFloat;
+    recipe.sourceIs16Bit = in.sourceIs16Bit;
+    recipe.compress = in.blockCompress;
+    plan.format = texture::chooseNativeFormat(recipe);
 
     plan.srgbBlockFormat = wantsSrgb && isCompressed(plan.format);
     plan.srgbTextureFlag = wantsSrgb && eightBit && !isCompressed(plan.format);

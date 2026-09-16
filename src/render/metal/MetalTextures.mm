@@ -2,6 +2,7 @@
 #include <host/projector_transfer.h>
 #include <host/texture_compress.h>
 
+#include <ktx.h>
 #include <log.h>
 
 #include <dispatch/dispatch.h>
@@ -27,6 +28,8 @@ namespace oka::metal
 {
 namespace
 {
+inline constexpr uint32_t kMetalPayloadVersion = 3;
+
 struct CachedTextureHeader
 {
     char magic[4];
@@ -36,8 +39,124 @@ struct CachedTextureHeader
     uint32_t levels;
     uint32_t pixelFormat;
     uint32_t blockBytes;
-    uint32_t reserved;
+    uint32_t blockExtent;
 };
+
+size_t payloadRowBytes(uint32_t width, uint32_t blockExtent, uint32_t blockBytes)
+{
+    return blockBytes && blockExtent ? static_cast<size_t>((width + blockExtent - 1) / blockExtent) * blockBytes :
+                                       static_cast<size_t>(width) * 4;
+}
+
+size_t payloadLevelBytes(uint32_t width, uint32_t height, uint32_t blockExtent, uint32_t blockBytes)
+{
+    if (!blockBytes)
+        return static_cast<size_t>(width) * height * 4;
+    return payloadRowBytes(width, blockExtent, blockBytes) * ((height + blockExtent - 1) / blockExtent);
+}
+
+struct Rgba8LevelView
+{
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+};
+
+struct KtxTextureDeleter
+{
+    void operator()(ktxTexture2* texture) const
+    {
+        if (texture)
+            ktxTexture2_Destroy(texture);
+    }
+};
+
+bool encodeAstc(const std::vector<Rgba8LevelView>& sourceLevels,
+                int width,
+                int height,
+                texture::NativeFormat format,
+                bool srgb,
+                std::vector<std::vector<uint8_t>>& encodedLevels,
+                std::string& error)
+{
+    encodedLevels.clear();
+    if (sourceLevels.empty() || width <= 0 || height <= 0 ||
+        (format != texture::NativeFormat::ASTC4x4 && format != texture::NativeFormat::ASTC6x6))
+    {
+        error = "invalid ASTC input";
+        return false;
+    }
+
+    constexpr uint32_t kRgba8Unorm = 37;
+    constexpr uint32_t kRgba8Srgb = 43;
+    ktxTextureCreateInfo createInfo{};
+    createInfo.vkFormat = srgb ? kRgba8Srgb : kRgba8Unorm;
+    createInfo.baseWidth = static_cast<uint32_t>(width);
+    createInfo.baseHeight = static_cast<uint32_t>(height);
+    createInfo.baseDepth = 1;
+    createInfo.numDimensions = 2;
+    createInfo.numLevels = static_cast<uint32_t>(sourceLevels.size());
+    createInfo.numLayers = 1;
+    createInfo.numFaces = 1;
+
+    ktxTexture2* rawTexture = nullptr;
+    KTX_error_code result = ktxTexture2_Create(&createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &rawTexture);
+    const std::unique_ptr<ktxTexture2, KtxTextureDeleter> ktx(rawTexture);
+    if (result != KTX_SUCCESS)
+    {
+        error = ktxErrorString(result);
+        return false;
+    }
+
+    for (uint32_t level = 0; level < sourceLevels.size(); ++level)
+    {
+        const size_t expected =
+            static_cast<size_t>(std::max(1, width >> level)) * static_cast<size_t>(std::max(1, height >> level)) * 4;
+        if (!sourceLevels[level].data || sourceLevels[level].size != expected)
+        {
+            error = "invalid RGBA8 mip size";
+            return false;
+        }
+        result = ktxTexture_SetImageFromMemory(
+            ktxTexture(ktx.get()), level, 0, 0, sourceLevels[level].data, sourceLevels[level].size);
+        if (result != KTX_SUCCESS)
+        {
+            error = ktxErrorString(result);
+            return false;
+        }
+    }
+
+    ktxAstcParams params{};
+    params.structSize = sizeof(params);
+    params.threadCount = 1;
+    params.blockDimension = format == texture::NativeFormat::ASTC4x4 ? KTX_PACK_ASTC_BLOCK_DIMENSION_4x4 :
+                                                                       KTX_PACK_ASTC_BLOCK_DIMENSION_6x6;
+    params.mode = KTX_PACK_ASTC_ENCODER_MODE_LDR;
+    params.qualityLevel = KTX_PACK_ASTC_QUALITY_LEVEL_FAST;
+    params.perceptual = srgb;
+    result = ktxTexture2_CompressAstcEx(ktx.get(), &params);
+    if (result != KTX_SUCCESS)
+    {
+        error = ktxErrorString(result);
+        return false;
+    }
+
+    encodedLevels.reserve(sourceLevels.size());
+    const uint8_t* data = ktxTexture_GetData(ktxTexture(ktx.get()));
+    for (uint32_t level = 0; level < sourceLevels.size(); ++level)
+    {
+        ktx_size_t offset = 0;
+        result = ktxTexture_GetImageOffset(ktxTexture(ktx.get()), level, 0, 0, &offset);
+        if (result != KTX_SUCCESS)
+        {
+            error = ktxErrorString(result);
+            encodedLevels.clear();
+            return false;
+        }
+        const size_t bytes = texture::levelBytes(format, std::max(1, width >> level), std::max(1, height >> level));
+        encodedLevels.emplace_back(data + offset, data + offset + bytes);
+    }
+    return true;
+}
 } // namespace
 
 MetalTextures::~MetalTextures()
@@ -45,20 +164,38 @@ MetalTextures::~MetalTextures()
     releaseAll();
 }
 
-void MetalTextures::init(MTL::Device* device, MTL::CommandQueue* queue, SettingsManager* settings)
+void MetalTextures::init(MTL::Device* device, SettingsManager* settings)
 {
     mDevice = device;
-    mQueue = queue;
     mSettings = settings;
 }
 
-void MetalTextures::beginMaterialPass()
+void MetalTextures::beginMaterialPass(const std::vector<Request>& requests)
 {
-    mPrewarmPrepared = false;
     mPrewarmQueue.clear();
     mPrewarmKeys.clear();
     mPrewarmCursor = 0;
     mDedupCache.clear();
+    mCacheHits = 0;
+    mCacheMisses = 0;
+
+    // A scene routinely uses one map in several materials. Resolve metadata and
+    // deduplicate once here; subsequent budget slices only advance the queue.
+    std::unordered_map<std::string, size_t> seen;
+    seen.reserve(requests.size());
+    mPrewarmQueue.reserve(requests.size());
+    mPrewarmKeys.reserve(requests.size());
+    for (const Request& request : requests)
+    {
+        if (request.path.empty())
+            continue;
+        const std::string requestKey = materialTextureKey(request.path, request.srgb, request.kind);
+        if (!seen.emplace(requestKey, mPrewarmQueue.size()).second)
+            continue;
+        mPrewarmQueue.push_back(request);
+        mPrewarmKeys.push_back(cacheKey(request.path, request.srgb, request.kind));
+    }
+    STRELKA_INFO("Material textures: {} references, {} unique", requests.size(), mPrewarmQueue.size());
 }
 
 void MetalTextures::releaseAll()
@@ -70,23 +207,31 @@ void MetalTextures::releaseAll()
     }
     mMaterialTextures.clear();
     mDedupCache.clear();
-    mTexturesNeedingMips.clear();
 }
 
 std::string MetalTextures::cacheKey(const std::string& fileName, bool srgb, TextureKind kind) const
 {
-    std::error_code ec;
-    const auto size = fs::file_size(fileName, ec);
-    const auto stamp = fs::last_write_time(fileName, ec).time_since_epoch().count();
-    TextureCacheKeyInputs in;
+    std::error_code sizeError;
+    std::error_code stampError;
+    const auto size = fs::file_size(fileName, sizeError);
+    const auto stamp = fs::last_write_time(fileName, stampError).time_since_epoch().count();
+    texture::TextureCacheKeyInputs in;
     in.fileName = fileName;
-    in.fileSize = ec ? 0 : (uint64_t)size;
-    in.writeTimeCount = ec ? 0 : (int64_t)stamp;
+    in.fileSize = sizeError ? 0 : (uint64_t)size;
+    in.writeTimeCount = stampError ? 0 : (int64_t)stamp;
     in.maxDimension = mSettings->getAs<uint32_t>("render/texture/maxDimension");
     in.downscale = mSettings->getAs<uint32_t>("render/texture/downscale");
     in.srgb = srgb;
-    in.kind = kind;
-    return textureCacheKey(in);
+    in.compressed = mSettings->getAs<bool>("render/texture/compress") && mDevice->supportsFamily(MTL::GPUFamilyApple1);
+    in.semantic = kind;
+    in.target = texture::TargetProfile::AppleAstc;
+    in.encoderVersion = kMetalPayloadVersion;
+    return texture::textureCacheKey(in);
+}
+
+std::string MetalTextures::materialTextureKey(const std::string& fileName, bool srgb, TextureKind kind)
+{
+    return fileName + (srgb ? "|srgb" : "|linear") + "|" + std::to_string((int)kind);
 }
 
 MetalTextures::Payload MetalTextures::readCachedPayload(const std::string& cachePath)
@@ -99,19 +244,25 @@ MetalTextures::Payload MetalTextures::readCachedPayload(const std::string& cache
     // Binary cache I/O: streaming POD/byte buffers through char* is the idiom.
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
     in.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (!in || std::memcmp(header.magic, "BTEX", 4) != 0 || header.version != kTextureCacheVersion)
+    if (!in || std::memcmp(header.magic, "BTEX", 4) != 0 || header.version != kMetalPayloadVersion)
         return payload;
     payload.width = (int)header.width;
     payload.height = (int)header.height;
     payload.levels = header.levels;
     payload.pixelFormat = header.pixelFormat;
     payload.blockBytes = header.blockBytes;
+    payload.blockExtent = header.blockExtent;
+    if (payload.blockBytes && !payload.blockExtent)
+        return Payload{};
     payload.data.reserve(header.levels);
     for (uint32_t l = 0; l < header.levels; ++l)
     {
         uint32_t byteLength = 0;
         in.read(reinterpret_cast<char*>(&byteLength), sizeof(byteLength));
-        if (!in || byteLength == 0)
+        const uint32_t width = std::max(1u, header.width >> l);
+        const uint32_t height = std::max(1u, header.height >> l);
+        const size_t expected = payloadLevelBytes(width, height, payload.blockExtent, payload.blockBytes);
+        if (!in || byteLength == 0 || byteLength != expected)
             return Payload{};
         std::vector<uint8_t> level(byteLength);
         in.read(reinterpret_cast<char*>(level.data()), byteLength);
@@ -145,7 +296,7 @@ MTL::Texture* MetalTextures::createFromPayload(const Payload& payload, const std
     {
         const uint32_t w = std::max(1, payload.width >> l);
         const uint32_t h = std::max(1, payload.height >> l);
-        const size_t rowBytes = payload.blockBytes ? (size_t)((w + 3) / 4) * payload.blockBytes : (size_t)w * 4;
+        const size_t rowBytes = payloadRowBytes(w, payload.blockExtent, payload.blockBytes);
         texture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, payload.data[l].data(), rowBytes);
     }
     if (!cacheFileToWrite.empty())
@@ -160,12 +311,13 @@ MTL::Texture* MetalTextures::createFromPayload(const Payload& payload, const std
         {
             CachedTextureHeader header{};
             std::memcpy(header.magic, "BTEX", 4);
-            header.version = kTextureCacheVersion;
+            header.version = kMetalPayloadVersion;
             header.width = (uint32_t)payload.width;
             header.height = (uint32_t)payload.height;
             header.levels = payload.levels;
             header.pixelFormat = payload.pixelFormat;
             header.blockBytes = payload.blockBytes;
+            header.blockExtent = payload.blockExtent;
             // Binary cache I/O: streaming POD/byte buffers through char* is the idiom.
             // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
             out.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -183,66 +335,13 @@ MTL::Texture* MetalTextures::createFromPayload(const Payload& payload, const std
     return texture;
 }
 
-MTL::Texture* MetalTextures::loadCached(const std::string& cachePath)
-{
-    std::ifstream in(cachePath, std::ios::binary);
-    if (!in)
-        return nullptr;
-
-    CachedTextureHeader header{};
-    // Binary cache I/O: streaming POD/byte buffers through char* is the idiom.
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    in.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (!in || std::memcmp(header.magic, "BTEX", 4) != 0 || header.version != kTextureCacheVersion)
-        return nullptr;
-
-    MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
-    desc->setWidth(header.width);
-    desc->setHeight(header.height);
-    desc->setMipmapLevelCount(header.levels);
-    desc->setPixelFormat((MTL::PixelFormat)header.pixelFormat);
-    desc->setTextureType(MTL::TextureType2D);
-    desc->setStorageMode(MTL::StorageModeShared);
-    desc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
-    MTL::Texture* texture = mDevice->newTexture(desc);
-    desc->release();
-    if (!texture)
-        return nullptr;
-
-    std::vector<uint8_t> level;
-    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
-    for (uint32_t l = 0; l < header.levels; ++l)
-    {
-        uint32_t byteLength = 0;
-        in.read(reinterpret_cast<char*>(&byteLength), sizeof(byteLength));
-        if (!in || byteLength == 0)
-        {
-            texture->release();
-            return nullptr;
-        }
-        level.resize(byteLength);
-        in.read(reinterpret_cast<char*>(level.data()), byteLength);
-        if (!in)
-        {
-            texture->release();
-            return nullptr;
-        }
-        const uint32_t w = std::max(1u, header.width >> l);
-        const uint32_t h = std::max(1u, header.height >> l);
-        const size_t rowBytes = header.blockBytes ? (size_t)((w + 3) / 4) * header.blockBytes : (size_t)w * 4;
-        texture->replaceRegion(MTL::Region::Make3D(0, 0, 0, w, h, 1), l, level.data(), rowBytes);
-    }
-    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
-    return texture;
-}
-
 MetalTextures::DecodeParams MetalTextures::readDecodeParams() const
 {
     DecodeParams params;
     params.maxDimension = mSettings->getAs<uint32_t>("render/texture/maxDimension");
     params.downscale = std::max(1u, mSettings->getAs<uint32_t>("render/texture/downscale"));
     params.compress = mSettings->getAs<bool>("render/texture/compress");
-    params.deviceSupportsBC = mDevice->supportsBCTextureCompression();
+    params.deviceSupportsAstc = mDevice->supportsFamily(MTL::GPUFamilyApple1);
     return params;
 }
 
@@ -274,35 +373,25 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         return Payload{};
     }
 
-    const uint32_t maxDim = params.maxDimension;
-    const uint32_t divisor = std::max(1u, params.downscale);
-    // Dimensions are non-negative by construction, so naming the unsigned edge
-    // states the conversion once instead of burying it in a comparison.
-    const uint32_t srcLongestEdge = (uint32_t)std::max(texWidth, texHeight);
-    if ((maxDim > 0 && srcLongestEdge > maxDim) || divisor > 1)
+    const texture::Extent extent = texture::resolveExtent(texWidth, texHeight, params.maxDimension, params.downscale);
+    if (extent.width != texWidth || extent.height != texHeight)
     {
-        int dstW = std::max(1, texWidth / (int)divisor);
-        int dstH = std::max(1, texHeight / (int)divisor);
-        const int maxEdge = (int)std::min<uint32_t>(maxDim, (uint32_t)INT_MAX);
-        while (maxEdge > 0 && std::max(dstW, dstH) > maxEdge && dstW > 1 && dstH > 1)
-        {
-            dstW = std::max(1, dstW / 2);
-            dstH = std::max(1, dstH / 2);
-        }
         // Freed through stbi_image_free once it takes over `data`, and that is
         // free() under another name, so it has to come from malloc.
         // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
-        auto* scaled = (stbi_uc*)malloc((size_t)dstW * dstH * 4);
+        auto* scaled = (stbi_uc*)malloc((size_t)extent.width * extent.height * 4);
         const int ok =
-            scaled ? (srgb ? stbir_resize_uint8_srgb(data, texWidth, texHeight, 0, scaled, dstW, dstH, 0, 4, 3, 0) :
-                             stbir_resize_uint8(data, texWidth, texHeight, 0, scaled, dstW, dstH, 0, 4)) :
-                     0;
+            scaled ?
+                (srgb ? stbir_resize_uint8_srgb(
+                            data, texWidth, texHeight, 0, scaled, extent.width, extent.height, 0, 4, 3, 0) :
+                        stbir_resize_uint8(data, texWidth, texHeight, 0, scaled, extent.width, extent.height, 0, 4)) :
+                0;
         if (ok)
         {
             stbi_image_free(data);
             data = scaled;
-            texWidth = dstW;
-            texHeight = dstH;
+            texWidth = extent.width;
+            texHeight = extent.height;
         }
         else if (scaled)
         {
@@ -342,46 +431,41 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         prevH = h;
     }
 
-    const bool srgbNormal = kind == TextureKind::Normal && srgb;
     const bool normalMap = kind == TextureKind::Normal && !srgb;
-    const bool canCompress = !srgbNormal && params.deviceSupportsBC && params.compress;
-    oka::bc::Format bcFormat = oka::bc::Format::BC1;
-    if (normalMap)
-        bcFormat = oka::bc::Format::BC5;
-    else if (canCompress && oka::bc::hasAlpha(base.get(), texWidth, texHeight))
-        bcFormat = oka::bc::Format::BC3;
-
-    MTL::PixelFormat format = MTL::PixelFormatRGBA8Unorm;
-    if (!canCompress)
-        format = srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm;
-    else if (bcFormat == oka::bc::Format::BC5)
-        format = MTL::PixelFormatBC5_RGUnorm;
-    else if (bcFormat == oka::bc::Format::BC3)
-        format = srgb ? MTL::PixelFormatBC3_RGBA_sRGB : MTL::PixelFormatBC3_RGBA;
-    else
-        format = srgb ? MTL::PixelFormatBC1_RGBA_sRGB : MTL::PixelFormatBC1_RGBA;
-
     if (normalMap)
     {
-        oka::bc::normalizeNormalMap(base.get(), texWidth, texHeight);
+        bc::normalizeNormalMap(base.get(), texWidth, texHeight);
         for (uint32_t l = 1; l < levels; ++l)
         {
-            oka::bc::normalizeNormalMap(mips[l - 1].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l));
+            bc::normalizeNormalMap(mips[l - 1].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l));
         }
     }
 
+    texture::Recipe recipe;
+    recipe.semantic = kind;
+    recipe.target = texture::TargetProfile::AppleAstc;
+    recipe.compress = params.compress && params.deviceSupportsAstc && !(kind == TextureKind::Normal && srgb);
+    const texture::NativeFormat nativeFormat = texture::chooseNativeFormat(recipe);
+    bool compressed = texture::formatInfo(nativeFormat).compressed;
     std::vector<std::vector<uint8_t>> payload;
     payload.reserve(levels);
-    if (canCompress)
+    if (compressed)
     {
-        payload.push_back(oka::bc::compressImage(base.get(), texWidth, texHeight, bcFormat));
+        std::vector<Rgba8LevelView> sourceLevels;
+        sourceLevels.reserve(levels);
+        sourceLevels.push_back({ base.get(), static_cast<size_t>(texWidth) * texHeight * 4 });
         for (uint32_t l = 1; l < levels; ++l)
         {
-            payload.push_back(oka::bc::compressImage(
-                mips[l - 1].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l), bcFormat));
+            sourceLevels.push_back({ mips[l - 1].data(), mips[l - 1].size() });
+        }
+        std::string error;
+        if (!encodeAstc(sourceLevels, texWidth, texHeight, nativeFormat, srgb, payload, error))
+        {
+            STRELKA_WARNING("ASTC encoding failed for {}: {}; using RGBA8", fileName, error);
+            compressed = false;
         }
     }
-    else
+    if (!compressed)
     {
         payload.emplace_back(base.get(), base.get() + (size_t)texWidth * texHeight * 4);
         for (auto& mip : mips)
@@ -396,38 +480,23 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
     out.width = texWidth;
     out.height = texHeight;
     out.levels = levels;
-    out.pixelFormat = (uint32_t)format;
-    out.blockBytes = canCompress ? (uint32_t)oka::bc::blockBytes(bcFormat) : 0u;
+    if (!compressed)
+        out.pixelFormat = static_cast<uint32_t>(srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm);
+    else if (nativeFormat == texture::NativeFormat::ASTC4x4)
+        out.pixelFormat = static_cast<uint32_t>(srgb ? MTL::PixelFormatASTC_4x4_sRGB : MTL::PixelFormatASTC_4x4_LDR);
+    else
+        out.pixelFormat = static_cast<uint32_t>(srgb ? MTL::PixelFormatASTC_6x6_sRGB : MTL::PixelFormatASTC_6x6_LDR);
+    const texture::FormatInfo formatInfo = texture::formatInfo(nativeFormat);
+    out.blockExtent = compressed ? formatInfo.blockExtent : 0u;
+    out.blockBytes = compressed ? formatInfo.bytesPerBlock : 0u;
     out.data = std::move(payload);
     out.fromCache = false;
     out.valid = true;
     return out;
 }
 
-bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double budgetMs)
+bool MetalTextures::prewarmStep(double budgetMs)
 {
-    if (!mPrewarmPrepared)
-    {
-        mPrewarmPrepared = true;
-        mPrewarmQueue.clear();
-        mPrewarmKeys.clear();
-        mPrewarmCursor = 0;
-        // Deduplicated first: a scene routinely uses one map in several
-        // materials, and decoding it once per use would spend the cores undoing
-        // the saving the dedup cache exists to make.
-        std::unordered_map<std::string, size_t> seen;
-        for (const Request& r : requests)
-        {
-            if (r.path.empty())
-                continue;
-            std::string key = cacheKey(r.path, r.srgb, r.kind);
-            if (seen.count(key) != 0)
-                continue;
-            seen.emplace(key, mPrewarmQueue.size());
-            mPrewarmQueue.push_back(r);
-            mPrewarmKeys.push_back(std::move(key));
-        }
-    }
     if (mPrewarmCursor >= mPrewarmQueue.size())
     {
         return true;
@@ -445,8 +514,7 @@ bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double bud
     // batch always runs; the condition only gates whether a further batch starts.
     while (mPrewarmCursor < mPrewarmQueue.size() &&
            (budgetMs <= 0.0 ||
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() <
-                budgetMs))
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceStart).count() < budgetMs))
     {
         const size_t begin = mPrewarmCursor;
         const size_t count = std::min(batch, mPrewarmQueue.size() - begin);
@@ -463,10 +531,20 @@ bool MetalTextures::prewarmStep(const std::vector<Request>& requests, double bud
         });
         for (size_t i = 0; i < count; ++i)
         {
-            if (results[i].valid)
-            {
-                mPrewarmed.emplace(mPrewarmKeys[begin + i], std::move(results[i]));
-            }
+            const Payload& payload = results[i];
+            if (!payload.valid)
+                continue;
+
+            const Request& request = mPrewarmQueue[begin + i];
+            const std::string cacheFile =
+                cacheDir.empty() ? std::string() : (cacheDir / mPrewarmKeys[begin + i]).string();
+            MTL::Texture* texture = createFromPayload(payload, payload.fromCache ? std::string() : cacheFile);
+            if (!texture)
+                continue;
+
+            (payload.fromCache ? mCacheHits : mCacheMisses)++;
+            mDedupCache.emplace(materialTextureKey(request.path, request.srgb, request.kind), texture);
+            mMaterialTextures.push_back(texture);
         }
         mPrewarmCursor += count;
     }
@@ -480,17 +558,7 @@ MTL::Texture* MetalTextures::loadFromFile(const std::string& fileName, bool srgb
     const std::string key = cacheKey(fileName, srgb, kind);
     const std::string cacheFile = cacheDir.empty() ? std::string() : (cacheDir / key).string();
 
-    // prewarm() may already have done everything except the Metal calls.
-    Payload payload;
-    if (auto it = mPrewarmed.find(key); it != mPrewarmed.end())
-    {
-        payload = std::move(it->second);
-        mPrewarmed.erase(it);
-    }
-    else
-    {
-        payload = decodeToPayload(fileName, srgb, kind, cacheFile, readDecodeParams());
-    }
+    const Payload payload = decodeToPayload(fileName, srgb, kind, cacheFile, readDecodeParams());
     if (!payload.valid)
     {
         STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
@@ -586,7 +654,7 @@ MTL::ResourceID MetalTextures::loadMaterialTexture(const std::string& absolutePa
     if (absolutePath.empty())
         return MTL::ResourceID{};
 
-    const std::string key = absolutePath + (srgb ? "|srgb" : "|linear") + "|" + std::to_string((int)kind);
+    const std::string key = materialTextureKey(absolutePath, srgb, kind);
     if (auto it = mDedupCache.find(key); it != mDedupCache.end())
         return it->second->gpuResourceID();
 
@@ -597,23 +665,6 @@ MTL::ResourceID MetalTextures::loadMaterialTexture(const std::string& absolutePa
     mDedupCache[key] = tex;
     mMaterialTextures.push_back(tex);
     return tex->gpuResourceID();
-}
-
-void MetalTextures::generateMips()
-{
-    if (mTexturesNeedingMips.empty() || !mQueue)
-        return;
-    MTL::CommandBuffer* cb = mQueue->commandBuffer();
-    cb->retain();
-    MTL::BlitCommandEncoder* blit = cb->blitCommandEncoder();
-    for (const MTL::Texture* t : mTexturesNeedingMips)
-        blit->generateMipmaps(t);
-    blit->endEncoding();
-    cb->commit();
-    cb->waitUntilCompleted();
-    cb->release();
-    STRELKA_INFO("Generated mipmaps for {} textures", mTexturesNeedingMips.size());
-    mTexturesNeedingMips.clear();
 }
 
 } // namespace oka::metal
