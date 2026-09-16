@@ -35,6 +35,10 @@ scenes/kids_room/
 # textures and the normal maps the exporter bakes for it.
 scenes/monster_under_the_bed/
 
+# WoW Barrens export from tools/wow2strelka: large glTF, textures, and materials.
+scenes/wow/barrens/
+scenes/wow/barrens.zip
+
 # Scene exports written in the repository root are local test artifacts.
 /*.gltf
 /*.glb
