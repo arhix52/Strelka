@@ -2377,6 +2377,16 @@ void OptiXRender::createSbt()
         return;
     }
 
+    // Material publication can expose OpenPBR while the asynchronous pipeline
+    // still contains the previous specialization. Its SBT must wait for the
+    // corresponding program groups instead of packing a null group handle.
+    if (mState.params.openpbrParams != nullptr &&
+        (mState.radiance_openpbr_hit_group == nullptr || mState.radiance_openpbr_base_hit_group == nullptr))
+    {
+        mSbtDirty = true;
+        return;
+    }
+
     // Free previous SBT records if they exist
     if (mState.sbt.raygenRecord)
         CUDA_CHECK(cudaFree(optix::devicePtr<void>(mState.sbt.raygenRecord)));

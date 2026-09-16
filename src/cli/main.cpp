@@ -20,8 +20,12 @@ int main(int argc, const char* argv[])
     {
         if (std::string(argv[i]) == "--capture" || std::string(argv[i]).starts_with("--capture="))
         {
+#if defined(_WIN32)
+            _putenv_s("MTL_CAPTURE_ENABLED", "1");
+#else
             // NOLINTNEXTLINE(concurrency-mt-unsafe)
             setenv("MTL_CAPTURE_ENABLED", "1", 1);
+#endif
             break;
         }
     }
