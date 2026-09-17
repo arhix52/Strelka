@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -55,6 +56,7 @@ public:
         bool mCompacted = false;
         bool mIsSkeletal = false;
         uint32_t mGeometryBase = 0; // first index into GeometryEntry table
+        std::vector<uint32_t> mMeshIds;
     };
 
     // One emitted TLAS instance. A merged group contributes a single instance,
@@ -134,6 +136,7 @@ public:
     void rebuild();
 
     void updateInstanceTransforms();
+    void setDirtySkeletalMeshes(std::span<const uint32_t> meshIds);
     void rebuildTLAS();
     bool transformChangesRequireRebuild() const;
 
@@ -306,6 +309,7 @@ private:
     // geometry was baked into world space and needs that transform for shading.
     std::vector<uint32_t> mGeometryTransformSceneInstances;
     std::vector<uint8_t> mBakedSceneInstances;
+    std::vector<uint8_t> mDirtySkeletalMeshes;
     std::vector<render::EmissiveMeshBuildInput> mSceneEmissiveInputs;
     MTL::Buffer* mEmissiveMeshBuffer = nullptr;
     MTL::Buffer* mEmissiveTriangleBuffer = nullptr;
@@ -356,7 +360,7 @@ private:
     // Matches the renderer's frames in flight. Kept here rather than shared,
     // because being wrong on the high side only delays a free.
     static constexpr uint64_t kMaxFramesInFlight = 3;
-    static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
+    static constexpr size_t kMaxBlasRebuildsPerFrame = 4;
     static constexpr size_t kMaxGeometriesPerRefitBlas = 32;
     size_t mNextBlasRebuildIndex = 0;
 };

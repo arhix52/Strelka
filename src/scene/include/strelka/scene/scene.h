@@ -17,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <stack>
 #include <string>
 #include <unordered_map>
@@ -209,6 +210,7 @@ public:
         int parent = -1;
         std::vector<int> children;
         std::vector<uint32_t> instanceIds;
+        bool preserveInstanceOffsets = false;
         int skin = -1;
         int camera = -1;
     };
@@ -514,6 +516,15 @@ public:
                             const AnimationChannel::PathType targetProperty,
                             const float time);
     bool applyAnimation(const uint32_t animId);
+    /// Evaluate several clips into one final pose and refresh the node hierarchy
+    /// once. Clip order is significant when channels target the same node.
+    bool applyAnimations(std::span<const uint32_t> animIds);
+    bool applyAnimations();
+    bool markAllSkinNodesDirty();
+    std::span<const uint32_t> dirtySkinNodes() const
+    {
+        return mDirtySkinNodes;
+    }
     void computeJointMatrices(std::vector<glm::mat4>* jointMatrices, size_t jointCount, uint32_t skinId);
     const std::vector<Node>& getNodes() const
     {
@@ -531,8 +542,11 @@ public:
 
 private:
     std::vector<glm::mat4> mGlobalTransforms;
+    std::vector<glm::mat4> mPreviousGlobalTransforms;
     std::vector<uint8_t> mNodeDirty;
+    std::vector<uint8_t> mNodeWorldDirty;
     std::vector<int> mNodeOrder; // parents always precede their children
+    std::vector<uint32_t> mDirtySkinNodes;
 
     void buildNodeOrder();
     void ensureGlobalTransforms();
@@ -540,6 +554,8 @@ private:
     /// Apply the side effects (instance transforms, camera poses) of a changed
     /// node subtree and report whether a skeleton node was touched.
     bool applyNodeSideEffects(const uint32_t nodeId);
+    void applyDirtyNodeSideEffects();
+    bool applyAnimationsInternal(std::span<const uint32_t> animIds, bool allAnimations);
 
 public:
     uint32_t findCameraByName(const std::string& name)

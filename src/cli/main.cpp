@@ -82,6 +82,10 @@ int main(int argc, const char* argv[])
                                                             cxxopts::value<uint32_t>())
         ("animation-time", "Normalised animation time in [0,1] for every clip",
                                                             cxxopts::value<float>())
+        ("animation-frames", "Render an animated sequence and report median GPU frame time",
+                                                            cxxopts::value<uint32_t>())
+        ("animation-fps", "Playback rate used by --animation-frames",
+                                                            cxxopts::value<float>())
         ("tonemap",      "Tonemap: none, reinhard, aces, filmic", cxxopts::value<std::string>())
         ("h,help",       "Print usage");
     // clang-format on
@@ -187,6 +191,14 @@ int main(int argc, const char* argv[])
     if (result.count("animation-time"))
     {
         cfg.animationTime = std::clamp(result["animation-time"].as<float>(), 0.0f, 1.0f);
+    }
+    if (result.count("animation-frames"))
+    {
+        cfg.animationFrames = std::min(result["animation-frames"].as<uint32_t>(), 4096u);
+    }
+    if (result.count("animation-fps"))
+    {
+        cfg.animationFps = std::clamp(result["animation-fps"].as<float>(), 1.0f, 1000.0f);
     }
     if (result.count("bn-switch"))
     {

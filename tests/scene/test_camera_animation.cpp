@@ -89,6 +89,24 @@ TEST_CASE("animation poses a camera through its node")
     CHECK(glm::float3(viewAtEnd * glm::float4(10.0f, 0.0f, 0.0f, 1.0f)).x == doctest::Approx(0.0f));
 }
 
+TEST_CASE("several clips are composed before hierarchy side effects")
+{
+    auto scene = makeAnimatedCameraScene();
+
+    Scene::Animation second = scene->mAnimations[0];
+    second.channels[0].path = Scene::AnimationChannel::PathType::SCALE;
+    second.samplers[0].outputsVec4 = { glm::float4(1.0f), glm::float4(2.0f) };
+    second.current = 0.5f;
+    scene->mAnimations.push_back(second);
+    scene->mAnimations[0].current = 0.5f;
+
+    const std::array<uint32_t, 2> clips = { 0u, 1u };
+    CHECK_FALSE(scene->applyAnimations(clips));
+    CHECK(scene->getNodes()[0].translation.x == doctest::Approx(5.0f));
+    CHECK(scene->getNodes()[0].scale.x == doctest::Approx(1.5f));
+    CHECK(scene->getCamera(0).position.x == doctest::Approx(7.5f));
+}
+
 TEST_CASE("manual control keeps animation off a camera")
 {
     auto scene = makeAnimatedCameraScene();

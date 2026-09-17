@@ -44,6 +44,8 @@ struct RenderConfig
     // per-bounce breakdown. Costs a sample either side of every dispatch, so it
     // is off unless asked for.
     bool profileStages = false;
+    uint32_t animationFrames = 0;
+    float animationFps = 60.0f;
     bool auditRenderWork = false;
     uint32_t auditFrames = 0;
     uint32_t auditMovingLights = 0;
@@ -181,7 +183,7 @@ private:
     void populateSettings();
     bool saveOutput(Buffer* buf, const std::string& path = {});
     bool saveCheckpoint(Buffer* buf, uint32_t accumulatedSpp);
-    void printProgress(uint32_t currentSpp, uint32_t totalSpp, double lastSampleMs);
+    void printProgress(uint32_t current, uint32_t total, double lastItemMs, const char* unit = "spp");
 
     RenderConfig m_config;
     std::unique_ptr<SettingsManager> m_settings;

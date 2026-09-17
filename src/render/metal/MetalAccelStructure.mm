@@ -329,6 +329,15 @@ size_t MetalAccelStructure::buildBlas(const std::vector<AsBuildGeometry>& geomet
     Blas blas;
     blas.mIsSkeletal = skeletal;
     blas.mGeometryBase = (uint32_t)mGeometry->geometryEntries().size();
+    blas.mMeshIds.reserve(geometries.size());
+    for (const AsBuildGeometry& geometry : geometries)
+    {
+        const uint32_t meshId = mScene->getInstances()[geometry.sceneInstanceId].mMeshId;
+        if (std::ranges::find(blas.mMeshIds, meshId) == blas.mMeshIds.end())
+        {
+            blas.mMeshIds.push_back(meshId);
+        }
+    }
     const bool bakedTransform = !geometries.empty() && geometries.front().bakedTransform;
     assert(std::ranges::all_of(geometries, [bakedTransform](const AsBuildGeometry& geometry) {
         return geometry.bakedTransform == bakedTransform;
@@ -1086,8 +1095,7 @@ bool MetalAccelStructure::step(double budgetMs)
             }
 
             size_t blasIdx = 0;
-            auto shared =
-                st.groupSkeletal[g] || st.groupBaked[g] ? st.blasOfSignature.end() : st.blasOfSignature.find(signature);
+            auto shared = st.groupBaked[g] ? st.blasOfSignature.end() : st.blasOfSignature.find(signature);
             const bool built = shared == st.blasOfSignature.end();
             if (!built)
             {
@@ -1098,7 +1106,7 @@ bool MetalAccelStructure::step(double budgetMs)
             {
                 blasIdx = buildBlas(st.groups[g], st.groupSkeletal[g]);
                 st.mergedGeometries += st.groups[g].size();
-                if (!st.groupSkeletal[g] && !st.groupBaked[g])
+                if (!st.groupBaked[g])
                 {
                     st.blasOfSignature.emplace(std::move(signature), blasIdx);
                 }
@@ -1594,6 +1602,13 @@ void MetalAccelStructure::encodeSkeletalUpdates()
         {
             continue;
         }
+        const bool dirty = std::ranges::any_of(blas.mMeshIds, [this](uint32_t meshId) {
+            return meshId < mDirtySkeletalMeshes.size() && mDirtySkeletalMeshes[meshId] != 0;
+        });
+        if (!dirty)
+        {
+            continue;
+        }
 
         const bool rebuild = rebuiltThisFrame < kMaxBlasRebuildsPerFrame && mi >= mNextBlasRebuildIndex;
         if (rebuild)
@@ -1614,6 +1629,18 @@ void MetalAccelStructure::encodeSkeletalUpdates()
     if (rebuiltThisFrame < kMaxBlasRebuildsPerFrame)
     {
         mNextBlasRebuildIndex = 0;
+    }
+}
+
+void MetalAccelStructure::setDirtySkeletalMeshes(const std::span<const uint32_t> meshIds)
+{
+    mDirtySkeletalMeshes.assign(mScene ? mScene->mMeshes.size() : 0, 0);
+    for (const uint32_t meshId : meshIds)
+    {
+        if (meshId < mDirtySkeletalMeshes.size())
+        {
+            mDirtySkeletalMeshes[meshId] = 1;
+        }
     }
 }
 

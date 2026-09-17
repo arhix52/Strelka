@@ -122,6 +122,40 @@ and are run manually — they are not part of CI (no golden images in the repo).
 The working Xcode/Instruments counter preset, command-line capture workflow, and
 idle-baseline rules are documented in [docs/gpu-counters.md](docs/gpu-counters.md).
 
+Generate a repeatable mixed animated/idle crowd from the bundled BrainStem asset:
+
+```bash
+python3 tools/make_animation_crowd.py --count 64 --animated-ratio 0.75 \
+  --duration-scale 0.8 1.2 -o build/profiles/brainstem-crowd-64.glb
+build/Release/Strelka.app/Contents/MacOS/Strelka \
+  -s build/profiles/brainstem-crowd-64.glb
+```
+
+The generator shares the source GLB payload, duplicates each character's node/skin
+graph, gives animated characters independent clips in several duration buckets,
+and writes an overview camera and matching light sidecar. Use **Animations → Play**
+to exercise continuous skinning and BLAS updates; idle characters remain in bind pose.
+For a headless median over 120 independently phased frames:
+
+```bash
+build/Release/StrelkaCLI build/profiles/brainstem-crowd-64.glb \
+  -o /tmp/crowd.exr -w 1280 --height 720 --depth 1 --animation-frames 120
+```
+
+For a large game-style crowd, quantize distant characters into a fixed number of
+shared poses. Each bucket skins and refits one BLAS; its characters remain separate
+TLAS instances and may still move independently:
+
+```bash
+python3 tools/make_animation_crowd.py --count 1024 --animated-ratio 0.9 \
+  --shared-pose-buckets 16 -o build/profiles/brainstem-crowd-1024.glb
+build/Release/StrelkaCLI build/profiles/brainstem-crowd-1024.glb \
+  -o /tmp/crowd.exr -w 1280 --height 720 --depth 1 --animation-frames 120
+```
+
+Omit `--shared-pose-buckets` for the worst case where every animated character
+owns an independent pose, skinned vertex stream, and refittable BLAS.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party trees keep their own licenses.

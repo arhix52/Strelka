@@ -111,8 +111,8 @@ TEST_CASE("Skinned bounds track joint animation")
     REQUIRE(scene.computeInstanceBounds(fixture->instId, bbMin, bbMax));
     CHECK(bbMin.x == doctest::Approx(-1.0f).epsilon(1e-4));
 
-    scene.setNodeLocalTransform(fixture->jointNodeId, glm::float3(0.0f, 3.0f, 0.0f),
-                                glm::quat(1, 0, 0, 0), glm::float3(1.0f));
+    scene.setNodeLocalTransform(
+        fixture->jointNodeId, glm::float3(0.0f, 3.0f, 0.0f), glm::quat(1, 0, 0, 0), glm::float3(1.0f));
 
     REQUIRE(scene.computeInstanceBounds(fixture->instId, bbMin, bbMax));
     CHECK(bbMin.y == doctest::Approx(2.0f).epsilon(1e-4));
@@ -125,8 +125,8 @@ TEST_CASE("Skinned bounds include the joint scale and rotation")
     auto fixture = makeSkinnedQuad(glm::float3(0.0f));
     Scene& scene = fixture->scene;
 
-    scene.setNodeLocalTransform(fixture->jointNodeId, glm::float3(0.0f), glm::quat(1, 0, 0, 0),
-                                glm::float3(2.0f, 1.0f, 1.0f));
+    scene.setNodeLocalTransform(
+        fixture->jointNodeId, glm::float3(0.0f), glm::quat(1, 0, 0, 0), glm::float3(2.0f, 1.0f, 1.0f));
 
     glm::float3 bbMin(0.0f);
     glm::float3 bbMax(0.0f);
@@ -196,6 +196,60 @@ TEST_CASE("Skinning is composed with the instance transform")
     CHECK_FALSE(scene.pick(glm::float3(5, 0, 5), glm::float3(0, 0, -1)).hit);
 }
 
+TEST_CASE("A placement parent is applied once to a skinned instance")
+{
+    auto fixture = makeSkinnedQuad(glm::float3(0.0f, 2.0f, 0.0f));
+    Scene& scene = fixture->scene;
+
+    Scene::Node placement{};
+    placement.type = Scene::Node::NodeType::sceneGraph;
+    placement.translation = glm::float3(10.0f, 0.0f, 0.0f);
+    placement.children = { static_cast<int>(fixture->jointNodeId), static_cast<int>(fixture->meshNodeId) };
+    const uint32_t placementId = static_cast<uint32_t>(scene.mNodes.size());
+    scene.mNodes.push_back(placement);
+    scene.mNodes[fixture->jointNodeId].parent = static_cast<int>(placementId);
+    scene.mNodes[fixture->meshNodeId].parent = static_cast<int>(placementId);
+
+    // The bind matrix was authored before the character was placed. Skinning
+    // stays in mesh-local space; the TLAS instance supplies the placement.
+    scene.mSkines[0].inverseBindMatrices[0] =
+        glm::inverse(glm::translate(glm::mat4(1.0f), glm::float3(0.0f, 2.0f, 0.0f)));
+    scene.setNodeLocalTransform(placementId, placement.translation, placement.rotation, placement.scale);
+
+    const std::vector<glm::mat4> palette = scene.buildJointPalette(fixture->instId);
+    REQUIRE(palette.size() == 1);
+    CHECK(glm::float3(palette[0][3]).x == doctest::Approx(0.0f).epsilon(1e-4));
+
+    glm::float3 localMin(0.0f);
+    glm::float3 localMax(0.0f);
+    REQUIRE(scene.computeInstanceBounds(fixture->instId, localMin, localMax));
+    CHECK(localMin.x == doctest::Approx(-1.0f).epsilon(1e-4));
+    CHECK(localMax.x == doctest::Approx(1.0f).epsilon(1e-4));
+    CHECK(glm::float3(scene.getInstances()[fixture->instId].transform[3]).x == doctest::Approx(10.0f));
+}
+
+TEST_CASE("Animation reports only the skin whose joints changed")
+{
+    auto fixture = makeSkinnedQuad(glm::float3(0.0f));
+    Scene& scene = fixture->scene;
+
+    Scene::AnimationSampler sampler{};
+    sampler.inputs = { 0.0f, 1.0f };
+    sampler.outputsVec4 = { glm::float4(0.0f), glm::float4(1.0f, 0.0f, 0.0f, 0.0f) };
+    Scene::AnimationChannel channel{};
+    channel.node = static_cast<int>(fixture->jointNodeId);
+    channel.path = Scene::AnimationChannel::PathType::TRANSLATION;
+    Scene::Animation animation{};
+    animation.samplers.push_back(sampler);
+    animation.channels.push_back(channel);
+    animation.current = 0.5f;
+    scene.mAnimations.push_back(animation);
+
+    REQUIRE(scene.applyAnimations());
+    REQUIRE(scene.dirtySkinNodes().size() == 1);
+    CHECK(scene.dirtySkinNodes().front() == fixture->meshNodeId);
+}
+
 namespace
 {
 
@@ -248,8 +302,7 @@ std::unique_ptr<BoundSkin> makeBoundSkin()
     };
 
     fixture->rootNodeId = addNode(-1, glm::float3(1, 0, 0), Scene::Node::NodeType::sceneGraph);
-    fixture->jointNodeId =
-        addNode((int)fixture->rootNodeId, glm::float3(0, 2, 0), Scene::Node::NodeType::skeleton);
+    fixture->jointNodeId = addNode((int)fixture->rootNodeId, glm::float3(0, 2, 0), Scene::Node::NodeType::skeleton);
     fixture->meshNodeId = addNode(-1, glm::float3(0.0f), Scene::Node::NodeType::mesh);
     scene.mNodes[fixture->meshNodeId].skin = 0;
     scene.mNodes[fixture->meshNodeId].instanceIds.push_back(fixture->instId);
@@ -286,8 +339,7 @@ TEST_CASE("Moving an ancestor of the joint moves the skinned bounds")
     auto fixture = makeBoundSkin();
     Scene& scene = fixture->scene;
 
-    scene.setNodeLocalTransform(fixture->rootNodeId, glm::float3(1, 0, 5), glm::quat(1, 0, 0, 0),
-                                glm::float3(1.0f));
+    scene.setNodeLocalTransform(fixture->rootNodeId, glm::float3(1, 0, 5), glm::quat(1, 0, 0, 0), glm::float3(1.0f));
 
     glm::float3 bbMin(0.0f);
     glm::float3 bbMax(0.0f);
@@ -408,8 +460,9 @@ TEST_CASE("Skinned bounds on a real asset stay glued to the animated pose")
     const Scene::Skin& skin = scene.mSkines[skinId];
     for (size_t j = 0; j < skin.joints.size(); ++j)
     {
-        const glm::mat4 reference =
-            scene.calculateNodeGlobalTransform((uint32_t)skin.joints[j]) * skin.inverseBindMatrices[j];
+        const glm::mat4 reference = glm::inverse(scene.calculateNodeGlobalTransform((uint32_t)skin.refNodeId)) *
+                                    scene.calculateNodeGlobalTransform((uint32_t)skin.joints[j]) *
+                                    skin.inverseBindMatrices[j];
         for (int c = 0; c < 4; ++c)
         {
             for (int r = 0; r < 4; ++r)
@@ -434,8 +487,8 @@ TEST_CASE("Rigid mesh bounds are the plain vertex extent")
     const uint32_t meshId = scene.createMesh(vb, ib);
     // A non-identity instance transform must not leak into the bounds: they are
     // expressed in the space that transform maps to world.
-    const uint32_t instId = scene.createInstance(Instance::Type::eMesh, meshId, matId,
-                                                 glm::translate(glm::mat4(1.0f), glm::float3(100, 0, 0)));
+    const uint32_t instId = scene.createInstance(
+        Instance::Type::eMesh, meshId, matId, glm::translate(glm::mat4(1.0f), glm::float3(100, 0, 0)));
 
     glm::float3 bbMin(0.0f);
     glm::float3 bbMax(0.0f);

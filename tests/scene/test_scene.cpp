@@ -190,12 +190,15 @@ TEST_CASE("Parent translate updates child instance world transform")
     child.scale = glm::float3(1.0f);
     child.rotation = glm::quat(1, 0, 0, 0);
     child.type = Scene::Node::NodeType::mesh;
+    child.preserveInstanceOffsets = true;
     scene.mNodes.push_back(child);
     const uint32_t childId = 1;
     scene.mNodes[parentId].children.push_back((int)childId);
 
     const uint32_t instId = addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(0, 0, 2)));
+    const uint32_t offsetInstId = addUnitTriangle(scene, glm::translate(glm::mat4(1.0f), glm::float3(5, 0, 2)));
     scene.mNodes[childId].instanceIds.push_back(instId);
+    scene.mNodes[childId].instanceIds.push_back(offsetInstId);
 
     scene.setNodeLocalTransform(parentId, glm::float3(10, 0, 0), glm::quat(1, 0, 0, 0), glm::float3(1.0f));
 
@@ -207,6 +210,9 @@ TEST_CASE("Parent translate updates child instance world transform")
     const glm::float3 instPos = glm::float3(scene.getInstances()[instId].transform[3]);
     CHECK(instPos.x == doctest::Approx(childWorldPos.x).epsilon(1e-4));
     CHECK(instPos.z == doctest::Approx(childWorldPos.z).epsilon(1e-4));
+    const glm::float3 offsetInstPos = glm::float3(scene.getInstances()[offsetInstId].transform[3]);
+    CHECK(offsetInstPos.x == doctest::Approx(childWorldPos.x + 5.0f).epsilon(1e-4));
+    CHECK(offsetInstPos.z == doctest::Approx(childWorldPos.z).epsilon(1e-4));
     CHECK(any(scene.peekChanges() & ChangeBits::Transforms));
 }
 

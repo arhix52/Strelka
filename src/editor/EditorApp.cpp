@@ -22,6 +22,7 @@
 #include <paths.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <limits>
 #include <vector>
@@ -1050,12 +1051,20 @@ void EditorApp::playAnimations(const float deltaTime)
 
         const float currAnimStart = animations[i].start;
         const float currAnimEnd = animations[i].end;
-
-        currAnimTime += deltaTime * speed;
-        if (currAnimTime > currAnimEnd)
-            currAnimTime -= (currAnimEnd - currAnimStart);
-        if (currAnimTime < currAnimStart)
+        const float duration = currAnimEnd - currAnimStart;
+        if (duration > 0.0f)
+        {
+            float offset = std::fmod(currAnimTime - currAnimStart + deltaTime * speed, duration);
+            if (offset < 0.0f)
+            {
+                offset += duration;
+            }
+            currAnimTime = currAnimStart + offset;
+        }
+        else
+        {
             currAnimTime = currAnimStart;
+        }
         m_settingsManager->setAs<float>(timeKey, currAnimTime);
     }
 }

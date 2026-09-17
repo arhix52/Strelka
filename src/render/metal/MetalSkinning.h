@@ -6,7 +6,9 @@
 #include <Metal/Metal.hpp>
 #include <strelka/scene/scene.h>
 
+#include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -40,6 +42,10 @@ public:
     bool uploadJointMatrices(uint32_t frameIndex, uint32_t poseIndex);
     void encode(MTL4::ComputeCommandEncoder* encoder, ConstantRing& constants, uint32_t frameIndex, uint32_t poseIndex);
     void encodeCopyVertexBufferToPrev(MTL4::ComputeCommandEncoder* encoder);
+    std::span<const uint32_t> dirtyMeshIds() const
+    {
+        return mDirtyMeshIds;
+    }
 
     MTL::Buffer* skinDataBuffer() const
     {
@@ -61,6 +67,11 @@ private:
     MTL::Buffer* mSkinDataBuffer = nullptr;
     MTL::Buffer* mJointMatricesBuffer = nullptr;
     std::vector<uint32_t> mJointMatOffsets;
+    std::vector<uint32_t> mSkinNodes;
+    std::vector<std::vector<uint32_t>> mSkinPrototypeInstances;
+    std::vector<int32_t> mSkinNodeToSlot;
+    std::array<std::vector<uint8_t>, 2> mDirtySkinSlots;
+    std::vector<uint32_t> mDirtyMeshIds;
     std::vector<glm::mat4> mJointMatScratch;
     size_t mJointMatricesPerPose = 0;
     uint32_t mFrameCount = 0;
@@ -69,4 +80,3 @@ private:
 };
 
 } // namespace oka::metal
-

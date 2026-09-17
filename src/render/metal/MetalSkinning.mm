@@ -20,10 +20,7 @@ MetalSkinning::~MetalSkinning()
     release();
 }
 
-void MetalSkinning::init(MTL::Device* device,
-                         Metal4Context* metal4,
-                         MetalGeometry* geometry,
-                         uint32_t frameCount)
+void MetalSkinning::init(MTL::Device* device, Metal4Context* metal4, MetalGeometry* geometry, uint32_t frameCount)
 {
     mDevice = device;
     mMetal4 = metal4;
@@ -44,6 +41,11 @@ void MetalSkinning::release()
     safeRelease(mJointMatricesBuffer);
     safeRelease(mSkinningPSO4);
     mJointMatOffsets.clear();
+    mSkinNodes.clear();
+    mSkinPrototypeInstances.clear();
+    mSkinNodeToSlot.clear();
+    mDirtySkinSlots = {};
+    mDirtyMeshIds.clear();
     mJointMatScratch.clear();
     mJointMatricesPerPose = 0;
     mFrameCount = 0;
@@ -54,12 +56,11 @@ void MetalSkinning::buildPipeline()
 {
     const std::string path = oka::resolveResourcePath("metal/shaders/skinning.metallib");
     NS::Error* loadErr = nullptr;
-    MTL::Library* pLibrary =
-        mDevice->newLibrary(NS::String::string(path.c_str(), NS::UTF8StringEncoding), &loadErr);
+    MTL::Library* pLibrary = mDevice->newLibrary(NS::String::string(path.c_str(), NS::UTF8StringEncoding), &loadErr);
     if (!pLibrary)
     {
-        STRELKA_FATAL("Failed to load {}: {}", path,
-                      loadErr ? loadErr->localizedDescription()->utf8String() : "unknown error");
+        STRELKA_FATAL(
+            "Failed to load {}: {}", path, loadErr ? loadErr->localizedDescription()->utf8String() : "unknown error");
         return;
     }
     if (!mMetal4 || !mMetal4->isValid())
@@ -92,16 +93,40 @@ void MetalSkinning::createSkinDataBuffer()
 void MetalSkinning::allocJointMatrices()
 {
     size_t jointMatSize = 0;
-    for (auto& node : mScene->mNodes)
+    mJointMatOffsets.clear();
+    mSkinNodes.clear();
+    mSkinPrototypeInstances.clear();
+    mSkinNodeToSlot.assign(mScene->mNodes.size(), -1);
+    for (uint32_t nodeId = 0; nodeId < mScene->mNodes.size(); ++nodeId)
     {
+        const Scene::Node& node = mScene->mNodes[nodeId];
         if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
-            // Only the joint *count* matters here; evaluating the matrices was
-            // wasted work at init time.
+            mSkinNodeToSlot[nodeId] = static_cast<int32_t>(mSkinNodes.size());
+            mSkinNodes.push_back(nodeId);
+            mJointMatOffsets.push_back(static_cast<uint32_t>(jointMatSize));
+            std::vector<uint32_t>& prototypes = mSkinPrototypeInstances.emplace_back();
+            for (const uint32_t instanceId : node.instanceIds)
+            {
+                if (instanceId >= mScene->mInstances.size())
+                {
+                    continue;
+                }
+                const uint32_t meshId = mScene->mInstances[instanceId].mMeshId;
+                const bool alreadyPresent = std::ranges::any_of(
+                    prototypes, [&](uint32_t prototypeId) { return mScene->mInstances[prototypeId].mMeshId == meshId; });
+                if (!alreadyPresent)
+                {
+                    prototypes.push_back(instanceId);
+                }
+            }
             const size_t jointCount = mScene->mSkines[node.skin].joints.size();
             jointMatSize += jointCount;
-            mJointMatOffsets.push_back((uint32_t)jointCount);
         }
+    }
+    for (std::vector<uint8_t>& slots : mDirtySkinSlots)
+    {
+        slots.assign(mSkinNodes.size(), 0);
     }
 
     mJointMatricesPerPose = jointMatSize;
@@ -111,15 +136,14 @@ void MetalSkinning::allocJointMatrices()
         // keep an in-flight frame's matrices immutable until its allocator is
         // recycled by Metal4Context::beginFrame().
         const size_t poseCount = static_cast<size_t>(mFrameCount) * 2;
-        mJointMatricesBuffer = mDevice->newBuffer(
-            jointMatSize * poseCount * sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
+        mJointMatricesBuffer =
+            mDevice->newBuffer(jointMatSize * poseCount * sizeof(simd::float4x4), MTL::ResourceStorageModeShared);
     }
 }
 
 bool MetalSkinning::uploadJointMatrices(uint32_t frameIndex, uint32_t poseIndex)
 {
-    if (!mSkinDataBuffer || !mJointMatricesBuffer || mJointMatricesPerPose == 0 ||
-        mFrameCount == 0 || poseIndex >= 2)
+    if (!mSkinDataBuffer || !mJointMatricesBuffer || mJointMatricesPerPose == 0 || mFrameCount == 0 || poseIndex >= 2)
     {
         return false;
     }
@@ -134,33 +158,47 @@ bool MetalSkinning::uploadJointMatrices(uint32_t frameIndex, uint32_t poseIndex)
         return false;
     }
 
-    // Compute joint matrices on CPU. mJointMatScratch is a member so the two
-    // skinning passes per frame (t_open / t_close for motion blur) reuse the same
-    // allocation instead of churning two vectors each.
-    mJointMatScratch.clear();
-    for (auto& node : mScene->mNodes)
+    if (poseIndex == 0)
     {
-        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+        mDirtyMeshIds.clear();
+    }
+    std::vector<uint8_t>& dirtySlots = mDirtySkinSlots[poseIndex];
+    std::ranges::fill(dirtySlots, 0);
+    for (const uint32_t nodeId : mScene->dirtySkinNodes())
+    {
+        if (nodeId >= mSkinNodeToSlot.size() || mSkinNodeToSlot[nodeId] < 0)
         {
-            auto jointCount = mScene->mSkines[node.skin].joints.size();
-            mScene->computeJointMatrices(&mJointMatScratch, static_cast<int>(jointCount), node.skin);
+            continue;
+        }
+        const size_t slot = static_cast<size_t>(mSkinNodeToSlot[nodeId]);
+        dirtySlots[slot] = 1;
+        for (const uint32_t prototypeId : mSkinPrototypeInstances[slot])
+        {
+            mDirtyMeshIds.push_back(mScene->mInstances[prototypeId].mMeshId);
         }
     }
-
-    // glm::mat4 and simd::float4x4 are both 4 column-major float4s with identical
-    // layout, so the element-by-element conversion loop (and its temporary
-    // vector) was pure overhead — copy straight into the GPU buffer.
-    static_assert(sizeof(glm::mat4) == sizeof(simd::float4x4), "matrix layout mismatch");
-    const size_t uploadBytes =
-        std::min(mJointMatScratch.size(), mJointMatricesPerPose) * sizeof(glm::mat4);
-    if (uploadBytes == 0)
+    if (std::ranges::none_of(dirtySlots, [](uint8_t dirty) { return dirty != 0; }))
     {
         return false;
     }
-    const size_t slot = static_cast<size_t>(frameIndex % mFrameCount) * 2 + poseIndex;
-    const size_t byteOffset = slot * mJointMatricesPerPose * sizeof(simd::float4x4);
-    memcpy(static_cast<uint8_t*>(mJointMatricesBuffer->contents()) + byteOffset,
-           mJointMatScratch.data(), uploadBytes);
+
+    static_assert(sizeof(glm::mat4) == sizeof(simd::float4x4), "matrix layout mismatch");
+    const size_t frameSlot = static_cast<size_t>(frameIndex % mFrameCount) * 2 + poseIndex;
+    auto* destination = static_cast<uint8_t*>(mJointMatricesBuffer->contents()) +
+                        frameSlot * mJointMatricesPerPose * sizeof(simd::float4x4);
+    for (size_t slot = 0; slot < mSkinNodes.size(); ++slot)
+    {
+        if (!dirtySlots[slot])
+        {
+            continue;
+        }
+        const Scene::Node& node = mScene->mNodes[mSkinNodes[slot]];
+        const size_t jointCount = mScene->mSkines[node.skin].joints.size();
+        mJointMatScratch.clear();
+        mScene->computeJointMatrices(&mJointMatScratch, jointCount, static_cast<uint32_t>(node.skin));
+        std::memcpy(destination + static_cast<size_t>(mJointMatOffsets[slot]) * sizeof(glm::mat4),
+                    mJointMatScratch.data(), jointCount * sizeof(glm::mat4));
+    }
     return true;
 }
 
@@ -179,43 +217,34 @@ void MetalSkinning::encode(MTL4::ComputeCommandEncoder* pEncoder,
     const MTL::GPUAddress jointAddress =
         mJointMatricesBuffer->gpuAddress() + slot * mJointMatricesPerPose * sizeof(simd::float4x4);
 
-    int skinIndex = 0;
-    uint32_t jointMatOffset = 0;
-    for (auto& node : mScene->mNodes)
+    for (size_t skinSlot = 0; skinSlot < mSkinNodes.size(); ++skinSlot)
     {
-        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+        if (!mDirtySkinSlots[poseIndex][skinSlot])
         {
-            if (skinIndex > 0)
-            {
-                jointMatOffset += mJointMatOffsets[static_cast<size_t>(skinIndex - 1)];
-            }
-            skinIndex++;
+            continue;
+        }
+        for (const uint32_t instId : mSkinPrototypeInstances[skinSlot])
+        {
+            auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
 
-            for (const auto instId : node.instanceIds)
-            {
-                auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
+            SkinningParams skinParams = {};
+            skinParams.vbOffset = mesh.mVbOffset;
+            skinParams.sbOffset = mesh.mSbOffset;
+            skinParams.jointMatOffset = mJointMatOffsets[skinSlot];
+            skinParams.vertexCount = mesh.mVertexCount;
 
-                // Dispatch skinning kernel
-                SkinningParams skinParams = {};
-                skinParams.vbOffset = mesh.mVbOffset;
-                skinParams.sbOffset = mesh.mSbOffset;
-                skinParams.jointMatOffset = jointMatOffset;
-                skinParams.vertexCount = mesh.mVertexCount;
+            pEncoder->setComputePipelineState(mSkinningPSO4);
+            skinTable->setAddress(mGeometry->vertexBuffer()->gpuAddress(), 0);
+            skinTable->setAddress(mSkinDataBuffer->gpuAddress(), 1);
+            skinTable->setAddress(jointAddress, 2);
+            skinTable->setAddress(constants.push(skinParams), 3);
 
-                pEncoder->setComputePipelineState(mSkinningPSO4);
-                skinTable->setAddress(mGeometry->vertexBuffer()->gpuAddress(), 0);
-                skinTable->setAddress(mSkinDataBuffer->gpuAddress(), 1);
-                skinTable->setAddress(jointAddress, 2);
-                skinTable->setAddress(constants.push(skinParams), 3);
-
-                const uint32_t threadsPerGroup = 256;
-                const MTL::Size groupSize = MTL::Size(threadsPerGroup, 1, 1);
-                pEncoder->dispatchThreadgroups(
-                    MTL::Size((mesh.mVertexCount + threadsPerGroup - 1) / threadsPerGroup, 1, 1), groupSize);
-            }
+            const uint32_t threadsPerGroup = 256;
+            const MTL::Size groupSize = MTL::Size(threadsPerGroup, 1, 1);
+            pEncoder->dispatchThreadgroups(
+                MTL::Size((mesh.mVertexCount + threadsPerGroup - 1) / threadsPerGroup, 1, 1), groupSize);
         }
     }
-
 }
 
 void MetalSkinning::encodeCopyVertexBufferToPrev(MTL4::ComputeCommandEncoder* encoder)
@@ -224,10 +253,9 @@ void MetalSkinning::encodeCopyVertexBufferToPrev(MTL4::ComputeCommandEncoder* en
     {
         return;
     }
-    encoder->copyFromBuffer(mGeometry->vertexBuffer(), 0, mGeometry->prevVertexBuffer(), 0,
-                            mGeometry->vertexBuffer()->length());
+    encoder->copyFromBuffer(
+        mGeometry->vertexBuffer(), 0, mGeometry->prevVertexBuffer(), 0, mGeometry->vertexBuffer()->length());
 }
 
 
 } // namespace oka::metal
-

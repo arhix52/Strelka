@@ -23,12 +23,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <span>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <strelka/scene/transform.h>
 
@@ -118,31 +120,241 @@ void computeTangent(Scene::Vertex* vertices, const uint32_t* indices, size_t ind
 // Maps a glTF (mesh, primitive) onto the oka mesh built for it, so geometry
 // referenced by many nodes is parsed and uploaded once.
 using MeshCache = std::unordered_map<uint64_t, uint32_t>;
+size_t gpuInstanceCount(const tinygltf::Model& model, const tinygltf::Node& node);
 
-void countModelGeometry(const tinygltf::Model& model, size_t& vertexCount, size_t& indexCount, size_t& skinCount)
+struct AnimationUsage
+{
+    std::vector<uint8_t> potentiallyAnimatedNodes;
+    std::vector<uint8_t> deformingSkins;
+    std::vector<uint8_t> reusableBindPoseNodes;
+};
+
+glm::mat4 gltfNodeTransform(const tinygltf::Node& node)
+{
+    if (!node.matrix.empty())
+    {
+        return glm::make_mat4(node.matrix.data());
+    }
+    const glm::vec3 translation = node.translation.empty() ?
+                                      glm::vec3(0.0f) :
+                                      glm::vec3(node.translation[0], node.translation[1], node.translation[2]);
+    const glm::vec3 scale = node.scale.empty() ? glm::vec3(1.0f) : glm::vec3(node.scale[0], node.scale[1], node.scale[2]);
+    const glm::quat rotation = node.rotation.empty() ?
+                                   glm::quat(1.0f, 0.0f, 0.0f, 0.0f) :
+                                   glm::quat(node.rotation[3], node.rotation[0], node.rotation[1], node.rotation[2]);
+    return glm::translate(glm::mat4(1.0f), translation) * glm::mat4_cast(rotation) * glm::scale(glm::mat4(1.0f), scale);
+}
+
+bool approximatelyIdentity(const glm::mat4& matrix)
+{
+    for (int column = 0; column < 4; ++column)
+    {
+        for (int row = 0; row < 4; ++row)
+        {
+            const float expected = column == row ? 1.0f : 0.0f;
+            if (!std::isfinite(matrix[column][row]) || std::abs(matrix[column][row] - expected) > 1e-4f)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+AnimationUsage analyzeAnimationUsage(const tinygltf::Model& model)
+{
+    AnimationUsage usage;
+    usage.potentiallyAnimatedNodes.assign(model.nodes.size(), 0);
+    std::vector<int> stack;
+    for (const tinygltf::Animation& animation : model.animations)
+    {
+        for (const tinygltf::AnimationChannel& channel : animation.channels)
+        {
+            if (channel.target_node >= 0 && static_cast<size_t>(channel.target_node) < model.nodes.size())
+            {
+                stack.push_back(channel.target_node);
+            }
+        }
+    }
+    while (!stack.empty())
+    {
+        const int nodeId = stack.back();
+        stack.pop_back();
+        if (usage.potentiallyAnimatedNodes[nodeId])
+        {
+            continue;
+        }
+        usage.potentiallyAnimatedNodes[nodeId] = 1;
+        for (const int child : model.nodes[nodeId].children)
+        {
+            if (child >= 0 && static_cast<size_t>(child) < model.nodes.size())
+            {
+                stack.push_back(child);
+            }
+        }
+    }
+
+    usage.deformingSkins.assign(model.skins.size(), 0);
+    for (size_t skinId = 0; skinId < model.skins.size(); ++skinId)
+    {
+        for (const int joint : model.skins[skinId].joints)
+        {
+            if (joint >= 0 && static_cast<size_t>(joint) < usage.potentiallyAnimatedNodes.size() &&
+                usage.potentiallyAnimatedNodes[joint])
+            {
+                usage.deformingSkins[skinId] = 1;
+                break;
+            }
+        }
+    }
+
+    std::vector<int> parents(model.nodes.size(), -1);
+    for (size_t nodeId = 0; nodeId < model.nodes.size(); ++nodeId)
+    {
+        for (const int child : model.nodes[nodeId].children)
+        {
+            if (child >= 0 && static_cast<size_t>(child) < parents.size())
+            {
+                parents[child] = static_cast<int>(nodeId);
+            }
+        }
+    }
+    std::vector<glm::mat4> globals(model.nodes.size(), glm::mat4(1.0f));
+    std::vector<uint8_t> globalReady(model.nodes.size(), 0);
+    std::function<glm::mat4(size_t)> globalOf = [&](size_t nodeId) {
+        if (globalReady[nodeId])
+        {
+            return globals[nodeId];
+        }
+        const glm::mat4 local = gltfNodeTransform(model.nodes[nodeId]);
+        const int parent = parents[nodeId];
+        globals[nodeId] = parent >= 0 ? globalOf(static_cast<size_t>(parent)) * local : local;
+        globalReady[nodeId] = 1;
+        return globals[nodeId];
+    };
+    for (size_t nodeId = 0; nodeId < model.nodes.size(); ++nodeId)
+    {
+        globalOf(nodeId);
+    }
+
+    usage.reusableBindPoseNodes.assign(model.nodes.size(), 0);
+    for (size_t nodeId = 0; nodeId < model.nodes.size(); ++nodeId)
+    {
+        const tinygltf::Node& node = model.nodes[nodeId];
+        if (node.skin < 0 || static_cast<size_t>(node.skin) >= model.skins.size() || usage.deformingSkins[node.skin] ||
+            usage.potentiallyAnimatedNodes[nodeId])
+        {
+            continue;
+        }
+        const tinygltf::Skin& skin = model.skins[node.skin];
+        if (skin.inverseBindMatrices < 0 || static_cast<size_t>(skin.inverseBindMatrices) >= model.accessors.size())
+        {
+            continue;
+        }
+        const tinygltf::Accessor& accessor = model.accessors[skin.inverseBindMatrices];
+        if (accessor.bufferView < 0 || static_cast<size_t>(accessor.bufferView) >= model.bufferViews.size() ||
+            accessor.count < skin.joints.size() || accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT ||
+            accessor.type != TINYGLTF_TYPE_MAT4 || accessor.sparse.isSparse || skin.joints.empty())
+        {
+            continue;
+        }
+        const tinygltf::BufferView& view = model.bufferViews[accessor.bufferView];
+        if (view.buffer < 0 || static_cast<size_t>(view.buffer) >= model.buffers.size())
+        {
+            continue;
+        }
+        const int byteStride = accessor.ByteStride(view);
+        const std::vector<unsigned char>& buffer = model.buffers[view.buffer].data;
+        if (byteStride < static_cast<int>(sizeof(glm::mat4)) || view.byteOffset > buffer.size() ||
+            view.byteLength > buffer.size() - view.byteOffset || accessor.byteOffset > view.byteLength)
+        {
+            continue;
+        }
+        const size_t stride = static_cast<size_t>(byteStride);
+        const size_t available = view.byteLength - accessor.byteOffset;
+        if (available < sizeof(glm::mat4) || skin.joints.size() - 1 > (available - sizeof(glm::mat4)) / stride)
+        {
+            continue;
+        }
+        const unsigned char* bytes = buffer.data() + view.byteOffset + accessor.byteOffset;
+        const glm::mat4 worldToMesh = glm::inverse(globals[nodeId]);
+        bool identity = true;
+        for (size_t jointIndex = 0; jointIndex < skin.joints.size(); ++jointIndex)
+        {
+            const int joint = skin.joints[jointIndex];
+            if (joint < 0 || static_cast<size_t>(joint) >= globals.size())
+            {
+                identity = false;
+                break;
+            }
+            glm::mat4 inverseBind(1.0f);
+            std::memcpy(&inverseBind, bytes + jointIndex * stride, sizeof(inverseBind));
+            identity &= approximatelyIdentity(worldToMesh * globals[joint] * inverseBind);
+        }
+        usage.reusableBindPoseNodes[nodeId] = identity;
+    }
+    return usage;
+}
+
+bool nodeHasDeformingSkin(const tinygltf::Node& node, size_t nodeId, const AnimationUsage& usage)
+{
+    if (node.skin < 0 || static_cast<size_t>(node.skin) >= usage.deformingSkins.size())
+    {
+        return false;
+    }
+    return usage.deformingSkins[node.skin] || nodeId >= usage.reusableBindPoseNodes.size() ||
+           !usage.reusableBindPoseNodes[nodeId];
+}
+
+void countModelGeometry(const tinygltf::Model& model,
+                        const AnimationUsage& animationUsage,
+                        size_t& vertexCount,
+                        size_t& indexCount,
+                        size_t& skinCount,
+                        size_t& meshCount)
 {
     vertexCount = 0;
     indexCount = 0;
     skinCount = 0;
-    for (const tinygltf::Mesh& mesh : model.meshes)
+    meshCount = 0;
+    std::unordered_set<uint64_t> cachedRigidPrimitives;
+    for (size_t nodeId = 0; nodeId < model.nodes.size(); ++nodeId)
     {
-        for (const tinygltf::Primitive& primitive : mesh.primitives)
+        const tinygltf::Node& node = model.nodes[nodeId];
+        if (node.mesh < 0 || static_cast<size_t>(node.mesh) >= model.meshes.size() ||
+            (lodFilterEnabled() && isProxyOrLowerLod(node.name)))
         {
+            continue;
+        }
+        const bool deforming = nodeHasDeformingSkin(node, nodeId, animationUsage);
+        const tinygltf::Mesh& mesh = model.meshes[node.mesh];
+        for (size_t primitiveIndex = 0; primitiveIndex < mesh.primitives.size(); ++primitiveIndex)
+        {
+            const tinygltf::Primitive& primitive = mesh.primitives[primitiveIndex];
             const auto pos = primitive.attributes.find("POSITION");
             if (pos == primitive.attributes.end())
             {
                 continue;
             }
+            const uint64_t primitiveKey = (static_cast<uint64_t>(node.mesh) << 32u) | primitiveIndex;
+            // EXT_mesh_gpu_instancing copies of one skinned node use the same
+            // palette, so they can share the deformed mesh and its BLAS.
+            const size_t copies = deforming ? 1u : cachedRigidPrimitives.insert(primitiveKey).second ? 1u : 0u;
+            if (copies == 0)
+            {
+                continue;
+            }
             const size_t n = model.accessors[pos->second].count;
-            vertexCount += n;
+            vertexCount += copies * n;
             if (primitive.indices >= 0)
             {
-                indexCount += model.accessors[primitive.indices].count;
+                indexCount += copies * model.accessors[primitive.indices].count;
             }
-            if (primitive.attributes.count("JOINTS_0") != 0 && primitive.attributes.count("WEIGHTS_0") != 0)
+            if (deforming && primitive.attributes.count("JOINTS_0") != 0 && primitive.attributes.count("WEIGHTS_0") != 0)
             {
-                skinCount += n;
+                skinCount += copies * n;
             }
+            meshCount += copies;
         }
     }
 }
@@ -196,11 +408,13 @@ void processPrimitive(const tinygltf::Model& model,
                       const glm::float4x4& transform,
                       const float globalScale,
                       MeshCache& meshCache,
-                      uint64_t primitiveKey)
+                      uint64_t primitiveKey,
+                      bool deformingSkin)
 {
     using namespace std;
     assert(primitive.attributes.find("POSITION") != primitive.attributes.end());
 
+    if (!deformingSkin)
     {
         const auto cached = meshCache.find(primitiveKey);
         if (cached != meshCache.end())
@@ -299,7 +513,7 @@ void processPrimitive(const tinygltf::Model& model,
     int weightsStride = 0;
     bool hasJoints = false;
     std::vector<oka::Scene::vertexSkinData> sb;
-    if ((primitive.attributes.find("JOINTS_0") != primitive.attributes.end()) &&
+    if (deformingSkin && (primitive.attributes.find("JOINTS_0") != primitive.attributes.end()) &&
         (primitive.attributes.find("WEIGHTS_0") != primitive.attributes.end()))
     {
         hasJoints = true;
@@ -563,7 +777,8 @@ void processMesh(const tinygltf::Model& model,
                  const glm::float4x4& transform,
                  const float globalScale,
                  MeshCache& meshCache,
-                 uint32_t meshIndex)
+                 uint32_t meshIndex,
+                 bool deformingSkin)
 {
     if (gltfDebugLoggingEnabled())
     {
@@ -573,7 +788,7 @@ void processMesh(const tinygltf::Model& model,
     for (const auto& primitive : mesh.primitives)
     {
         processPrimitive(model, scene, parentNodeId, primitive, transform, globalScale, meshCache,
-                         ((uint64_t)meshIndex << 32) | primitiveIndex++);
+                         ((uint64_t)meshIndex << 32) | primitiveIndex++, deformingSkin);
     }
 }
 
@@ -719,7 +934,8 @@ void processNode(const tinygltf::Model& model,
                  const glm::float4x4& baseTransform,
                  const float globalScale,
                  MeshCache& meshCache,
-                 const std::vector<int>& cameraIndexMap)
+                 const std::vector<int>& cameraIndexMap,
+                 const AnimationUsage& animationUsage)
 {
     if (gltfDebugLoggingEnabled())
     {
@@ -741,25 +957,51 @@ void processNode(const tinygltf::Model& model,
     {
         scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::mesh;
         const tinygltf::Mesh& mesh = model.meshes[node.mesh];
+        const bool deformingSkin = nodeHasDeformingSkin(node, currentNodeId, animationUsage);
 
         std::vector<glm::float4x4> instanceTransforms;
         readGpuInstancing(model, node, instanceTransforms);
+        scene.mNodes[currentNodeId].preserveInstanceOffsets = !instanceTransforms.empty();
 
         if (!instanceTransforms.empty())
         {
-            for (const glm::float4x4& instance : instanceTransforms)
+            if (deformingSkin)
             {
-                processMesh(model, scene, currentNodeId, mesh, globalTransform * instance, globalScale, meshCache,
-                            (uint32_t)node.mesh);
+                const size_t prototypeBegin = scene.mNodes[currentNodeId].instanceIds.size();
+                processMesh(model, scene, currentNodeId, mesh, globalTransform * instanceTransforms.front(),
+                            globalScale, meshCache, (uint32_t)node.mesh, true);
+                const std::vector<uint32_t> prototypeIds(
+                    scene.mNodes[currentNodeId].instanceIds.begin() + static_cast<std::ptrdiff_t>(prototypeBegin),
+                    scene.mNodes[currentNodeId].instanceIds.end());
+                for (size_t instanceIndex = 1; instanceIndex < instanceTransforms.size(); ++instanceIndex)
+                {
+                    for (const uint32_t prototypeId : prototypeIds)
+                    {
+                        const Instance prototype = scene.getInstances()[prototypeId];
+                        const uint32_t instanceId =
+                            scene.createInstance(Instance::Type::eMesh, prototype.mMeshId, prototype.mMaterialId,
+                                                 globalTransform * instanceTransforms[instanceIndex]);
+                        scene.mNodes[currentNodeId].instanceIds.push_back(instanceId);
+                    }
+                }
+            }
+            else
+            {
+                for (const glm::float4x4& instance : instanceTransforms)
+                {
+                    processMesh(model, scene, currentNodeId, mesh, globalTransform * instance, globalScale, meshCache,
+                                (uint32_t)node.mesh, false);
+                }
             }
         }
         else
         {
-            processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale, meshCache, (uint32_t)node.mesh);
+            processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale, meshCache, (uint32_t)node.mesh,
+                        deformingSkin);
         }
 
         // skin binding
-        if (node.skin != -1)
+        if (deformingSkin)
         {
             scene.mNodes[currentNodeId].skin = node.skin;
             scene.mSkines[node.skin].refNodeId = static_cast<int>(currentNodeId);
@@ -802,8 +1044,8 @@ void processNode(const tinygltf::Model& model,
         if (scene.mNodes[currentNodeId].type == oka::Scene::Node::NodeType::unknown)
             scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::sceneGraph;
         scene.mNodes[childIdx].parent = static_cast<int>(currentNodeId);
-        processNode(
-            model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache, cameraIndexMap);
+        processNode(model, scene, model.nodes[childIdx], childIdx, globalTransform, globalScale, meshCache,
+                    cameraIndexMap, animationUsage);
     }
 }
 
@@ -1807,19 +2049,39 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
     // glTF camera index -> scene camera index; filled by loadCameras, read by the
     // graph walk, so it has to outlive both phases.
     std::vector<int> cameraIndexMap;
+    const AnimationUsage animationUsage = analyzeAnimationUsage(model);
+    size_t deformingSkinNodes = 0;
+    size_t reusableSkinNodes = 0;
+    for (size_t nodeId = 0; nodeId < model.nodes.size(); ++nodeId)
+    {
+        const tinygltf::Node& node = model.nodes[nodeId];
+        if (node.skin < 0)
+        {
+            continue;
+        }
+        if (nodeHasDeformingSkin(node, nodeId, animationUsage))
+        {
+            ++deformingSkinNodes;
+        }
+        else if (nodeId < animationUsage.reusableBindPoseNodes.size() && animationUsage.reusableBindPoseNodes[nodeId])
+        {
+            ++reusableSkinNodes;
+        }
+    }
+    if (deformingSkinNodes != 0 || reusableSkinNodes != 0)
+    {
+        STRELKA_INFO(
+            "Skinning plan: {} deforming node(s), {} shared bind-pose node(s)", deformingSkinNodes, reusableSkinNodes);
+    }
 
     size_t expectedVertices = 0;
     size_t expectedIndices = 0;
     size_t expectedSkin = 0;
-    countModelGeometry(model, expectedVertices, expectedIndices, expectedSkin);
+    size_t expectedMeshes = 0;
+    countModelGeometry(model, animationUsage, expectedVertices, expectedIndices, expectedSkin, expectedMeshes);
     scene.reserveGeometry(expectedVertices, expectedIndices, expectedSkin);
     {
-        size_t primitiveCount = 0;
-        for (const tinygltf::Mesh& mesh : model.meshes)
-        {
-            primitiveCount += mesh.primitives.size();
-        }
-        scene.mMeshes.reserve(primitiveCount);
+        scene.mMeshes.reserve(expectedMeshes);
         size_t expectedInstances = 0;
         for (const tinygltf::Node& node : model.nodes)
         {
@@ -1854,7 +2116,7 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
         phases.push_back({ "geometry", [&, i] {
                               const int rootNodeIdx = model.scenes[sceneId].nodes[i];
                               processNode(model, scene, model.nodes[rootNodeIdx], rootNodeIdx, glm::float4x4(1.0f),
-                                          globalScale, meshCache, cameraIndexMap);
+                                          globalScale, meshCache, cameraIndexMap, animationUsage);
                           } });
     }
     phases.push_back({ "geometry", [&] {

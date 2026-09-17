@@ -573,16 +573,22 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
     // consume the update and do not propagate it to their children.
     switch (mNodes[nodeId].type)
     {
-    case Node::NodeType::mesh:
+    case Node::NodeType::mesh: {
+        const bool preserveOffsets = mNodes[nodeId].preserveInstanceOffsets;
+        const glm::mat4 transformUpdate =
+            preserveOffsets && nodeId < mPreviousGlobalTransforms.size() ?
+                mGlobalTransforms[nodeId] * glm::inverse(mPreviousGlobalTransforms[nodeId]) :
+                mGlobalTransforms[nodeId];
         for (const auto instId : mNodes[nodeId].instanceIds)
         {
             Instance& inst = mInstances[instId];
-            inst.transform = mGlobalTransforms[nodeId];
+            inst.transform = preserveOffsets ? transformUpdate * inst.transform : transformUpdate;
             inst.isAnimated = true;
             mDirtyInstances.insert(instId);
             ++mTransformGeneration;
         }
         return false;
+    }
 
     case Node::NodeType::camera:
         if (mNodes[nodeId].camera >= 0 && (size_t)mNodes[nodeId].camera < mCameras.size() &&
@@ -614,54 +620,136 @@ bool Scene::applyNodeSideEffects(const uint32_t nodeId)
     return skeletonUpdated;
 }
 
+void Scene::applyDirtyNodeSideEffects()
+{
+    mNodeWorldDirty.assign(mNodes.size(), 0);
+    for (const int nodeId : mNodeOrder)
+    {
+        const int parent = mNodes[nodeId].parent;
+        const bool parentCovered = parent >= 0 && mNodeWorldDirty[parent] &&
+                                   mNodes[parent].type != Node::NodeType::mesh &&
+                                   mNodes[parent].type != Node::NodeType::camera;
+        if (mNodeDirty[nodeId] && !parentCovered)
+        {
+            applyNodeSideEffects(static_cast<uint32_t>(nodeId));
+        }
+        mNodeWorldDirty[nodeId] = mNodeDirty[nodeId] || parentCovered;
+    }
+}
+
 bool Scene::applyAnimation(const uint32_t animId)
 {
-    ensureGlobalTransforms();
+    return applyAnimations(std::span<const uint32_t>(&animId, 1));
+}
 
-    auto& animation = mAnimations[animId];
+bool Scene::applyAnimations()
+{
+    return applyAnimationsInternal({}, true);
+}
+
+bool Scene::applyAnimations(const std::span<const uint32_t> animIds)
+{
+    return applyAnimationsInternal(animIds, false);
+}
+
+bool Scene::applyAnimationsInternal(const std::span<const uint32_t> animIds, const bool allAnimations)
+{
+    ensureGlobalTransforms();
+    mPreviousGlobalTransforms = mGlobalTransforms;
     std::ranges::fill(mNodeDirty, 0);
 
-    for (size_t i = 0; i < animation.channels.size(); ++i)
+    const size_t animationCount = allAnimations ? mAnimations.size() : animIds.size();
+    for (size_t animationIndex = 0; animationIndex < animationCount; ++animationIndex)
     {
-        const uint32_t nodeId = animation.channels[i].node;
-        if (nodeId >= mNodes.size())
-            continue;
-
-        const AnimationChannel::PathType targetProperty = animation.channels[i].path;
-        const glm::float4 value =
-            interpolate(animation.samplers[animation.channels[i].samplerIndex], targetProperty, animation.current);
-
-        switch (targetProperty)
+        const uint32_t animId = allAnimations ? static_cast<uint32_t>(animationIndex) : animIds[animationIndex];
+        if (animId >= mAnimations.size())
         {
-        case AnimationChannel::PathType::TRANSLATION:
-            mNodes[nodeId].translation = glm::float3(value);
-            break;
-        case AnimationChannel::PathType::SCALE:
-            mNodes[nodeId].scale = glm::float3(value);
-            break;
-        case AnimationChannel::PathType::ROTATION:
-            mNodes[nodeId].rotation = makeQuatFromFloat4(value);
-            break;
-        default:
             continue;
         }
-        mNodeDirty[nodeId] = 1;
+        const Animation& animation = mAnimations[animId];
+        for (const AnimationChannel& channel : animation.channels)
+        {
+            const uint32_t nodeId = channel.node;
+            if (nodeId >= mNodes.size() || channel.samplerIndex >= animation.samplers.size())
+            {
+                continue;
+            }
+
+            const AnimationChannel::PathType targetProperty = channel.path;
+            const glm::float4 value =
+                interpolate(animation.samplers[channel.samplerIndex], targetProperty, animation.current);
+
+            switch (targetProperty)
+            {
+            case AnimationChannel::PathType::TRANSLATION:
+                mNodes[nodeId].translation = glm::float3(value);
+                break;
+            case AnimationChannel::PathType::SCALE:
+                mNodes[nodeId].scale = glm::float3(value);
+                break;
+            case AnimationChannel::PathType::ROTATION:
+                mNodes[nodeId].rotation = makeQuatFromFloat4(value);
+                break;
+            default:
+                continue;
+            }
+            mNodeDirty[nodeId] = 1;
+        }
     }
 
     // Every world transform is recomputed, so the cache stays valid for skinning
     // even where the side-effect traversal below stops early.
     refreshGlobalTransforms();
 
-    bool blasChanged = false;
-    for (size_t nodeId = 0; nodeId < mNodes.size(); ++nodeId)
+    mNodeWorldDirty = mNodeDirty;
+    for (const int nodeId : mNodeOrder)
     {
-        if (mNodeDirty[nodeId])
-            blasChanged |= applyNodeSideEffects((uint32_t)nodeId);
+        const int parent = mNodes[nodeId].parent;
+        if (parent >= 0 && static_cast<size_t>(parent) < mNodeWorldDirty.size() && mNodeWorldDirty[parent])
+        {
+            mNodeWorldDirty[nodeId] = 1;
+        }
     }
+
+    mDirtySkinNodes.clear();
+    for (uint32_t nodeId = 0; nodeId < mNodes.size(); ++nodeId)
+    {
+        const Node& node = mNodes[nodeId];
+        if (node.type != Node::NodeType::mesh || node.skin < 0 || static_cast<size_t>(node.skin) >= mSkines.size())
+        {
+            continue;
+        }
+        const Skin& skin = mSkines[node.skin];
+        bool dirty = mNodeWorldDirty[nodeId] != 0;
+        for (const int joint : skin.joints)
+        {
+            dirty |= joint >= 0 && static_cast<size_t>(joint) < mNodeWorldDirty.size() && mNodeWorldDirty[joint] != 0;
+        }
+        if (dirty)
+        {
+            mDirtySkinNodes.push_back(nodeId);
+        }
+    }
+
+    applyDirtyNodeSideEffects();
     // Playback already returns whether the accel structure needs a rebuild; do
     // not also raise ChangeBits::Transforms or the renderer would rebuild TLAS
     // twice a frame (once from handleSceneChanges, once from the anim path).
-    return blasChanged;
+    return !mDirtySkinNodes.empty();
+}
+
+bool Scene::markAllSkinNodesDirty()
+{
+    mDirtySkinNodes.clear();
+    for (uint32_t nodeId = 0; nodeId < mNodes.size(); ++nodeId)
+    {
+        const Node& node = mNodes[nodeId];
+        if (node.type == Node::NodeType::mesh && node.skin >= 0 && static_cast<size_t>(node.skin) < mSkines.size())
+        {
+            mDirtySkinNodes.push_back(nodeId);
+        }
+    }
+    return !mDirtySkinNodes.empty();
 }
 
 void Scene::computeJointMatrices(std::vector<glm::mat4>* jointMatrices, const size_t jointCount, const uint32_t skinId)
@@ -669,12 +757,17 @@ void Scene::computeJointMatrices(std::vector<glm::mat4>* jointMatrices, const si
     ensureGlobalTransforms();
 
     auto& skin = mSkines[skinId];
+    glm::mat4 worldToMesh(1.0f);
+    if (skin.refNodeId >= 0 && static_cast<size_t>(skin.refNodeId) < mGlobalTransforms.size())
+    {
+        worldToMesh = glm::inverse(mGlobalTransforms[skin.refNodeId]);
+    }
     jointMatrices->reserve(jointMatrices->size() + jointCount);
     for (size_t i = 0; i < jointCount; ++i)
     {
         // Read the cached world transform instead of re-walking to the root for
         // each joint: applyAnimation() already refreshed the whole table.
-        jointMatrices->push_back(mGlobalTransforms[skin.joints[i]] * skin.inverseBindMatrices[i]);
+        jointMatrices->push_back(worldToMesh * mGlobalTransforms[skin.joints[i]] * skin.inverseBindMatrices[i]);
     }
 }
 
@@ -1215,11 +1308,12 @@ void Scene::setNodeLocalTransform(const uint32_t nodeId,
                                   const glm::float3& scale)
 {
     assert(nodeId < mNodes.size());
+    ensureGlobalTransforms();
+    mPreviousGlobalTransforms = mGlobalTransforms;
     mNodes[nodeId].translation = translation;
     mNodes[nodeId].rotation = rotation;
     mNodes[nodeId].scale = scale;
 
-    ensureGlobalTransforms();
     mNodeDirty.assign(mNodes.size(), 0);
     mNodeDirty[nodeId] = 1;
     // Mark entire subtree dirty so side effects propagate
@@ -1237,11 +1331,7 @@ void Scene::setNodeLocalTransform(const uint32_t nodeId,
         }
     }
     refreshGlobalTransforms();
-    for (size_t i = 0; i < mNodes.size(); ++i)
-    {
-        if (mNodeDirty[i])
-            applyNodeSideEffects((uint32_t)i);
-    }
+    applyDirtyNodeSideEffects();
     markChanged(ChangeBits::Transforms);
 }
 

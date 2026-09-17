@@ -1390,10 +1390,12 @@ void MetalRender::render(Buffer* output)
             }
         }
 
+        bool initializeSkinning = false;
         if (mNeedsInitialPose && !mScenePrep.isBuilding())
         {
             mNeedsInitialPose = false;
             animStateChanged = true;
+            initializeSkinning = true;
         }
 
         // Treat time jumps larger than a fraction of the clip as cuts with no valid reprojection history.
@@ -1436,7 +1438,6 @@ void MetalRender::render(Buffer* output)
                 }
 
                 // --- Pass 1: evaluate CHANGED animations at t_open ---
-                bool pass1Skeletal = false;
                 for (size_t i = 0; i < animations.size(); ++i)
                 {
                     float tOpen = mAnimTargetTimes[i];
@@ -1446,7 +1447,11 @@ void MetalRender::render(Buffer* output)
                     }
                     tOpen = std::clamp(tOpen, animations[i].start, animations[i].end);
                     animations[i].current = tOpen;
-                    pass1Skeletal |= mScene->applyAnimation(i);
+                }
+                bool pass1Skeletal = mScene->applyAnimations();
+                if (initializeSkinning)
+                {
+                    pass1Skeletal = mScene->markAllSkinNodesDirty();
                 }
 
                 // Capture camera state at t_open for camera motion blur
@@ -1467,7 +1472,6 @@ void MetalRender::render(Buffer* output)
                 copyVerticesAfterOpen = true;
 
                 // --- Pass 2: evaluate CHANGED animations at t_close ---
-                bool pass2Skeletal = false;
                 for (size_t i = 0; i < animations.size(); ++i)
                 {
                     float tClose = mAnimTargetTimes[i];
@@ -1477,7 +1481,11 @@ void MetalRender::render(Buffer* output)
                     }
                     tClose = std::clamp(tClose, animations[i].start, animations[i].end);
                     animations[i].current = tClose;
-                    pass2Skeletal |= mScene->applyAnimation(i);
+                }
+                bool pass2Skeletal = mScene->applyAnimations();
+                if (initializeSkinning)
+                {
+                    pass2Skeletal = mScene->markAllSkinNodesDirty();
                 }
 
                 if (pass2Skeletal)
@@ -1496,11 +1504,14 @@ void MetalRender::render(Buffer* output)
             else
             {
                 // Motion blur disabled or no shutter: single-pass at target time
-                bool accelStructureDirty = false;
                 for (size_t i = 0; i < animations.size(); ++i)
                 {
                     animations[i].current = mAnimTargetTimes[i];
-                    accelStructureDirty |= mScene->applyAnimation(i);
+                }
+                bool accelStructureDirty = mScene->applyAnimations();
+                if (initializeSkinning)
+                {
+                    accelStructureDirty = mScene->markAllSkinNodesDirty();
                 }
 
                 if (accelStructureDirty)
@@ -1525,6 +1536,8 @@ void MetalRender::render(Buffer* output)
             ctx.mSubframeIndex = 0;
         }
     }
+
+    mAccel.setDirtySkeletalMeshes(mSkinning.dirtyMeshIds());
 
     const bool enteredPause = mWasAnimationPlaying && !anyAnimationPlaying;
     mPausedBlurRefine = denoising && mEnableMotionBlur && getSettings()->getAs<bool>("render/isMotionBlurVisible") &&
@@ -3371,7 +3384,7 @@ metal::SceneBuildHooks MetalRender::makeSceneBuildHooks()
         mFrameUniforms.requestSharcReset();
         mHasPrevFramePose = false;
         mShutterIntervalActive = false;
-        mNeedsInitialPose = !mScene->getAnimations().empty();
+        mNeedsInitialPose = !mScene->getVerticesSkinData().empty();
         if (mLoadProgress)
         {
             mLoadProgress->beginStage(LoadProgress::Stage::Geometry);

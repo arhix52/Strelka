@@ -208,6 +208,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.denoise = *v;
     if (auto v = tbl["render"]["profile_stages"].value<bool>())
         cfg.profileStages = *v;
+    if (auto v = tbl["render"]["animation_frames"].value<int64_t>())
+        cfg.animationFrames = (uint32_t)std::clamp<int64_t>(*v, 0, 4096);
+    if (auto v = tbl["render"]["animation_fps"].value<double>())
+        cfg.animationFps = static_cast<float>(std::clamp(*v, 1.0, 1000.0));
     if (auto v = tbl["render"]["audit_render_work"].value<bool>())
         cfg.auditRenderWork = *v;
     if (auto v = tbl["render"]["audit_frames"].value<int64_t>())
@@ -589,7 +593,7 @@ void HeadlessApp::populateSettings()
 
     for (size_t i = 0; i < m_scene->getAnimations().size(); ++i)
     {
-        m_settings->setAs<bool>(animationStateKey(i), false);
+        m_settings->setAs<bool>(animationStateKey(i), m_config.animationFrames != 0);
         const auto& anim = m_scene->getAnimations()[i];
         float t = anim.start;
         if (m_config.animationTime)
@@ -721,21 +725,21 @@ bool HeadlessApp::saveCheckpoint(Buffer* buf, uint32_t accumulatedSpp)
     return true;
 }
 
-void HeadlessApp::printProgress(uint32_t currentSpp, uint32_t totalSpp, double lastSampleMs)
+void HeadlessApp::printProgress(uint32_t current, uint32_t total, double lastItemMs, const char* unit)
 {
     constexpr int barWidth = 30;
-    const float fraction = static_cast<float>(currentSpp) / static_cast<float>(std::max(1u, totalSpp));
+    const float fraction = static_cast<float>(current) / static_cast<float>(std::max(1u, total));
     const int filled = static_cast<int>(fraction * barWidth);
 
     const std::string bar = std::string((size_t)std::max(0, filled), '=') +
                             std::string((size_t)(barWidth - std::clamp(filled, 0, barWidth)), ' ');
 
-    const double etaSec = (currentSpp > 0) ? lastSampleMs * (totalSpp - currentSpp) / 1000.0 : 0.0;
+    const double etaSec = (current > 0) ? lastItemMs * (total - current) / 1000.0 : 0.0;
     // Written to the stream rather than logged: the bar redraws itself in place
     // with a carriage return, and every logger line carries a timestamp and a
     // newline that would turn it into one line of scrollback per sample.
-    std::cout << fmt::format("\rRendering [{}] {}/{} spp | {:.1f} ms/sample | ETA: {:.1f}s   ", bar, currentSpp,
-                             totalSpp, lastSampleMs, etaSec)
+    std::cout << fmt::format("\rRendering [{}] {}/{} {} | {:.1f} ms/{} | ETA: {:.1f}s   ", bar, current, total, unit,
+                             lastItemMs, unit, etaSec)
               << std::flush;
 }
 
@@ -893,14 +897,32 @@ int HeadlessApp::run()
 
     const auto startTime = high_resolution_clock::now();
     bool announced = false;
+    const bool animateSequence = m_config.animationFrames != 0 && !m_scene->getAnimations().empty();
     const bool moveAuditNode = m_config.auditMovingNode && *m_config.auditMovingNode < m_scene->getNodes().size();
     if (!auditMovingLightIds.empty() || moveAuditNode || !m_config.auditFramePrefix.empty() ||
-        (staticLightLayout && m_config.auditFrames != 0u))
+        (staticLightLayout && m_config.auditFrames != 0u) || animateSequence)
     {
         // Build scene and canonical analytic-light BLAS before counters start.
         m_render->renderSync(outputBuf.get());
         const glm::vec3 auditCameraPosition = m_scene->getCamera(0).position;
         const Scene::Node auditNode = moveAuditNode ? m_scene->getNodes()[*m_config.auditMovingNode] : Scene::Node{};
+        auto advanceAnimations = [&](uint32_t frame) {
+            const auto& animations = m_scene->getAnimations();
+            for (size_t i = 0; i < animations.size(); ++i)
+            {
+                const Scene::Animation& animation = animations[i];
+                const float duration = animation.end - animation.start;
+                if (duration <= 0.0f)
+                {
+                    continue;
+                }
+                const float phase = m_config.animationTime.value_or(
+                    static_cast<float>(i) / static_cast<float>(std::max<size_t>(animations.size(), 1)));
+                const float elapsed = static_cast<float>(frame) / m_config.animationFps;
+                const float offset = std::fmod(phase * duration + elapsed, duration);
+                m_settings->setAs<float>(animationTimeKey(i), animation.start + offset);
+            }
+        };
         auto moveAuditLights = [&](uint32_t frame) {
             if (staticLightLayout)
                 return;
@@ -943,6 +965,10 @@ int HeadlessApp::run()
         // Warm moving transforms, the refittable TLAS and the temporal mapping.
         for (uint32_t frame = 0; frame < 8u; ++frame)
         {
+            if (animateSequence)
+            {
+                advanceAnimations(frame);
+            }
             moveAuditLights(frame);
             m_render->renderSync(outputBuf.get());
         }
@@ -951,15 +977,19 @@ int HeadlessApp::run()
             m_settings->setAs<uint32_t>("render/pt/auditRenderWork", 1u);
         }
         std::cout << "\nSTRELKA_RENDER_BEGIN\n" << std::flush;
-        const uint32_t frames = std::max(m_config.auditFrames, 1u);
+        const uint32_t frames = animateSequence ? m_config.animationFrames : std::max(m_config.auditFrames, 1u);
         std::vector<double> auditGpuTimes;
         auditGpuTimes.reserve(frames);
         for (uint32_t frame = 0; frame < frames; ++frame)
         {
+            if (animateSequence)
+            {
+                advanceAnimations(frame + 8u);
+            }
             moveAuditLights(frame + 8u);
             m_render->renderSync(outputBuf.get());
             double frameGpuMs = m_render->getLastRenderTimeMs();
-            while (m_config.auditFreeze && !m_config.auditFramePrefix.empty() &&
+            while (!animateSequence && m_config.auditFreeze && !m_config.auditFramePrefix.empty() &&
                    m_sharedCtx->mSubframeIndex < m_config.spp)
             {
                 m_render->renderSync(outputBuf.get());
@@ -972,12 +1002,14 @@ int HeadlessApp::run()
                                          m_sharedCtx->mSubframeIndex);
             }
             auditGpuTimes.push_back(frameGpuMs);
-            printProgress(frame + 1u, frames, frameGpuMs);
+            printProgress(frame + 1u, frames, frameGpuMs, "frame");
         }
         std::ranges::sort(auditGpuTimes);
-        std::cout << fmt::format("\nSTRELKA_AUDIT_GPU_MEDIAN {:.3f} ms frames={}\n",
-                                 auditGpuTimes[auditGpuTimes.size() / 2u], auditGpuTimes.size());
-        while (m_config.auditFreeze && m_config.auditFramePrefix.empty() && m_sharedCtx->mSubframeIndex < m_config.spp)
+        const char* sequenceName = animateSequence ? "STRELKA_ANIMATION_GPU_MEDIAN" : "STRELKA_AUDIT_GPU_MEDIAN";
+        std::cout << fmt::format(
+            "\n{} {:.3f} ms frames={}\n", sequenceName, auditGpuTimes[auditGpuTimes.size() / 2u], auditGpuTimes.size());
+        while (!animateSequence && m_config.auditFreeze && m_config.auditFramePrefix.empty() &&
+               m_sharedCtx->mSubframeIndex < m_config.spp)
         {
             m_render->renderSync(outputBuf.get());
         }
@@ -1042,7 +1074,16 @@ int HeadlessApp::run()
     {
         std::cout << m_render->renderWorkAuditJson() << '\n';
     }
-    STRELKA_INFO("Done: {} spp in {:.1f} s -> {}", m_config.spp, (double)totalTime.count() / 1000.0, m_config.outputPath);
+    if (animateSequence)
+    {
+        STRELKA_INFO("Done: {} animation frames in {:.1f} s -> {}", m_config.animationFrames,
+                     (double)totalTime.count() / 1000.0, m_config.outputPath);
+    }
+    else
+    {
+        STRELKA_INFO(
+            "Done: {} spp in {:.1f} s -> {}", m_config.spp, (double)totalTime.count() / 1000.0, m_config.outputPath);
+    }
     // A skinned mesh collapsing to a point is invisible to mean brightness, so
     // report the GPU extent whenever the scene has one. The validation smoke
     // greps this line.
