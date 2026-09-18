@@ -10,6 +10,7 @@ pub trait AssetSource {
     fn read(&self, wow_path: &str) -> Result<Vec<u8>>;
     fn contains(&self, wow_path: &str) -> bool;
     fn path_for_fdid(&self, fdid: u32) -> Option<String>;
+    fn fdid_for_path(&self, wow_path: &str) -> Option<u32>;
     fn read_db2_csv(&self, table: &str) -> Result<Vec<u8>>;
     fn build(&self) -> String;
     fn product(&self) -> String;
@@ -61,6 +62,13 @@ impl AssetSource for ClientSource {
         match self {
             Self::Casc(source) => source.path_for_fdid(fdid),
             Self::Loose(source) => source.path_for_fdid(fdid),
+        }
+    }
+
+    fn fdid_for_path(&self, wow_path: &str) -> Option<u32> {
+        match self {
+            Self::Casc(source) => source.fdid_for_path(wow_path),
+            Self::Loose(source) => source.fdid_for_path(wow_path),
         }
     }
 
@@ -258,6 +266,10 @@ impl AssetSource for CascClient {
         let mut failures = Vec::new();
         for ekey in &encoding.ekeys {
             if let Some(index) = self.storage.index.find(ekey) {
+                if index.size > 256 * 1024 * 1024 {
+                    failures.push(format!("implausible CASC asset size {}", index.size));
+                    continue;
+                }
                 match self.storage.data.read_raw(
                     index.archive_number,
                     index.archive_offset,
@@ -292,6 +304,10 @@ impl AssetSource for CascClient {
 
     fn path_for_fdid(&self, fdid: u32) -> Option<String> {
         self.storage.listfile.path(fdid).map(normalize)
+    }
+
+    fn fdid_for_path(&self, wow_path: &str) -> Option<u32> {
+        self.storage.listfile.fdid(&normalize(wow_path))
     }
 
     fn read_db2_csv(&self, table: &str) -> Result<Vec<u8>> {
@@ -351,6 +367,10 @@ impl AssetSource for LooseClient {
     }
 
     fn path_for_fdid(&self, _fdid: u32) -> Option<String> {
+        None
+    }
+
+    fn fdid_for_path(&self, _wow_path: &str) -> Option<u32> {
         None
     }
 

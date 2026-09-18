@@ -84,22 +84,66 @@ The CASC backend downloads and caches the community listfile when needed.
 `--listfile <path>` makes that input explicit and supports offline/reproducible
 conversion.
 
+### AzerothCore NPCs
+
+Set a read-only MySQL URL to add server-side creature spawns. The URL is never
+written to output metadata or logs:
+
+```powershell
+$env:WOW2STRELKA_AC_URL = "mysql://wow_export:password@127.0.0.1/acore_world"
+wow2strelka ... --ac-spawn-mask 1 --ac-phase-mask 0
+```
+
+`--ac-map` is inferred as `0` for Eastern Kingdoms and `1` for Kalimdor.
+The importer supports current `creature_template_model` and legacy
+`modelid1` schemas, filters in both SQL and exact ADT tile space, and resolves
+the selected display against the target client DB2 tables. Alternate template
+displays are used when the preferred 3.3.5 display is absent from the current
+client.
+
+NPC M2s are exported as individual skinned nodes with Stand, Walk and Run
+clips; independently animated nodes are intentionally excluded from
+`EXT_mesh_gpu_instancing`. Equipment is resolved through
+ItemModifiedAppearance/ItemAppearance/ItemDisplayInfo/ModelFileData and
+parented to the character's M2 attachment bones.
+
+Generate reusable per-variant animation and material fixtures with:
+
+```powershell
+wow2strelka ... `
+  --npc-validation-output npc_tests `
+  --npc-validation-strelka-cli C:\work\Strelka\build\Release\StrelkaCLI.exe
+```
+
+The output contains one directory per unique
+`DisplayID + model + customization + equipment` variant. Each directory has
+isolated `scene.gltf`, `stand.gltf`, `walk.gltf`, `run.gltf`, four phase
+renders per clip, a contact sheet and `manifest.json`. The root `report.json`
+and `report.html` summarize unresolved material slots, placeholder textures,
+static clips, attachment problems and unusual silhouette changes. Fixtures
+reference the main scene's `scene.bin`, textures and MaterialX documents
+instead of copying those resources.
+
 ## Current scope
 
 - ADT heightfield geometry, normals, UVs, vertex colors, texture layers and
   alpha maps
-- M2 static bind-pose geometry from the first skin profile
+- M2 geometry, weighted skins, attachment points and Stand/Walk/Run animation
 - WMO group geometry, materials, lights and fog
+- active WMO doodad sets with composed transforms and GPU instancing
+- animated ambient M2 prototypes such as wyvern roosts with shared skinned instancing
 - ADT MH2O/MCLQ and WMO MLIQ liquid surfaces
 - original DB2-driven ground-effect doodads with deterministic GPU instancing
+- AzerothCore NPC spawns, current-client display remap and equipment
+- shader-driven WMO/M2 normal and emissive texture classification
+- generated equirectangular skybox, distant sun and height-bounded atmosphere sidecar
 - bounds-derived `close` and `aerial` perspective cameras
 - BLP-to-PNG conversion
 - mesh deduplication and GPU instance transforms
 
-Animation, WMO doodad-set expansion, DB2-driven area lookup, shader
-combiner emulation and automatic normal/emissive texture classification remain
-explicit future stages. Unsupported individual assets are listed in
-`scene.json` instead of aborting the whole location export.
+DB2-driven area lookup and exact WoW shader-combiner emulation remain future
+stages. Unsupported individual assets are listed in `scene.json` instead of
+aborting the whole location export.
 
 GroundEffect DB2 CSV and CASC files missing from a partial installation are
 downloaded from Wago and cached under the selected `--cache` directory.
