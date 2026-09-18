@@ -1109,7 +1109,10 @@ int HeadlessApp::run()
             }
             if (!m_config.auditFramePrefix.empty())
             {
-                saveOutput(outputBuf.get(), fmt::format("{}-{:02}.exr", m_config.auditFramePrefix, frame + 8u));
+                const fs::path prefix(m_config.auditFramePrefix);
+                const std::string extension = prefix.has_extension() ? prefix.extension().string() : ".exr";
+                const fs::path stem = prefix.has_extension() ? prefix.parent_path() / prefix.stem() : prefix;
+                saveOutput(outputBuf.get(), fmt::format("{}-{:02}{}", stem.string(), frame + 8u, extension));
                 std::cout << fmt::format("\nSTRELKA_AUDIT_FRAME {} GPU={:.3f} ms spp={}\n", frame + 8u, frameGpuMs,
                                          m_sharedCtx->mSubframeIndex);
             }
