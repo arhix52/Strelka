@@ -14,18 +14,36 @@ using oka::envUint;
 namespace
 {
 
-// The NOLINTs are the point of the fixture rather than an exception to it:
+void setEnvironment(const char* name, const char* value)
+{
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    setenv(name, value, 1);
+#endif
+}
+
+void clearEnvironment(const char* name)
+{
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    unsetenv(name);
+#endif
+}
+
+// Restores each test variable on scope exit.
 struct ScopedEnv
 {
     explicit ScopedEnv(const char* name, const char* value) : mName(name)
     {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
-        setenv(mName, value, 1);
+        setEnvironment(mName, value);
     }
     ~ScopedEnv()
     {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe)
-        unsetenv(mName);
+        clearEnvironment(mName);
     }
     const char* mName;
 };
@@ -34,8 +52,7 @@ struct ScopedEnv
 
 TEST_CASE("env helpers fall back when the variable is absent or empty")
 {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe)
-    unsetenv("STRELKA_TEST_ABSENT");
+    clearEnvironment("STRELKA_TEST_ABSENT");
     CHECK(envFlag("STRELKA_TEST_ABSENT") == false);
     CHECK(envUint("STRELKA_TEST_ABSENT", 7) == 7);
     CHECK(envDouble("STRELKA_TEST_ABSENT", 1.5) == doctest::Approx(1.5));
@@ -43,7 +60,12 @@ TEST_CASE("env helpers fall back when the variable is absent or empty")
 
     const ScopedEnv empty("STRELKA_TEST_EMPTY", "");
     // Present but empty: the flag is set, the value is not usable.
+#if defined(_WIN32)
+    // The MSVC CRT represents an empty assignment by removing the variable.
+    CHECK(envFlag("STRELKA_TEST_EMPTY") == false);
+#else
     CHECK(envFlag("STRELKA_TEST_EMPTY") == true);
+#endif
     CHECK(envUint("STRELKA_TEST_EMPTY", 7) == 7);
 }
 
