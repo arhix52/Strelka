@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use casc_lib::blte::decoder::decode_blte_with_keys;
 use casc_lib::extract::{CascStorage, OpenConfig};
+use casc_lib::listfile::parser::Listfile;
 use casc_lib::root::flags::LocaleFlags;
 
 pub trait AssetSource {
@@ -35,9 +36,7 @@ impl ClientSource {
             )?)));
         }
         if client.is_dir() {
-            return Ok(Self::Loose(LooseClient {
-                root: client.to_path_buf(),
-            }));
+            return Ok(Self::Loose(LooseClient::open(client)?));
         }
         bail!("client path does not exist: {}", client.display());
     }
@@ -127,6 +126,17 @@ impl CascClient {
         if storage.listfile.is_empty() {
             bail!("CASC listfile is empty; pass --listfile with a community-listfile CSV");
         }
+        fs::create_dir_all(cache)?;
+        fs::write(cache.join("build.txt"), &storage.info().version)?;
+        fs::write(cache.join("product.txt"), &storage.info().product)?;
+        let cached_listfile = cache.join("listfile.csv");
+        if !cached_listfile.is_file() {
+            let source = listfile
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| cache.join(".casc-meta/listfile.csv"));
+            fs::copy(&source, &cached_listfile)
+                .with_context(|| format!("failed to cache listfile from {}", source.display()))?;
+        }
         Ok(Self {
             storage,
             locale,
@@ -210,6 +220,26 @@ impl CascClient {
             .join(format!("wago-{}-{fdid}.bin", version.replace('.', "_")))
     }
 
+    fn asset_cache_path(&self, wow_path: &str) -> PathBuf {
+        wow_path
+            .split('/')
+            .fold(self.cache.join("files"), |path, component| {
+                path.join(component)
+            })
+    }
+
+    fn cache_asset(&self, wow_path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
+        let path = self.asset_cache_path(wow_path);
+        if !path.is_file() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&path, &data)
+                .with_context(|| format!("failed to cache asset {}", path.display()))?;
+        }
+        Ok(data)
+    }
+
     fn read_db2_csv(&self, table: &str) -> Result<Vec<u8>> {
         let version = self.storage.info().version;
         let cache_path = self
@@ -243,6 +273,11 @@ impl CascClient {
 impl AssetSource for CascClient {
     fn read(&self, wow_path: &str) -> Result<Vec<u8>> {
         let normalized = normalize(wow_path);
+        let cached = self.asset_cache_path(&normalized);
+        if cached.is_file() {
+            return fs::read(&cached)
+                .with_context(|| format!("failed to read asset cache {}", cached.display()));
+        }
         let fdid = self
             .storage
             .listfile
@@ -250,8 +285,9 @@ impl AssetSource for CascClient {
             .with_context(|| format!("asset is absent from listfile: {normalized}"))?;
         let wago_cache = self.wago_cache_path(fdid, &self.storage.info().version);
         if wago_cache.is_file() {
-            return fs::read(&wago_cache)
-                .with_context(|| format!("failed to read Wago cache {}", wago_cache.display()));
+            let data = fs::read(&wago_cache)
+                .with_context(|| format!("failed to read Wago cache {}", wago_cache.display()))?;
+            return self.cache_asset(&normalized, data);
         }
         let root = self
             .storage
@@ -276,19 +312,19 @@ impl AssetSource for CascClient {
                     index.size,
                 ) {
                     Ok(raw) => match decode_casc_payload(raw, &self.storage) {
-                        Ok(data) => return Ok(data),
+                        Ok(data) => return self.cache_asset(&normalized, data),
                         Err(error) => failures.push(error.to_string()),
                     },
                     Err(error) => failures.push(error.to_string()),
                 }
             }
             match self.read_from_cdn(ekey) {
-                Ok(data) => return Ok(data),
+                Ok(data) => return self.cache_asset(&normalized, data),
                 Err(error) => failures.push(error.to_string()),
             }
         }
         match self.read_from_wago(fdid) {
-            Ok(data) => return Ok(data),
+            Ok(data) => return self.cache_asset(&normalized, data),
             Err(error) => failures.push(error.to_string()),
         }
         bail!(
@@ -346,44 +382,138 @@ fn hex(bytes: &[u8]) -> String {
 
 pub struct LooseClient {
     root: PathBuf,
+    metadata_root: PathBuf,
+    listfile: Option<Listfile>,
+    build: String,
+    product: String,
 }
 
 impl LooseClient {
+    fn open(root: &Path) -> Result<Self> {
+        let files = root.join("files");
+        let listfile = [
+            root.join("listfile.csv"),
+            root.join(".casc-meta/listfile.csv"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+        .map(|path| Listfile::load(&path))
+        .transpose()?;
+        Ok(Self {
+            root: if files.is_dir() {
+                files
+            } else {
+                root.to_path_buf()
+            },
+            metadata_root: root.to_path_buf(),
+            listfile,
+            build: read_label(root.join("build.txt"), "loose-files")?,
+            product: read_label(root.join("product.txt"), "extracted")?,
+        })
+    }
+
     fn path(&self, wow_path: &str) -> PathBuf {
         normalize(wow_path)
             .split('/')
             .fold(self.root.clone(), |path, component| path.join(component))
+    }
+
+    fn decoded_path(&self, wow_path: &str) -> Option<PathBuf> {
+        let fdid = self.fdid_for_path(wow_path)?;
+        Some(
+            self.metadata_root
+                .join("decoded")
+                .join(format!("wago-{}-{fdid}.bin", self.build.replace('.', "_"))),
+        )
     }
 }
 
 impl AssetSource for LooseClient {
     fn read(&self, wow_path: &str) -> Result<Vec<u8>> {
         let path = self.path(wow_path);
-        fs::read(&path).with_context(|| format!("failed to read {}", path.display()))
+        if path.is_file() {
+            return fs::read(&path).with_context(|| format!("failed to read {}", path.display()));
+        }
+        let decoded = self.decoded_path(wow_path);
+        let path = decoded.as_deref().unwrap_or(&path);
+        fs::read(path).with_context(|| format!("failed to read {}", path.display()))
     }
 
     fn contains(&self, wow_path: &str) -> bool {
         self.path(wow_path).is_file()
+            || self
+                .decoded_path(wow_path)
+                .is_some_and(|path| path.is_file())
     }
 
-    fn path_for_fdid(&self, _fdid: u32) -> Option<String> {
-        None
+    fn path_for_fdid(&self, fdid: u32) -> Option<String> {
+        self.listfile.as_ref()?.path(fdid).map(normalize)
     }
 
-    fn fdid_for_path(&self, _wow_path: &str) -> Option<u32> {
-        None
+    fn fdid_for_path(&self, wow_path: &str) -> Option<u32> {
+        self.listfile.as_ref()?.fdid(&normalize(wow_path))
     }
 
     fn read_db2_csv(&self, table: &str) -> Result<Vec<u8>> {
-        bail!("DB2 metadata {table} is unavailable for a loose-file source")
+        let path = self
+            .metadata_root
+            .join("db2")
+            .join(self.build.replace('.', "_"))
+            .join(format!("{table}.csv"));
+        fs::read(&path).with_context(|| format!("failed to read DB2 cache {}", path.display()))
     }
 
     fn build(&self) -> String {
-        "loose-files".to_owned()
+        self.build.clone()
     }
 
     fn product(&self) -> String {
-        "extracted".to_owned()
+        self.product.clone()
+    }
+}
+
+fn read_label(path: PathBuf, fallback: &str) -> Result<String> {
+    if !path.is_file() {
+        return Ok(fallback.to_owned());
+    }
+    Ok(fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?
+        .trim()
+        .to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_client_works_without_casc() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("files/world/maps")).unwrap();
+        fs::create_dir_all(temp.path().join("db2/5_5_4_69585")).unwrap();
+        fs::create_dir_all(temp.path().join("decoded")).unwrap();
+        fs::write(temp.path().join("files/world/maps/test.adt"), b"adt").unwrap();
+        fs::write(
+            temp.path().join("listfile.csv"),
+            "42;World/Maps/Test.adt\n43;Creature/Test.m2\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("decoded/wago-5_5_4_69585-43.bin"), b"m2").unwrap();
+        fs::write(temp.path().join("build.txt"), "5.5.4.69585").unwrap();
+        fs::write(temp.path().join("product.txt"), "wow_classic").unwrap();
+        fs::write(temp.path().join("db2/5_5_4_69585/Test.csv"), b"ID\n1\n").unwrap();
+
+        let client = LooseClient::open(temp.path()).unwrap();
+        assert_eq!(client.read("WORLD\\MAPS\\TEST.ADT").unwrap(), b"adt");
+        assert_eq!(client.read("creature/test.m2").unwrap(), b"m2");
+        assert_eq!(
+            client.path_for_fdid(42).as_deref(),
+            Some("world/maps/test.adt")
+        );
+        assert_eq!(client.fdid_for_path("world/maps/test.adt"), Some(42));
+        assert_eq!(client.read_db2_csv("Test").unwrap(), b"ID\n1\n");
+        assert_eq!(client.build(), "5.5.4.69585");
+        assert_eq!(client.product(), "wow_classic");
     }
 }
 

@@ -84,6 +84,12 @@ The CASC backend downloads and caches the community listfile when needed.
 `--listfile <path>` makes that input explicit and supports offline/reproducible
 conversion.
 
+Every decoded CASC asset is also retained under `<cache>/files`. After one
+successful conversion, pass that cache directory to `--client` to repeat the
+same conversion without the WoW installation or Windows partition. The cache
+keeps the source M2/WMO/ADT/SKIN/BLP files, listfile, build identity and DB2
+tables; it does not copy unrelated CASC archives.
+
 ### AzerothCore NPCs
 
 Set a read-only MySQL URL to add server-side creature spawns. The URL is never
