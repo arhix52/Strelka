@@ -700,11 +700,15 @@ void EditorApp::loadAnimSettings()
 void EditorApp::initializeRendererForCurrentScene(bool reuseExisting)
 {
     bool sceneHasMotion = !m_scene->getAnimations().empty();
+    size_t skeletalMeshCount = 0;
     for (const oka::Mesh& mesh : m_scene->getMeshes())
     {
         sceneHasMotion = sceneHasMotion || mesh.isSkeletal;
+        skeletalMeshCount += mesh.isSkeletal ? 1 : 0;
     }
-    m_settingsManager->setAs<bool>("render/enableMotionBlur", sceneHasMotion);
+    const bool interactiveMotionBlur = sceneHasMotion && skeletalMeshCount <= 64;
+    m_settingsManager->setAs<bool>("render/enableMotionBlur", interactiveMotionBlur);
+    m_settingsManager->setAs<bool>("render/isMotionBlurVisible", interactiveMotionBlur);
 
     if (reuseExisting && m_render)
     {
@@ -847,7 +851,6 @@ void EditorApp::run()
 
         auto currentTime = std::chrono::high_resolution_clock::now();
         const double deltaTime = std::chrono::duration<double>(currentTime - prevTime).count();
-
         const auto cameraSpeed = m_settingsManager->getAs<float>("render/cameraSpeed");
 
         if (m_settingsManager->getAs<bool>("editor/gamepad/enabled") &&
@@ -1465,6 +1468,7 @@ void EditorApp::applySelectionFromPick(const Scene::PickHit& hit)
     const uint32_t prevInstance = m_selectedInstanceId;
     const uint32_t prevLight = m_selectedLightId;
     const uint32_t prevMaterial = m_selectedMaterialId;
+    uint32_t selectedNode = hit.nodeId;
 
     clearSelection();
     if (!hit.hit)
@@ -1476,7 +1480,15 @@ void EditorApp::applySelectionFromPick(const Scene::PickHit& hit)
         return;
     }
     m_selectedInstanceId = hit.instanceId;
-    m_selectedNodeId = hit.nodeId;
+    if (selectedNode < m_scene->getNodes().size())
+    {
+        const Scene::Node& selected = m_scene->getNodes()[selectedNode];
+        if (selected.skin >= 0 && selected.parent >= 0)
+        {
+            selectedNode = static_cast<uint32_t>(selected.parent);
+        }
+    }
+    m_selectedNodeId = selectedNode;
     m_selectedLightId = hit.lightId;
     m_outlinerScrollToSelection = true;
     if (hit.instanceId < m_scene->getInstances().size())

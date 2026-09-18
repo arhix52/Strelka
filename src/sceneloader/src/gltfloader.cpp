@@ -306,6 +306,16 @@ bool nodeHasDeformingSkin(const tinygltf::Node& node, size_t nodeId, const Anima
            !usage.reusableBindPoseNodes[nodeId];
 }
 
+bool nodeSharesDeformedPose(const tinygltf::Node& node)
+{
+    if (!node.extras.IsObject() || !node.extras.Has("strelka_shared_pose"))
+    {
+        return false;
+    }
+    const tinygltf::Value& marker = node.extras.Get("strelka_shared_pose");
+    return marker.IsBool() && marker.Get<bool>();
+}
+
 void countModelGeometry(const tinygltf::Model& model,
                         const AnimationUsage& animationUsage,
                         size_t& vertexCount,
@@ -318,6 +328,7 @@ void countModelGeometry(const tinygltf::Model& model,
     skinCount = 0;
     meshCount = 0;
     std::unordered_set<uint64_t> cachedRigidPrimitives;
+    std::unordered_set<uint64_t> cachedSharedPosePrimitives;
     for (size_t nodeId = 0; nodeId < model.nodes.size(); ++nodeId)
     {
         const tinygltf::Node& node = model.nodes[nodeId];
@@ -327,6 +338,7 @@ void countModelGeometry(const tinygltf::Model& model,
             continue;
         }
         const bool deforming = nodeHasDeformingSkin(node, nodeId, animationUsage);
+        const bool sharedPose = deforming && nodeSharesDeformedPose(node);
         const tinygltf::Mesh& mesh = model.meshes[node.mesh];
         for (size_t primitiveIndex = 0; primitiveIndex < mesh.primitives.size(); ++primitiveIndex)
         {
@@ -339,7 +351,9 @@ void countModelGeometry(const tinygltf::Model& model,
             const uint64_t primitiveKey = (static_cast<uint64_t>(node.mesh) << 32u) | primitiveIndex;
             // EXT_mesh_gpu_instancing copies of one skinned node use the same
             // palette, so they can share the deformed mesh and its BLAS.
-            const size_t copies = deforming ? 1u : cachedRigidPrimitives.insert(primitiveKey).second ? 1u : 0u;
+            const size_t copies =
+                deforming ? (sharedPose ? (cachedSharedPosePrimitives.insert(primitiveKey).second ? 1u : 0u) : 1u) :
+                            (cachedRigidPrimitives.insert(primitiveKey).second ? 1u : 0u);
             if (copies == 0)
             {
                 continue;
@@ -409,12 +423,13 @@ void processPrimitive(const tinygltf::Model& model,
                       const float globalScale,
                       MeshCache& meshCache,
                       uint64_t primitiveKey,
-                      bool deformingSkin)
+                      bool deformingSkin,
+                      bool sharedPose)
 {
     using namespace std;
     assert(primitive.attributes.find("POSITION") != primitive.attributes.end());
 
-    if (!deformingSkin)
+    if (!deformingSkin || sharedPose)
     {
         const auto cached = meshCache.find(primitiveKey);
         if (cached != meshCache.end())
@@ -759,11 +774,12 @@ void processPrimitive(const tinygltf::Model& model,
         meshId = scene.createMeshFromOffsets(vbOffset, vertexCount, ibOffset, indexCount);
     assert(meshId != std::numeric_limits<uint32_t>::max());
     scene.mMeshes[meshId].mStaticBlasPartitions = std::move(staticBlasPartitions);
-    // Skinned meshes are deliberately never cached: their vertices are rewritten
-    // per frame from their own skin, so two nodes sharing one would deform the
-    // same geometry twice.
-    if (!hasJoints)
+    // Independently deforming nodes need separate writable vertex ranges.
+    // Rigid and reusable bind-pose nodes can share immutable geometry.
+    if (!deformingSkin || sharedPose)
+    {
         meshCache.emplace(primitiveKey, meshId);
+    }
     const uint32_t instId = scene.createInstance(Instance::Type::eMesh, meshId, matId, transform);
     assert(instId != std::numeric_limits<uint32_t>::max());
     scene.mNodes[parentNodeId].instanceIds.push_back(instId);
@@ -778,7 +794,8 @@ void processMesh(const tinygltf::Model& model,
                  const float globalScale,
                  MeshCache& meshCache,
                  uint32_t meshIndex,
-                 bool deformingSkin)
+                 bool deformingSkin,
+                 bool sharedPose)
 {
     if (gltfDebugLoggingEnabled())
     {
@@ -788,7 +805,7 @@ void processMesh(const tinygltf::Model& model,
     for (const auto& primitive : mesh.primitives)
     {
         processPrimitive(model, scene, parentNodeId, primitive, transform, globalScale, meshCache,
-                         ((uint64_t)meshIndex << 32) | primitiveIndex++, deformingSkin);
+                         ((uint64_t)meshIndex << 32) | primitiveIndex++, deformingSkin, sharedPose);
     }
 }
 
@@ -958,6 +975,7 @@ void processNode(const tinygltf::Model& model,
         scene.mNodes[currentNodeId].type = oka::Scene::Node::NodeType::mesh;
         const tinygltf::Mesh& mesh = model.meshes[node.mesh];
         const bool deformingSkin = nodeHasDeformingSkin(node, currentNodeId, animationUsage);
+        const bool sharedPose = deformingSkin && nodeSharesDeformedPose(node);
 
         std::vector<glm::float4x4> instanceTransforms;
         readGpuInstancing(model, node, instanceTransforms);
@@ -969,7 +987,7 @@ void processNode(const tinygltf::Model& model,
             {
                 const size_t prototypeBegin = scene.mNodes[currentNodeId].instanceIds.size();
                 processMesh(model, scene, currentNodeId, mesh, globalTransform * instanceTransforms.front(),
-                            globalScale, meshCache, (uint32_t)node.mesh, true);
+                            globalScale, meshCache, (uint32_t)node.mesh, true, sharedPose);
                 const std::vector<uint32_t> prototypeIds(
                     scene.mNodes[currentNodeId].instanceIds.begin() + static_cast<std::ptrdiff_t>(prototypeBegin),
                     scene.mNodes[currentNodeId].instanceIds.end());
@@ -990,14 +1008,14 @@ void processNode(const tinygltf::Model& model,
                 for (const glm::float4x4& instance : instanceTransforms)
                 {
                     processMesh(model, scene, currentNodeId, mesh, globalTransform * instance, globalScale, meshCache,
-                                (uint32_t)node.mesh, false);
+                                (uint32_t)node.mesh, false, false);
                 }
             }
         }
         else
         {
             processMesh(model, scene, currentNodeId, mesh, globalTransform, globalScale, meshCache, (uint32_t)node.mesh,
-                        deformingSkin);
+                        deformingSkin, sharedPose);
         }
 
         // skin binding
@@ -1971,6 +1989,12 @@ bool GltfLoader::loadGltf(const std::string& modelPath, oka::Scene& scene)
 {
     if (modelPath.empty())
     {
+        return false;
+    }
+    const fs::path exportLock = fs::path(modelPath).parent_path() / ".wow2strelka-exporting";
+    if (fs::exists(exportLock))
+    {
+        STRELKA_WARNING("Scene export is still in progress: {}", exportLock.string());
         return false;
     }
 

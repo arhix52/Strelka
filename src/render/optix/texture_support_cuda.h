@@ -166,6 +166,8 @@ inline cudaChannelFormatDesc channelDesc(const Plan& plan)
         return cudaCreateChannelDesc<float4>();
     case Format::RGBA16:
         return cudaCreateChannelDesc<ushort4>();
+    case Format::RGBA8:
+        return cudaCreateChannelDesc<uchar4>();
     case Format::BC1:
         return plan.srgbBlockFormat ? cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed1SRGB>() :
                                       cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed1>();
@@ -174,8 +176,10 @@ inline cudaChannelFormatDesc channelDesc(const Plan& plan)
                                       cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed3>();
     case Format::BC5:
         return cudaCreateChannelDesc<cudaChannelFormatKindUnsignedBlockCompressed5>();
+    case Format::ASTC4x4:
+    case Format::ASTC6x6:
     default:
-        return cudaCreateChannelDesc<uchar4>();
+        return {};
     }
 }
 
@@ -241,7 +245,9 @@ inline Payload readCachedPayload(const std::string& cachePath)
         return payload;
     detail::CachedHeader header{};
     detail::readRaw(in, &header, sizeof(header));
-    if (!in || std::memcmp(header.magic, "OTEX", 4) != 0 || header.payloadVersion != kOptixPayloadVersion)
+    if (!in || std::memcmp(header.magic, "OTEX", 4) != 0 || header.payloadVersion != kOptixPayloadVersion ||
+        header.width == 0 || header.height == 0 || header.levels != 1 ||
+        !isSupportedFormat(static_cast<Format>(header.format)))
         return payload;
     payload.plan.extent = Extent{ (int)header.width, (int)header.height };
     payload.plan.levels = header.levels;
@@ -268,7 +274,8 @@ inline Payload readCachedPayload(const std::string& cachePath)
 
 inline void writeCachedPayload(const Payload& payload, const std::string& cachePath)
 {
-    if (cachePath.empty() || !payload.valid)
+    if (cachePath.empty() || !payload.valid || payload.plan.levels != 1 || payload.levels.size() != 1 ||
+        !isSupportedFormat(payload.plan.format))
         return;
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -398,7 +405,8 @@ inline TextureResources createTexture(const Payload& payload,
                                       cudaTextureAddressMode addressModeV = cudaAddressModeWrap)
 {
     TextureResources out;
-    if (!payload.valid || payload.levels.empty())
+    if (!payload.valid || payload.plan.levels != 1 || payload.levels.size() != 1 ||
+        !isSupportedFormat(payload.plan.format))
         return out;
 
     const Plan& plan = payload.plan;

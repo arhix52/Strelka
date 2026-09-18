@@ -140,7 +140,14 @@ private:
         }
     };
     DeviceSkinningPtrs mSkinningPtrs;
-    std::vector<int> mJointMatOffsets;
+    std::vector<uint32_t> mJointMatOffsets;
+    std::vector<uint32_t> mSkinNodes;
+    std::vector<std::vector<uint32_t>> mSkinPrototypeInstances;
+    std::vector<int32_t> mSkinNodeToSlot;
+    std::vector<uint32_t> mDirtySkinMeshIds;
+    std::vector<glm::mat4> mJointMatScratch;
+    std::vector<sutil::Matrix4x4> mCudaJointMatScratch;
+    bool mNeedsInitialPose = false;
 
     std::vector<oka::Instance> mPrevInstances;
 
@@ -205,7 +212,7 @@ private:
     /// instance, so it has to be rebuilt with it; a refit leaves it alone.
     bool mSbtDirty = false;
 
-    static constexpr size_t kMaxBlasRebuildsPerFrame = 8;
+    static constexpr size_t kMaxBlasRebuildsPerFrame = 4;
     size_t mNextBlasRebuildIndex = 0;
 
     /// Instance count the current TLAS was built for. A refit cannot change it,

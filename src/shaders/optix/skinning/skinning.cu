@@ -3,7 +3,7 @@
 
 // Shared RGB10A2-unorm vertex direction. A2 stays clear here so tangent
 // handedness can be copied into bit 30 below.
-__device__ const uint32_t packNormal(float3 normal)
+__device__ uint32_t packNormal(float3 normal)
 {
     constexpr float scale = 511.5f;
     const uint32_t x = __float2uint_rn((fminf(fmaxf(normal.x, -1.0f), 1.0f) + 1.0f) * scale);
@@ -12,14 +12,14 @@ __device__ const uint32_t packNormal(float3 normal)
     return (z << 20) | (y << 10) | x;
 }
 
-__global__ void skinningKernel(
-    const int vbOffset,
-    const int sbOffset,
-    void* vertexPtr,
-    const void* vertexSkinDataPtr,
-    const sutil::Matrix4x4* d_jointMats,
-    int jointMatOffset,
-    const uint32_t vertexCount) 
+__global__ void skinningKernel(const int vbOffset,
+                               const int sbOffset,
+                               void* vertexPtr,
+                               const void* vertexSkinDataPtr,
+                               const sutil::Matrix4x4* d_jointMats,
+                               int jointMatOffset,
+                               int jointCount,
+                               const uint32_t vertexCount)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= vertexCount) return;
@@ -42,11 +42,18 @@ __global__ void skinningKernel(
     constexpr int tangentOffset = normalOffset + 12; // uint32_t at offset 60
     const uint32_t* initialTangentPacked = reinterpret_cast<const uint32_t*>(skinData + tangentOffset);
 
-    const sutil::Matrix4x4 skinMat =
-          weights->x * d_jointMats[jointMatOffset + joints->x]
-        + weights->y * d_jointMats[jointMatOffset + joints->y]
-        + weights->z * d_jointMats[jointMatOffset + joints->z]
-        + weights->w * d_jointMats[jointMatOffset + joints->w];
+    const bool validX = joints->x >= 0 && joints->x < jointCount;
+    const bool validY = joints->y >= 0 && joints->y < jointCount;
+    const bool validZ = joints->z >= 0 && joints->z < jointCount;
+    const bool validW = joints->w >= 0 && joints->w < jointCount;
+    const int jointX = validX ? joints->x : 0;
+    const int jointY = validY ? joints->y : 0;
+    const int jointZ = validZ ? joints->z : 0;
+    const int jointW = validW ? joints->w : 0;
+    const sutil::Matrix4x4 skinMat = (validX ? weights->x : 0.0f) * d_jointMats[jointMatOffset + jointX] +
+                                     (validY ? weights->y : 0.0f) * d_jointMats[jointMatOffset + jointY] +
+                                     (validZ ? weights->z : 0.0f) * d_jointMats[jointMatOffset + jointZ] +
+                                     (validW ? weights->w : 0.0f) * d_jointMats[jointMatOffset + jointW];
 
     char* vertexBase = static_cast<char*>(vertexPtr);
 
@@ -67,16 +74,17 @@ __global__ void skinningKernel(
     *vertexTangent = packNormal(normalize(skinMat3x3 * initialTangent)) | (tp & (1u << 30));
 }
 
-void cuApplySkinning(
-    int threads_per_block,
-    const int vbOffset,
-    const int sbOffset,
-    void* vertexPtr,
-    const void* vertexSkinDataPtr,
-    const sutil::Matrix4x4* d_jointMats,
-    int jointMatOffset,
-    const uint32_t vertexCount)
+void cuApplySkinning(int threads_per_block,
+                     const int vbOffset,
+                     const int sbOffset,
+                     void* vertexPtr,
+                     const void* vertexSkinDataPtr,
+                     const sutil::Matrix4x4* d_jointMats,
+                     int jointMatOffset,
+                     int jointCount,
+                     const uint32_t vertexCount)
 {
     int blocks_per_grid = (vertexCount + threads_per_block - 1) / threads_per_block;
-    skinningKernel<<<blocks_per_grid, threads_per_block>>>(vbOffset, sbOffset, vertexPtr, vertexSkinDataPtr, d_jointMats, jointMatOffset, vertexCount);
+    skinningKernel<<<blocks_per_grid, threads_per_block>>>(
+        vbOffset, sbOffset, vertexPtr, vertexSkinDataPtr, d_jointMats, jointMatOffset, jointCount, vertexCount);
 }

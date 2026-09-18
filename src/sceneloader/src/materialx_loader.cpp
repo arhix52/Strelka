@@ -1229,7 +1229,7 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
             desc.openpbr = m.params;
             desc.openpbrTexPaths = m.texPaths;
             desc.openpbrTexColorSpace = m.texColorSpace;
-            if (desc.baseColorTexPath.empty() &&
+            if (desc.params.alpha_mode != ALPHA_MODE_OPAQUE && desc.baseColorTexPath.empty() &&
                 !m.texPaths[OPENPBR_TEX_BASE_COLOR].empty())
             {
                 desc.baseColorTexPath = m.texPaths[OPENPBR_TEX_BASE_COLOR];

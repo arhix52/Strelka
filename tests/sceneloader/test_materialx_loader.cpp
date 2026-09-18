@@ -95,6 +95,26 @@ TEST_CASE("standard_surface's subsurface scale and radius collapse into OpenPBR'
     CHECK(king->params.subsurface_radius == doctest::Approx(0.003f));
 }
 
+TEST_CASE("MaterialX mirrors base colour only when traversal needs alpha")
+{
+    oka::Scene opaqueScene;
+    oka::Scene maskScene;
+    oka::Scene::MaterialDescription opaque{};
+    oka::Scene::MaterialDescription mask{};
+    opaque.name = "M_King_B";
+    opaque.params.alpha_mode = ALPHA_MODE_OPAQUE;
+    mask.name = "M_King_B";
+    mask.params.alpha_mode = ALPHA_MODE_MASK;
+    opaqueScene.addMaterial(opaque);
+    maskScene.addMaterial(mask);
+
+    oka::mtlx::applyMaterialXDocument(opaqueScene, chessDocument());
+    oka::mtlx::applyMaterialXDocument(maskScene, chessDocument());
+
+    CHECK(opaqueScene.getMaterials()[0].baseColorTexPath.empty());
+    CHECK_FALSE(maskScene.getMaterials()[0].baseColorTexPath.empty());
+}
+
 TEST_CASE("a look-assigned material carries its subsurface block into the scene")
 {
     oka::Scene scene;

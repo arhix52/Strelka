@@ -229,6 +229,11 @@ oka::optix_tex::Kind openpbrSlotKind(uint32_t slot, oka::TexColorSpace stated)
     return kind;
 }
 
+std::string runtimeTextureKey(const fs::path& path, oka::optix_tex::Kind kind)
+{
+    return oka::texture::textureIdentityPath(path) + "|" + std::to_string(static_cast<int>(kind));
+}
+
 struct Rgba32fImage
 {
     float* pixels = nullptr;
@@ -829,7 +834,22 @@ const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
         return &mOmmAlphaCache.at(materialId);
     }
 
-    const tex::Payload payload = tex::decodeToPayload(fullPath.string(), tex::Kind::Color, textureDecodeSettings());
+    const tex::DecodeSettings decodeSettings = textureDecodeSettings();
+    const std::string cacheDir = getSettings()->contains("render/texture/cachePath") ?
+                                     getSettings()->getAs<std::string>("render/texture/cachePath") :
+                                     std::string();
+    const std::string cacheFile =
+        cacheDir.empty() ?
+            std::string() :
+            (fs::path(cacheDir) / tex::cacheKey(fullPath.string(), tex::Kind::Color, decodeSettings.maxDimension,
+                                                decodeSettings.downscale, decodeSettings.blockCompress))
+                .string();
+    tex::Payload payload = tex::readCachedPayload(cacheFile);
+    if (!payload.valid)
+    {
+        payload = tex::decodeToPayload(fullPath.string(), tex::Kind::Color, decodeSettings);
+        tex::writeCachedPayload(payload, cacheFile);
+    }
     if (!payload.valid || payload.levels.empty())
     {
         mOmmAlphaCache.emplace(materialId, image);
@@ -922,6 +942,8 @@ const OptiXRender::OmmAlphaImage* OptiXRender::ommAlphaImage(int32_t materialId)
     }
     case tex::Format::BC1:
     case tex::Format::BC5:
+    case tex::Format::ASTC4x4:
+    case tex::Format::ASTC6x6:
         break;
     }
 
@@ -1529,10 +1551,18 @@ bool OptiXRender::updateBottomLevelAccelerationStructures()
     const auto& meshes = mScene->getMeshes();
     size_t rebuiltThisFrame = 0;
     bool handlesChanged = false;
+    std::vector<uint8_t> dirtyMeshes(meshes.size(), 0);
+    for (const uint32_t meshId : mDirtySkinMeshIds)
+    {
+        if (meshId < dirtyMeshes.size())
+        {
+            dirtyMeshes[meshId] = 1;
+        }
+    }
 
     for (size_t index = 0; index < meshes.size(); ++index)
     {
-        if (!meshes[index].isSkeletal)
+        if (!meshes[index].isSkeletal || !dirtyMeshes[index])
         {
             continue;
         }
@@ -3010,62 +3040,72 @@ bool OptiXRender::readGuideTexture(Guide guide, std::vector<float>& out, uint32_
 
 void OptiXRender::applySkinning()
 {
-    // joint matrices
-    std::vector<glm::mat4> jointMat;
-    for (auto& node : mScene->mNodes)
+    mDirtySkinMeshIds.clear();
+    std::vector<uint8_t> dispatchedMeshes(mScene->mMeshes.size(), 0);
+    for (const uint32_t nodeId : mScene->dirtySkinNodes())
     {
-        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
+        if (nodeId >= mSkinNodeToSlot.size() || mSkinNodeToSlot[nodeId] < 0)
         {
-            auto jointCount = mScene->mSkines[node.skin].joints.size();
-            std::vector<glm::mat4> currJointMats;
-            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
+            continue;
+        }
+        const size_t slot = static_cast<size_t>(mSkinNodeToSlot[nodeId]);
+        const bool hasPendingPrototype = std::ranges::any_of(mSkinPrototypeInstances[slot], [&](uint32_t instanceId) {
+            return instanceId < mScene->mInstances.size() &&
+                   mScene->mInstances[instanceId].mMeshId < dispatchedMeshes.size() &&
+                   !dispatchedMeshes[mScene->mInstances[instanceId].mMeshId];
+        });
+        if (!hasPendingPrototype)
+        {
+            continue;
+        }
+        const oka::Scene::Node& node = mScene->mNodes[nodeId];
+        const size_t jointCount = mScene->mSkines[node.skin].joints.size();
+        mJointMatScratch.clear();
+        mCudaJointMatScratch.resize(jointCount);
+        mScene->computeJointMatrices(&mJointMatScratch, jointCount, static_cast<uint32_t>(node.skin));
+        for (size_t i = 0; i < jointCount; ++i)
+        {
+            const glm::mat4 transposed = glm::transpose(mJointMatScratch[i]);
+            memcpy(mCudaJointMatScratch[i].getData(), glm::value_ptr(transposed), 16 * sizeof(float));
+        }
+        const size_t matrixOffset = static_cast<size_t>(mJointMatOffsets[slot]);
+        CUDA_CHECK(cudaMemcpy(mSkinningPtrs.d_jointMats + matrixOffset, mCudaJointMatScratch.data(),
+                              jointCount * sizeof(sutil::Matrix4x4), cudaMemcpyHostToDevice));
 
-            jointMat.insert(jointMat.end(), currJointMats.begin(), currJointMats.end());
+        for (const uint32_t instId : mSkinPrototypeInstances[slot])
+        {
+            if (instId >= mScene->mInstances.size())
+            {
+                continue;
+            }
+            const uint32_t meshId = mScene->mInstances[instId].mMeshId;
+            if (meshId >= dispatchedMeshes.size() || dispatchedMeshes[meshId])
+            {
+                continue;
+            }
+            auto& mesh = mScene->mMeshes[meshId];
+            const bool vertexRangeValid =
+                static_cast<size_t>(mesh.mVbOffset) + mesh.mVertexCount <= mScene->getVertices().size();
+            const bool skinRangeValid =
+                static_cast<size_t>(mesh.mSbOffset) + mesh.mVertexCount <= mScene->getVerticesSkinData().size();
+            if (!vertexRangeValid || !skinRangeValid)
+            {
+                STRELKA_WARNING("Skipping invalid skinning input mesh={} node={} vertices={} joints={}", meshId, nodeId,
+                                mesh.mVertexCount, jointCount);
+                continue;
+            }
+            dispatchedMeshes[meshId] = 1;
+            mDirtySkinMeshIds.push_back(meshId);
+            cuApplySkinning(256, static_cast<int>(mesh.mVbOffset), static_cast<int>(mesh.mSbOffset),
+                            optix::devicePtr<void>(mVertexBuffer->getPtr()),
+                            optix::devicePtr<void>(mVertexSkinDataBuffer->getPtr()), mSkinningPtrs.d_jointMats,
+                            static_cast<int>(matrixOffset), static_cast<int>(jointCount), mesh.mVertexCount);
         }
     }
-
-    const size_t jointMatSize = jointMat.size();
-    std::vector<sutil::Matrix4x4> cudaMatrices(jointMatSize);
-    for (size_t i = 0; i < jointMatSize; ++i)
+    if (!mDirtySkinMeshIds.empty())
     {
-        // glm is column-major, sutil::Matrix4x4 is row-major — transpose and copy
-        const glm::mat4 transposed = glm::transpose(jointMat[i]);
-        memcpy(cudaMatrices[i].getData(), glm::value_ptr(transposed), 16 * sizeof(float));
+        markStageSubmitted(optix::GpuStage::Skinning, nullptr);
     }
-
-    CUDA_CHECK(cudaMemcpy(mSkinningPtrs.d_jointMats, cudaMatrices.data(), jointMatSize * sizeof(sutil::Matrix4x4),
-                          cudaMemcpyHostToDevice));
-
-    // apply skinning
-    int index = 0;
-    int jointMatOffset = 0;
-    if (mEnableMotionBlur)
-        mVertexBuffer.swap(mPrevVertexBuffer);
-    for (auto& node : mScene->mNodes)
-    {
-        if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
-        {
-            if (index > 0)
-            {
-                jointMatOffset += mJointMatOffsets[index - 1];
-            }
-            index++;
-
-            for (const auto instId : node.instanceIds)
-            {
-                auto& mesh = mScene->mMeshes[mScene->mInstances[instId].mMeshId];
-
-                cuApplySkinning(256, static_cast<int>(mesh.mVbOffset), static_cast<int>(mesh.mSbOffset),
-                                optix::devicePtr<void>(mVertexBuffer->getPtr()),
-                                optix::devicePtr<void>(mVertexSkinDataBuffer->getPtr()), mSkinningPtrs.d_jointMats,
-                                jointMatOffset, mesh.mVertexCount);
-            }
-        }
-    }
-    // One mark for the whole set. A per-mesh breadcrumb would say which mesh's
-    // dispatch died, but the kernel is the same one for all of them and the
-    // memset would cost more than the dispatch it follows.
-    markStageSubmitted(optix::GpuStage::Skinning, nullptr);
 }
 
 float OptiXRender::skinnedGeometryExtent()
@@ -3111,20 +3151,50 @@ float OptiXRender::skinnedGeometryExtent()
 void OptiXRender::allocJointMatrices()
 {
     size_t jointMatSize = 0;
-    for (auto& node : mScene->mNodes)
+    mJointMatOffsets.clear();
+    mSkinNodes.clear();
+    mSkinPrototypeInstances.clear();
+    mSkinNodeToSlot.assign(mScene->mNodes.size(), -1);
+    for (uint32_t nodeId = 0; nodeId < mScene->mNodes.size(); ++nodeId)
     {
+        const oka::Scene::Node& node = mScene->mNodes[nodeId];
         if (node.skin != -1 && node.type == oka::Scene::Node::NodeType::mesh)
         {
-            auto jointCount = mScene->mSkines[node.skin].joints.size();
-            std::vector<glm::mat4> currJointMats;
-            mScene->computeJointMatrices(&currJointMats, jointCount, node.skin);
-
-            jointMatSize += currJointMats.size();
-            mJointMatOffsets.push_back(static_cast<int>(currJointMats.size()));
+            mSkinNodeToSlot[nodeId] = static_cast<int32_t>(mSkinNodes.size());
+            mSkinNodes.push_back(nodeId);
+            mJointMatOffsets.push_back(static_cast<uint32_t>(jointMatSize));
+            std::vector<uint32_t>& prototypes = mSkinPrototypeInstances.emplace_back();
+            for (const uint32_t instanceId : node.instanceIds)
+            {
+                if (instanceId >= mScene->mInstances.size())
+                {
+                    continue;
+                }
+                const uint32_t meshId = mScene->mInstances[instanceId].mMeshId;
+                const bool alreadyPresent = std::ranges::any_of(
+                    prototypes, [&](uint32_t prototypeId) { return mScene->mInstances[prototypeId].mMeshId == meshId; });
+                if (!alreadyPresent)
+                {
+                    prototypes.push_back(instanceId);
+                }
+            }
+            jointMatSize += mScene->mSkines[node.skin].joints.size();
         }
     }
+    if (mSkinningPtrs.d_jointMats)
+    {
+        CUDA_CHECK(cudaFree(mSkinningPtrs.d_jointMats));
+        mSkinningPtrs.d_jointMats = nullptr;
+    }
     mSkinningPtrs.bytes = jointMatSize * sizeof(sutil::Matrix4x4);
-    CUDA_CHECK(cudaMalloc(&mSkinningPtrs.d_jointMats, mSkinningPtrs.bytes));
+    if (mSkinningPtrs.bytes != 0)
+    {
+        CUDA_CHECK(cudaMalloc(&mSkinningPtrs.d_jointMats, mSkinningPtrs.bytes));
+    }
+    // Very large independently-skinned scenes already carry a valid glTF bind
+    // pose in the vertex buffer. Avoid touching every writable pose before the
+    // user asks for animation; shared-pose crowds still initialize eagerly.
+    mNeedsInitialPose = !mSkinNodes.empty() && mSkinNodes.size() <= 256;
 }
 
 void OptiXRender::render(Buffer* output)
@@ -3139,6 +3209,15 @@ void OptiXRender::render(Buffer* output)
         // Each slice that moved the scene forward is one more thing worth
         // showing; the clock decides how many of them are worth a frame.
         mPublishClock.noteArrivals();
+
+        // OptiX modules bind scene-wide material feature flags at compile time.
+        // A partial frame before MaterialX/textures finish would compile a
+        // throwaway pipeline and immediately replace it with the final variant.
+        if (!complete)
+        {
+            mRenderBusy.store(false, std::memory_order_release);
+            return;
+        }
 
         metal::StreamReadiness readiness;
         readiness.hasOutputTargets = mState.params.accum != nullptr;
@@ -3217,9 +3296,9 @@ void OptiXRender::render(Buffer* output)
 
     // Animation changes
     std::vector<oka::Scene::Animation>& animations = mScene->getAnimations();
+    std::vector<uint32_t> changedAnimations;
     bool accelStructureDirty = false;
-    if (mEnableMotionBlur && sceneOnDevice)
-        mPrevInstances.swap(mScene->getInstances());
+    const bool initializeSkinning = mNeedsInitialPose && sceneOnDevice;
     for (size_t i = 0; sceneOnDevice && i < animations.size(); ++i)
     {
         const std::string scrollNameStr = "render/animation/anim" + std::to_string(i) + "/time";
@@ -3232,24 +3311,35 @@ void OptiXRender::render(Buffer* output)
         {
             animStateChanged = true;
             animations[i].current = currAnimTime;
-            accelStructureDirty |= mScene->applyAnimation(i);
+            changedAnimations.push_back(static_cast<uint32_t>(i));
         }
+    }
+    if (animStateChanged)
+    {
+        if (mEnableMotionBlur)
+        {
+            mPrevInstances = mScene->getInstances();
+        }
+        accelStructureDirty = mScene->applyAnimations(changedAnimations);
+    }
+    if (initializeSkinning)
+    {
+        mNeedsInitialPose = false;
+        animStateChanged = true;
+        accelStructureDirty = mScene->markAllSkinNodesDirty();
     }
 
     if (animStateChanged)
     {
-        bool tlasNeedsRebuild = mEnableMotionBlur;
+        bool tlasNeedsRebuild = false;
         if (accelStructureDirty)
         {
-            applySkinning();
             if (mEnableMotionBlur)
             {
-                createBottomLevelAccelerationStructures();
+                mVertexBuffer.swap(mPrevVertexBuffer);
             }
-            else
-            {
-                tlasNeedsRebuild |= updateBottomLevelAccelerationStructures();
-            }
+            applySkinning();
+            tlasNeedsRebuild |= updateBottomLevelAccelerationStructures();
         }
 
         // An instance the TLAS does not have yet cannot be refit into it.
@@ -5039,7 +5129,7 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
         // A compressed upload that the driver refuses should cost this texture
         // its compression, not the render. Retry once, uncompressed, so that a
         // scene still shades rather than losing a map to a format decision.
-        if (isCompressed(payload.plan.format) && settings.blockCompress)
+        if (tex::isCompressed(payload.plan.format) && settings.blockCompress)
         {
             STRELKA_WARNING("Block-compressed upload failed for {}, retrying uncompressed", fileName.c_str());
             tex::DecodeSettings fallback = settings;
@@ -5450,7 +5540,7 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         if (relPath.empty())
             return 0;
         const fs::path fullPath = resourcePath / relPath;
-        const std::string key = fullPath.string() + "|" + std::to_string((int)kind);
+        const std::string key = runtimeTextureKey(fullPath, kind);
         auto it = mTextureCache.find(key);
         if (it != mTextureCache.end())
             return it->second;
@@ -5472,12 +5562,14 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         const auto& desc = matDescs[i];
         cudaTextureObject_t* texSlots = &mHostMaterialTextures[i * MAX_MATERIAL_TEXTURES];
         MaterialParams& params = mMaterials[i].params;
+        const bool openpbr = desc.params.material_type == MATERIAL_TYPE_OPENPBR;
+        const bool needsTraversalAlpha = desc.params.alpha_mode != ALPHA_MODE_OPAQUE;
 
-        texSlots[0] = loadOrCacheTex(desc.baseColorTexPath, oka::optix_tex::Kind::Color);
-        texSlots[1] = loadOrCacheTex(desc.metallicRoughnessTexPath, oka::optix_tex::Kind::NonColor);
-        texSlots[2] = loadOrCacheTex(desc.normalTexPath, oka::optix_tex::Kind::Normal);
-        const bool openpbrEmission = desc.params.material_type == MATERIAL_TYPE_OPENPBR &&
-                                     !desc.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR].empty();
+        texSlots[0] =
+            !openpbr || needsTraversalAlpha ? loadOrCacheTex(desc.baseColorTexPath, oka::optix_tex::Kind::Color) : 0;
+        texSlots[1] = !openpbr ? loadOrCacheTex(desc.metallicRoughnessTexPath, oka::optix_tex::Kind::NonColor) : 0;
+        texSlots[2] = !openpbr ? loadOrCacheTex(desc.normalTexPath, oka::optix_tex::Kind::Normal) : 0;
+        const bool openpbrEmission = openpbr && !desc.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR].empty();
         const std::string& emissionPath =
             openpbrEmission ? desc.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR] : desc.emissionTexPath;
         oka::optix_tex::Kind emissionKind = oka::optix_tex::Kind::Color;
@@ -5485,8 +5577,8 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         {
             emissionKind = oka::optix_tex::Kind::NonColor;
         }
-        texSlots[3] = loadOrCacheTex(emissionPath, emissionKind);
-        texSlots[4] = loadOrCacheTex(desc.occlusionTexPath, oka::optix_tex::Kind::NonColor);
+        texSlots[3] = !openpbr ? loadOrCacheTex(emissionPath, emissionKind) : 0;
+        texSlots[4] = !openpbr ? loadOrCacheTex(desc.occlusionTexPath, oka::optix_tex::Kind::NonColor) : 0;
         // Slot 5 is the transmission texture. Scene::MaterialDescription has no
         // field for it, so the glTF loader has nothing to hand over and the slot
         // stays empty; adding it is a loader change, reported as a hand-off.

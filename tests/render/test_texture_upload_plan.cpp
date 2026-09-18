@@ -123,6 +123,18 @@ TEST_CASE("format choice: what compresses, and to what")
     CHECK_FALSE(sixteen.srgbBlockFormat);
 }
 
+TEST_CASE("OptiX accepts NVIDIA formats and rejects Metal ASTC payloads")
+{
+    CHECK(isSupportedFormat(Format::RGBA8));
+    CHECK(isSupportedFormat(Format::RGBA16));
+    CHECK(isSupportedFormat(Format::RGBA32F));
+    CHECK(isSupportedFormat(Format::BC1));
+    CHECK(isSupportedFormat(Format::BC3));
+    CHECK(isSupportedFormat(Format::BC5));
+    CHECK_FALSE(isSupportedFormat(Format::ASTC4x4));
+    CHECK_FALSE(isSupportedFormat(Format::ASTC6x6));
+}
+
 TEST_CASE("totalBytes reflects block compression")
 {
     PlanInputs in;
@@ -147,6 +159,8 @@ TEST_CASE("the cache file's format tags are fixed, because files outlive builds"
     CHECK((int)Format::BC1 == 3);
     CHECK((int)Format::BC3 == 4);
     CHECK((int)Format::BC5 == 5);
+    CHECK((int)Format::ASTC4x4 == 6);
+    CHECK((int)Format::ASTC6x6 == 7);
 
     // These are shared artifact semantics, not backend-local tags.
     CHECK((int)Kind::Color == 0);

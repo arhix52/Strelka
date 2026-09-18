@@ -6,6 +6,7 @@ using oka::texture::Semantic;
 using oka::texture::TargetProfile;
 using oka::texture::textureCacheKey;
 using oka::texture::TextureCacheKeyInputs;
+using oka::texture::textureIdentityPath;
 
 TEST_CASE("textureCacheKey is stable for identical inputs")
 {
@@ -100,4 +101,5 @@ TEST_CASE("textureCacheKey gives relative and absolute spellings one identity")
     TextureCacheKeyInputs absolute = relative;
     absolute.fileName = (std::filesystem::current_path() / "textures/albedo.png").string();
     CHECK(textureCacheKey(relative) == textureCacheKey(absolute));
+    CHECK(textureIdentityPath(relative.fileName) == textureIdentityPath(absolute.fileName));
 }

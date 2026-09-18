@@ -25,14 +25,30 @@ struct TextureCacheKeyInputs
     uint32_t encoderVersion = 0;
 };
 
+inline std::string textureIdentityPath(const std::filesystem::path& path)
+{
+    std::error_code error;
+    std::filesystem::path identity;
+    std::filesystem::path canonical;
+    identity = std::filesystem::absolute(path, error);
+    if (error)
+    {
+        error.clear();
+        identity = path;
+    }
+    canonical = std::filesystem::weakly_canonical(identity, error);
+    if (!error)
+    {
+        identity = canonical;
+    }
+    return identity.lexically_normal().string();
+}
+
 // FNV-1a over a stable description of how the texture will be uploaded. Returns
 // a cache file name like "0123abcd....btex".
 inline std::string textureCacheKey(const TextureCacheKeyInputs& in)
 {
-    std::error_code error;
-    const std::filesystem::path absolute = std::filesystem::absolute(in.fileName, error);
-    std::string blob =
-        error ? std::filesystem::path(in.fileName).lexically_normal().string() : absolute.lexically_normal().string();
+    std::string blob = textureIdentityPath(in.fileName);
     blob += "|" + std::to_string((unsigned long long)in.fileSize);
     blob += "|" + std::to_string((long long)in.writeTimeCount);
     blob += "|" + std::to_string(in.maxDimension) + "|" + std::to_string(in.downscale);

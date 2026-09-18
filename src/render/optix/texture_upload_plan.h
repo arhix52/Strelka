@@ -19,6 +19,24 @@ inline bool isCompressed(Format f)
     return texture::formatInfo(f).compressed;
 }
 
+inline bool isSupportedFormat(Format format)
+{
+    switch (format)
+    {
+    case Format::RGBA8:
+    case Format::RGBA16:
+    case Format::RGBA32F:
+    case Format::BC1:
+    case Format::BC3:
+    case Format::BC5:
+        return true;
+    case Format::ASTC4x4:
+    case Format::ASTC6x6:
+        return false;
+    }
+    return false;
+}
+
 /// Bytes per texel; 0 for compressed formats.
 inline size_t texelBytes(Format f)
 {
