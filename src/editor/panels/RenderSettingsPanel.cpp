@@ -505,7 +505,7 @@ void EditorApp::drawRenderSettingsPanel()
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(
-                        "Tent matches Corona's documented 2 px filter radius.\n"
+                        "Tent matches Corona's documented 2 px filter width (1 px radius).\n"
                         "Mitchell and Lanczos 2 retain detail using signed lobes.\n"
                         "MetalFX temporal reconstruction and debug views use Box.");
 

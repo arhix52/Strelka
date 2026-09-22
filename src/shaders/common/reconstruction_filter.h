@@ -20,7 +20,8 @@ struct ReconstructionFilterSample
 
 DEVICE_FUNC ReconstructionFilterSample sampleTent(float xi)
 {
-    constexpr float radius = 2.0f;
+    // Corona's 2 px value is the full filter width, hence a one-pixel radius.
+    constexpr float radius = 1.0f;
     const float u = fminf(fmaxf(xi, 0.0f), 1.0f);
     const float side = 2.0f * u - 1.0f;
     const float magnitude = radius * (1.0f - sqrtf(1.0f - fabsf(side)));

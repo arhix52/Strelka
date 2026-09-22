@@ -6,11 +6,11 @@
 #include <cmath>
 #include <cstdint>
 
-TEST_CASE("Tent sampling covers a symmetric two-pixel radius with unit weights")
+TEST_CASE("Tent sampling covers a symmetric two-pixel width with unit weights")
 {
-    CHECK(sampleTent(0.0f).offset == doctest::Approx(-2.0f));
+    CHECK(sampleTent(0.0f).offset == doctest::Approx(-1.0f));
     CHECK(sampleTent(0.5f).offset == doctest::Approx(0.0f));
-    CHECK(sampleTent(1.0f).offset == doctest::Approx(2.0f));
+    CHECK(sampleTent(1.0f).offset == doctest::Approx(1.0f));
 
     constexpr int sampleCount = 1 << 16;
     double mean = 0.0;
@@ -24,7 +24,7 @@ TEST_CASE("Tent sampling covers a symmetric two-pixel radius with unit weights")
         CHECK(sample.weight == doctest::Approx(1.0f));
     }
     CHECK(mean / sampleCount == doctest::Approx(0.0).epsilon(1.0e-5));
-    CHECK(secondMoment / sampleCount == doctest::Approx(2.0 / 3.0).epsilon(1.0e-4));
+    CHECK(secondMoment / sampleCount == doctest::Approx(1.0 / 6.0).epsilon(1.0e-4));
 }
 
 TEST_CASE("Mitchell absolute CDF covers its full two-pixel support")
