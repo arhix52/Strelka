@@ -24,6 +24,19 @@ TEST_CASE("EDR tone mappers retain their SDR curves at unit headroom")
     checkColor(oka::tonemap::ACESFilm(color, 1.0f), oka::tonemap::ACESFilm(color));
 }
 
+TEST_CASE("display tone mappers do not fold negative Monte Carlo estimates into light")
+{
+    const oka::tonemap::float3 negative = oka::tonemap::make_float3(-2.0f, -1.0f, -0.25f);
+    const oka::tonemap::float3 black = oka::tonemap::make_float3(0.0f, 0.0f, 0.0f);
+
+    checkColor(oka::tonemap::reinhard(negative), black);
+    checkColor(oka::tonemap::ACESFitted(negative), black);
+    checkColor(oka::tonemap::ACESFilm(negative), black);
+    checkColor(oka::tonemap::reinhard(negative, 4.0f), black);
+    checkColor(oka::tonemap::ACESFitted(negative, 4.0f), black);
+    checkColor(oka::tonemap::ACESFilm(negative, 4.0f), black);
+}
+
 TEST_CASE("EDR headroom leaves shadows and midtones on the SDR curve")
 {
     for (const float headroom : { 1.5f, 3.54f, 16.0f })

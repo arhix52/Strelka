@@ -105,6 +105,12 @@ enum class ToneMapperType : uint32_t
     eFilmic,
 };
 
+inline float3 nonnegativeDisplayRadiance(const float3 color)
+{
+    return MAKE_FLOAT3(color.x > 0.0f ? color.x : 0.0f, color.y > 0.0f ? color.y : 0.0f,
+                       color.z > 0.0f ? color.z : 0.0f);
+}
+
 // https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
 // sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
 static TONEMAP_CONST float3x3 ACESInputMat =
@@ -131,6 +137,7 @@ inline float3 RRTAndODTFit(float3 v)
 
 inline float3 ACESFitted(float3 color)
 {
+    color = nonnegativeDisplayRadiance(color);
     color = transpose(ACESInputMat) * color;
     // Apply RRT and ODT
     color = RRTAndODTFit(color);
@@ -186,6 +193,7 @@ inline float3 spendHeadroomOnHighlights(const float3 linearColor, const float3 s
 
 inline float3 ACESFitted(float3 color, const float maxOutput)
 {
+    color = nonnegativeDisplayRadiance(color);
     const float3 sdr = ACESFitted(color);
 
     // Not only an optimisation: it is what keeps the SDR path bit-identical, so
@@ -200,6 +208,7 @@ inline float3 ACESFitted(float3 color, const float maxOutput)
 // https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
 inline float3 ACESFilm(float3 x)
 {
+    x = nonnegativeDisplayRadiance(x);
     const float a = 2.51f;
     const float b = 0.03f;
     const float c = 2.43f;
@@ -210,6 +219,7 @@ inline float3 ACESFilm(float3 x)
 
 inline float3 ACESFilm(float3 x, const float maxOutput)
 {
+    x = nonnegativeDisplayRadiance(x);
     const float3 sdr = ACESFilm(x);
 
     if (maxOutput <= 1.0f)
@@ -227,6 +237,7 @@ inline float calcLuminance(float3 color)
 
 inline float3 reinhard(float3 color)
 {
+    color = nonnegativeDisplayRadiance(color);
     const float luminance = calcLuminance(color);
     // float reinhard = luminance / (luminance + 1);
     return color / (luminance + 1.0f);
@@ -234,6 +245,7 @@ inline float3 reinhard(float3 color)
 
 inline float3 reinhard(float3 color, const float maxOutput)
 {
+    color = nonnegativeDisplayRadiance(color);
     const float3 sdr = reinhard(color);
 
     if (maxOutput <= 1.0f)
