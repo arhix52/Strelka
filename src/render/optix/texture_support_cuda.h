@@ -41,7 +41,7 @@ namespace oka::optix_tex
 
 // Bumped whenever the payload this backend writes changes meaning. It rides in
 // the cache key, so a bump orphans the old files rather than misreading them.
-inline constexpr uint32_t kOptixPayloadVersion = 3;
+inline constexpr uint32_t kOptixPayloadVersion = 6;
 
 /// One decoded, resampled, mipped and possibly compressed texture, in the form
 /// the CUDA array wants and in the form the cache file holds.
