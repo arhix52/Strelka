@@ -24,6 +24,7 @@ enum AlphaMode : unsigned int
     ALPHA_MODE_OPAQUE = 0,
     ALPHA_MODE_MASK   = 1,
     ALPHA_MODE_BLEND  = 2,
+    ALPHA_MODE_SHADOW_TRANSPARENT = 3,
 };
 
 // The values are an ABI the shaders share, written out one by one on purpose;

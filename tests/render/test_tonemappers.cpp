@@ -149,6 +149,16 @@ TEST_CASE("extended sRGB transfer preserves EDR values")
     CHECK(oka::tonemap::gammaFloat(4.0f, 2.4f) > 1.0f);
 }
 
+TEST_CASE("AgX matches Blender Base Contrast for middle grey")
+{
+    const oka::tonemap::float3 grey = oka::tonemap::make_float3(0.18f, 0.18f, 0.18f);
+    const oka::tonemap::float3 encoded = oka::tonemap::srgbGamma(oka::tonemap::AgX(grey), 2.4f);
+
+    CHECK(encoded.x == doctest::Approx(0.461318f).epsilon(2e-4));
+    CHECK(encoded.y == doctest::Approx(0.461316f).epsilon(2e-4));
+    CHECK(encoded.z == doctest::Approx(0.461352f).epsilon(2e-4));
+}
+
 TEST_CASE("sRGB transfer round trips spatial scaler pixels back to display linear")
 {
     for (const float value : { 0.0f, 0.0031308f, 0.18f, 1.0f, 4.0f })

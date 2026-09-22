@@ -19,6 +19,7 @@ static __device__ bool samplerBlueNoiseEnabled()
 
 #include <postprocessing/Guides.h>
 #include <env_light.h>
+#include <reconstruction_filter.h>
 
 #include "optix_device_utils.h"
 
@@ -97,10 +98,15 @@ __device__ float2 sampleAperture(SamplerState& sampler)
 }
 
 __device__ void generateCameraRay(
-    const uint2 pixelIndex, SamplerState& sampler, float3& origin, float3& direction, float2& screenSample)
+    const uint2 pixelIndex, SamplerState& sampler, float3& origin, float3& direction, float2& screenSample,
+    float& reconstructionWeight)
 {
-    float2 subpixel_jitter =
-        make_float2(random<SampleDimension::ePixelX>(sampler), random<SampleDimension::ePixelY>(sampler));
+    const ReconstructionFilterSample sampleX =
+        reconstructionFilterSample(params.reconstructionFilter, random<SampleDimension::ePixelX>(sampler));
+    const ReconstructionFilterSample sampleY =
+        reconstructionFilterSample(params.reconstructionFilter, random<SampleDimension::ePixelY>(sampler));
+    const float2 subpixel_jitter = make_float2(0.5f + sampleX.offset, 0.5f + sampleY.offset);
+    reconstructionWeight = sampleX.weight * sampleY.weight;
 
     // The film Y flip includes subpixel jitter so every sample stays in its row.
     float2 pixelPos = make_float2(pixelIndex.x + subpixel_jitter.x,
@@ -156,6 +162,8 @@ __device__ void generateCameraRay(
         origin += camRight * lensSample.x + camUp * lensSample.y;
         direction = normalize(focalPoint - origin);
     }
+
+    origin += direction * params.cameraNear;
 }
 
 /// Fold fresh samples into the running mean in linear radiance.
@@ -228,6 +236,7 @@ extern "C" __global__ void __raygen__rg()
     const uint3 dim = optixGetLaunchDimensions();
 
     float3 result = make_float3(0.0f);
+    float3 guideResult = make_float3(0.0f);
     float3 diffuse = make_float3(0.0f);
     float4 diffuseOut = make_float4(0.0f, 0.0f, 0.0f, 1.0f);
     uint32_t diffuseSamples = 0;
@@ -262,10 +271,11 @@ extern "C" __global__ void __raygen__rg()
         prd.specularBounce = false;
         prd.neeDone = false;
         prd.lastBsdfPdf = 0.0f;
-        // Guides describe a pixel, not a sample, so only the first sample of a
-        // launch writes them; the rest would rewrite the same record through a
-        // different jitter and pay the memory traffic for nothing.
-        prd.writeAov = params.writeAov && sampleIdx == 0;
+        // The denoiser needs one stable guide record. A guide debug view instead
+        // visualises the filtered pixel, so every camera sample must contribute.
+        const bool debugAov = params.debug >= DEBUG_MODE_FIRST_AOV &&
+                              params.debug < (uint32_t)DebugMode::eSharcGrid;
+        prd.writeAov = params.writeAov && (sampleIdx == 0 || debugAov);
         prd.aovDone = false;
         if (params.sharcCapacity != 0u)
         {
@@ -277,9 +287,10 @@ extern "C" __global__ void __raygen__rg()
 
         float3 ray_origin, ray_direction;
         float2 pixelSample;
+        float reconstructionWeight;
 
         const uint2 pixelCoord = make_uint2(launch_index.x, launch_index.y);
-        generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction, pixelSample);
+        generateCameraRay(pixelCoord, prd.sampler, ray_origin, ray_direction, pixelSample, reconstructionWeight);
 
         if (prd.writeAov && params.aov != nullptr)
         {
@@ -369,6 +380,11 @@ extern "C" __global__ void __raygen__rg()
             samplerAdvanceDepth(prd.sampler);
         }
 
+        if (debugAov && params.aov != nullptr)
+        {
+            guideResult += visualiseGuide(params.aov[linearPixelIndex], params.debug) * reconstructionWeight;
+        }
+
         if (params.sharcCapacity != 0u)
         {
             const SharcPathState visit = params.sharcPath[linearPixelIndex];
@@ -394,19 +410,19 @@ extern "C" __global__ void __raygen__rg()
             }
         }
 
-        result += prd.radiance;
+        result += prd.radiance * reconstructionWeight;
         bounceSum += bounces;
 
         if (params.writeSplitAov)
         {
             if (prd.firstEventType() == EventType::eDiffuse)
             {
-                diffuse += prd.radiance;
+                diffuse += prd.radiance * reconstructionWeight;
                 ++diffuseSamples;
             }
             if (prd.firstEventType() == EventType::eSpecular)
             {
-                specular += prd.radiance;
+                specular += prd.radiance * reconstructionWeight;
                 ++specularSamples;
             }
         }
@@ -464,7 +480,11 @@ extern "C" __global__ void __raygen__rg()
     if (params.debug >= DEBUG_MODE_FIRST_AOV && params.debug < (uint32_t)DebugMode::eSharcGrid &&
         params.aov != nullptr)
     {
-        params.image[linearPixelIndex] = make_float4(visualiseGuide(params.aov[linearPixelIndex], params.debug), 1.0f);
+        guideResult /= static_cast<float>(params.samples_per_launch);
+        params.image[linearPixelIndex] = params.enableAccumulation
+                                             ? accumulate(params.accum, guideResult, linearPixelIndex,
+                                                          params.subframe_index, params.samples_per_launch)
+                                             : make_float4(guideResult, 1.0f);
         return;
     }
 

@@ -221,6 +221,9 @@ private:
 
     // Previous-frame settings for change detection (replaces static locals in render())
     uint32_t mPrevRectLightSamplingMethod = 0;
+    uint32_t mPrevReconstructionFilter = 0;
+    uint32_t mPrevTextureLodMode = 0;
+    float mPrevTextureLodBias = 0.0f;
     /// Last value warned about for render/pt/samplerType, so an unimplemented
     /// one is reported when it is chosen rather than on every frame after.
     uint32_t mReportedSamplerType = 2;
@@ -233,8 +236,8 @@ private:
     uint32_t mMaterialCount = 0;
 
     std::unique_ptr<OptixBuffer> mOpenPBRParamsBuffer; // OpenPBRParams[] on device
-    std::unique_ptr<OptixBuffer> mOpenPBRTexturesBuffer; // cudaTextureObject_t[n * MAX_OPENPBR_TEXTURES]
-    std::vector<cudaTextureObject_t> mHostOpenPBRTextures;
+    std::unique_ptr<OptixBuffer> mOpenPBRTexturesBuffer; // OpenPBRTextures[]
+    std::vector<OpenPBRTextures> mHostOpenPBRTextures;
     std::vector<uint8_t> mOpenPBRBaseMaterials;
 
     void allocJointMatrices();
@@ -388,6 +391,7 @@ private:
     uint32_t mTextureCacheHits = 0;
     uint32_t mTextureCacheMisses = 0;
     std::vector<cudaArray_t> mMaterialTextureArrays;
+    std::vector<cudaMipmappedArray_t> mMaterialTextureMipArrays;
     std::vector<cudaTextureObject_t> mMaterialTextureObjects;
     // A third set, apart from both of the above: a projector's slide belongs to
     // the light set, so it survives a material reload, and it is not the

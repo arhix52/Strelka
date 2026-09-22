@@ -22,6 +22,11 @@ goes on the OPTIXIR include path *ahead* of the real one, so `openpbr.h` and
 every header it includes relatively resolve to the rewritten copies while the
 submodule stays byte-identical to upstream (last checked at 9edf806).
 
+Fast-math can also move remapped random values and dot products a few ulps out
+of their documented domains. The device copy clamps those inputs before the
+OpenPBR Fresnel and lobe-selection math so a rare edge sample cannot become a
+NaN/firefly.
+
 The third incompatibility -- the CUDA interop's `using vec3 = float3`, which has
 no three-argument constructor, no `operator[]` and no `.rgb` -- is *not* handled
 here. It is answered from the including side, because the interop layer offers
@@ -50,6 +55,43 @@ NAME_BELOW = re.compile(r"^\w+\s*\(")
 # The two table-declaration macros, as the CUDA interop defines them.
 TABLE_MACRO = re.compile(r"^#define (OPENPBR_(?:MAYBE_)?CONSTEXPR_GLOBAL) static inline constexpr\s*$")
 
+NUMERICAL_REWRITES = (
+    (
+        '    OPENPBR_ASSERT(rand >= 0.0f, "It is assumed that the random number is already >= 0");',
+        '    if (!(rand >= 0.0f))\n        rand = 0.0f;',
+    ),
+    (
+        '    OPENPBR_ASSERT(cos_theta_i >= 0.0f, "Fresnel input cosine must be non-negative");',
+        '    const float safe_cos_theta_i = cos_theta_i >= 0.0f ? min(cos_theta_i, 1.0f) : 0.0f;',
+    ),
+    (
+        '    const float sin_theta_i_squared = 1.0f - openpbr_square(cos_theta_i);',
+        '    const float sin_theta_i_squared = 1.0f - openpbr_square(safe_cos_theta_i);',
+    ),
+    (
+        '    const float eta_t_over_eta_i_cos_theta_i = eta_t_over_eta_i * cos_theta_i;',
+        '    const float eta_t_over_eta_i_cos_theta_i = eta_t_over_eta_i * safe_cos_theta_i;',
+    ),
+    (
+        '    const float Rs = openpbr_square((cos_theta_i - eta_t_over_eta_i_cos_theta_t) / (cos_theta_i + eta_t_over_eta_i_cos_theta_t));',
+        '    const float Rs = openpbr_square((safe_cos_theta_i - eta_t_over_eta_i_cos_theta_t) /\n'
+        '                                    (safe_cos_theta_i + eta_t_over_eta_i_cos_theta_t));',
+    ),
+    (
+        '    OPENPBR_ASSERT(cos_theta >= 0.0f, "F82-tint input cosine must be non-negative");',
+        '    const float safe_cos_theta = cos_theta >= 0.0f ? min(cos_theta, 1.0f) : 0.0f;',
+    ),
+    (
+        '    const float one_minus_cos_theta = 1.0f - cos_theta;',
+        '    const float one_minus_cos_theta = 1.0f - safe_cos_theta;',
+    ),
+    (
+        '    const vec3 offset_from_r = (white_minus_r - b * cos_theta * one_minus_cos_theta) * openpbr_fifth_power(one_minus_cos_theta);',
+        '    const vec3 offset_from_r = (white_minus_r - b * safe_cos_theta * one_minus_cos_theta) *\n'
+        '                               openpbr_fifth_power(one_minus_cos_theta);',
+    ),
+)
+
 
 def main() -> int:
     if len(sys.argv) != 3:
@@ -67,6 +109,7 @@ def main() -> int:
         shutil.rmtree(dst)
 
     patched = 0
+    numerical = 0
     for path in sorted(src.rglob("*.h")):
         out = dst / path.relative_to(src)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -81,13 +124,21 @@ def main() -> int:
             if ONE_LINE.match(line) or two_line:
                 lines[i] = "__device__ inline " + line
                 patched += 1
-        out.write_text("".join(lines), encoding="utf-8")
+        text = "".join(lines)
+        if path.name == "openpbr_lobe_utils.h":
+            for before, after in NUMERICAL_REWRITES:
+                count = text.count(before)
+                if count != 1:
+                    raise RuntimeError(f"OpenPBR numerical guard matched {count} times: {before}")
+                text = text.replace(before, after)
+                numerical += 1
+        out.write_text(text, encoding="utf-8")
 
     # A count that drops after a submodule update means the regexes stopped
     # matching a form upstream now uses, and the build will fail with "calling a
     # __host__ function from a __device__ function" rather than anything that
     # names this script. Printed so the number is in the build log either way.
-    print(f"openpbr device headers: patched {patched} declarations into {dst}")
+    print(f"openpbr device headers: patched {patched} declarations and {numerical} numerical guards into {dst}")
     return 0
 
 

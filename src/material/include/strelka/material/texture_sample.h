@@ -16,6 +16,14 @@ DEVICE_FUNC float4 texture_sample_2d(cudaTextureObject_t tex, float2 uv)
     return tex2D<float4>(tex, uv.x, uv.y);
 }
 
+DEVICE_FUNC float4 texture_sample_2d(cudaTextureObject_t tex, float2 uv, float4 gradients)
+{
+    const float2 dx = make_float2(gradients.x, gradients.y);
+    const float2 dy = make_float2(gradients.z, gradients.w);
+    return dot(dx, dx) + dot(dy, dy) > 0.0f ? tex2DGrad<float4>(tex, uv.x, uv.y, dx, dy) :
+                                             tex2D<float4>(tex, uv.x, uv.y);
+}
+
 // Convenience: sample by index into an array of texture objects
 // Returns white (1,1,1,1) if index < 0 (no texture bound).
 DEVICE_FUNC float4 texture_sample_2d(const cudaTextureObject_t* textures,
@@ -24,6 +32,14 @@ DEVICE_FUNC float4 texture_sample_2d(const cudaTextureObject_t* textures,
     if (tex_index < 0)
         return make_float4(1.0f, 1.0f, 1.0f, 1.0f);
     return tex2D<float4>(textures[tex_index], uv.x, uv.y);
+}
+
+DEVICE_FUNC float4 texture_sample_2d(const cudaTextureObject_t* textures,
+                                     int tex_index, float2 uv, float4 gradients)
+{
+    if (tex_index < 0)
+        return make_float4(1.0f, 1.0f, 1.0f, 1.0f);
+    return texture_sample_2d(textures[tex_index], uv, gradients);
 }
 
 // ===========================================================================

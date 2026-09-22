@@ -79,7 +79,7 @@ struct Plan
     bool srgbTextureFlag = false;
     /// Ask CUDA for the sRGB block-compressed channel kind.
     bool srgbBlockFormat = false;
-    /// Re-normalise every level after resampling. Normal maps only.
+    /// Build variance-preserving normal-map mips. Normal maps only.
     bool normalizeLevels = false;
     /// Resample in sRGB space rather than on the encoded bytes.
     bool resampleInSrgb = false;
@@ -91,14 +91,26 @@ struct Plan
 
     size_t totalBytes() const
     {
-        return levelBytes(0);
+        size_t bytes = 0;
+        for (uint32_t level = 0; level < levels; ++level)
+            bytes += levelBytes(level);
+        return bytes;
     }
 };
+
+inline uint32_t mipLevelCount(int width, int height)
+{
+    uint32_t levels = 1;
+    for (int edge = std::max(width, height); edge > 1; edge >>= 1)
+        ++levels;
+    return levels;
+}
 
 inline Plan planTexture(const PlanInputs& in)
 {
     Plan plan;
     plan.extent = resolveExtent(in.srcWidth, in.srcHeight, in.maxDimension, in.downscale);
+    plan.levels = mipLevelCount(plan.extent.width, plan.extent.height);
 
     const bool wantsSrgb = in.kind == Kind::Color;
     const bool eightBit = !in.sourceIsFloat && !in.sourceIs16Bit;
@@ -109,7 +121,10 @@ inline Plan planTexture(const PlanInputs& in)
     recipe.hasAlpha = in.hasAlpha;
     recipe.sourceIsFloat = in.sourceIsFloat;
     recipe.sourceIs16Bit = in.sourceIs16Bit;
-    recipe.compress = in.blockCompress;
+    // BC5 has no third channel for the prefiltered normal concentration. Keep
+    // normal maps RGBA8 so mip alpha can carry the statistic used by specular
+    // antialiasing; colour/scalar maps retain their normal compression policy.
+    recipe.compress = in.blockCompress && in.kind != Kind::Normal;
     plan.format = texture::chooseNativeFormat(recipe);
 
     plan.srgbBlockFormat = wantsSrgb && isCompressed(plan.format);

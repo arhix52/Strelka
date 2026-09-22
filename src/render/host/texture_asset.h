@@ -112,6 +112,13 @@ constexpr NativeFormat chooseNativeFormat(const Recipe& recipe)
     if (!recipe.compress)
         return NativeFormat::RGBA8;
 
+    // BC1/ASTC colour encoders are not safe scalar storage. Their RGB endpoint
+    // quantisation and block interpolation become visible steps after a
+    // roughness lookup or a height derivative. Until a one-channel data format
+    // is carried by both backends, keep authored data maps lossless at 8 bit.
+    if (recipe.semantic == Semantic::NonColor)
+        return NativeFormat::RGBA8;
+
     if (recipe.target == TargetProfile::AppleAstc)
         return recipe.semantic == Semantic::Normal ? NativeFormat::ASTC4x4 : NativeFormat::ASTC6x6;
 

@@ -37,7 +37,10 @@ inline OpenPBRParams openpbr_from_material_params(const MaterialParams& p)
     o.specular_ior = (p.ior > 0.0f) ? p.ior : 1.5f;
     o.specular_color = OpenPBRColor{ p.specular_color.x, p.specular_color.y, p.specular_color.z };
 
-    o.specular_weight = std::clamp(2.0f * p.specular, 0.0f, 1.0f);
+    // KHR_materials_specular only scales the dielectric BRDF; it explicitly has
+    // no effect on metals. OpenPBR's specular_weight also darkens its metal
+    // lobe, so a fully metallic glTF surface must keep the neutral weight.
+    o.specular_weight = o.base_metalness >= 1.0f ? 1.0f : std::clamp(2.0f * p.specular, 0.0f, 1.0f);
 
     // APPROX. MaterialParams keeps an angle; OpenPBR keeps its cosine and sine,
     // so that a texture-filtered angle cannot wrap through the discontinuity.
@@ -103,6 +106,8 @@ inline OpenPBRParams openpbr_from_material_params(const MaterialParams& p)
     // it), and Strelka already resolves cutouts before shading. Carried so the
     // block is complete, not so the BSDF reads it.
     o.geometry_opacity = std::clamp(p.base_color_alpha, 0.0f, 1.0f);
+    o.texture_normal_scale = p.normal_scale;
+    o.texture_scalar_flags = 1u | OPENPBR_ROUGHNESS_MULTIPLY | OPENPBR_TEXTURES_GLTF;
 
     // -- Texture transform --------------------------------------------------
     o.uv_offset_x = p.uv_offset_x;

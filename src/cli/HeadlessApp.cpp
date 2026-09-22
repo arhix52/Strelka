@@ -85,22 +85,19 @@ uint32_t parseSamplerName(const std::string& name)
 uint32_t parseReconstructionFilterName(const std::string& name)
 {
     if (name == "box")
-    {
         return 0;
-    }
-    if (name == "mitchell")
-    {
+    if (name == "mitchell" || name == "mitchell-netravali")
         return 1;
-    }
     if (name == "tent")
-    {
         return 2;
-    }
     if (name == "lanczos2" || name == "lanczos")
-    {
         return 3;
-    }
-    throw std::invalid_argument("Unknown reconstruction filter: " + name + " (box|tent|mitchell|lanczos2)");
+    if (name == "gaussian")
+        return 4;
+    if (name == "blackman-harris" || name == "blackman_harris")
+        return 5;
+    throw std::invalid_argument(
+        "Unknown reconstruction filter: " + name + " (box|mitchell|tent|lanczos2|gaussian|blackman-harris)");
 }
 
 uint32_t parseTonemapName(const std::string& name)
@@ -120,6 +117,10 @@ uint32_t parseTonemapName(const std::string& name)
     if (name == "filmic")
     {
         return 3;
+    }
+    if (name == "agx")
+    {
+        return 4;
     }
     throw std::invalid_argument("Unknown tonemap: " + name);
 }
@@ -212,6 +213,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.clampIndirect = static_cast<float>(*v);
     }
+    if (auto v = tbl["render"]["clamp_direct"].value<double>())
+    {
+        cfg.clampDirect = static_cast<float>(*v);
+    }
     // 1 = shading normals, 3..6 = denoiser guides; see DebugMode in ShaderTypes.h.
     if (auto v = tbl["render"]["debug"].value<int64_t>())
         cfg.debugMode = (uint32_t)*v;
@@ -221,6 +226,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.textureDownscale = (uint32_t)*v;
     if (auto v = tbl["render"]["texture_max_dim"].value<int64_t>())
         cfg.textureMaxDim = (uint32_t)*v;
+    if (auto v = tbl["render"]["texture_compress"].value<bool>())
+        cfg.textureCompress = *v;
     if (auto v = tbl["render"]["volume_model"].value<std::string>())
         cfg.volumeModel = (*v == "cycles") ? 1u : 0u;
     if (auto v = tbl["render"]["material_model"].value<std::string>())
@@ -249,6 +256,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.textureLod = *v;
     if (auto v = tbl["render"]["reconstruction_filter"].value<std::string>())
         cfg.reconstructionFilter = parseEnumOrDefault(*v, parseReconstructionFilterName, 0, "reconstruction filter");
+    if (auto v = tbl["render"]["texture_lod_bias"].value<double>())
+        cfg.textureLodBias = static_cast<float>(std::clamp(*v, -4.0, 4.0));
     if (auto v = tbl["render"]["guide_primary_hit"].value<bool>())
         cfg.guidePrimaryHit = *v;
     if (auto v = tbl["render"]["denoise_firefly_clamp"].value<double>())
@@ -563,6 +572,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/tonemapperType", m_config.tonemapType);
     m_settings->setAs<uint32_t>("render/pt/debug", m_config.debugMode);
     m_settings->setAs<uint32_t>("render/pt/samplerType", m_config.samplerType);
+    m_settings->setAs<uint32_t>("render/pt/reconstructionFilter", m_config.reconstructionFilter);
     m_settings->setAs<uint32_t>("render/pt/blueNoiseSwitchSpp", m_config.blueNoiseSwitchSpp);
     m_settings->setAs<float>("render/pt/upscaleFactor", m_config.upscaleFactor);
     m_settings->setAs<bool>("render/pt/enableUpscale", m_config.upscale);
@@ -592,8 +602,9 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<uint32_t>("render/pt/restirFinalVisibilityMaxAge", m_config.restirFinalVisibilityMaxAge);
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
+    m_settings->setAs<float>("render/pt/clampDirect", m_config.clampDirect);
     m_settings->setAs<uint32_t>("render/pt/textureLod", m_config.textureLod ? 1u : 0u);
-    m_settings->setAs<uint32_t>("render/pt/reconstructionFilter", m_config.reconstructionFilter);
+    m_settings->setAs<float>("render/pt/textureLodBias", m_config.textureLodBias);
     m_settings->setAs<uint32_t>("render/pt/guidePrimaryHit", m_config.guidePrimaryHit ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
@@ -605,6 +616,7 @@ void HeadlessApp::populateSettings()
     // Headless: nothing picks, nothing saves the scene back out.
     m_settings->setAs<bool>("scene/releaseHostGeometry", m_config.auditMovingLights == 0);
     m_settings->setAs<uint32_t>("render/texture/downscale", m_config.textureDownscale);
+    m_settings->setAs<bool>("render/texture/compress", m_config.textureCompress);
     // The diffuse/specular split of the first event. Off by default: nothing
     // reads it back, and writing it costs four scattered records per pixel per
     // launch. See docs/open-perf.md.
@@ -740,6 +752,9 @@ bool HeadlessApp::saveOutput(Buffer* buf, const std::string& path)
                 break;
             case oka::tonemap::ToneMapperType::eFilmic:
                 c = oka::tonemap::ACESFilm(c);
+                break;
+            case oka::tonemap::ToneMapperType::eAgX:
+                c = oka::tonemap::AgX(c);
                 break;
             case oka::tonemap::ToneMapperType::eNone:
                 break;
@@ -1136,6 +1151,10 @@ int HeadlessApp::run()
         {
             const uint32_t samplesBeforeLaunch = static_cast<uint32_t>(m_sharedCtx->mSubframeIndex);
             m_render->renderSync(outputBuf.get());
+            if (m_render->deviceError())
+            {
+                break;
+            }
 
             if (!announced && !m_config.capturePath.empty())
             {

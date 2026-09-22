@@ -77,7 +77,12 @@ inline const char* cameraDumpSamplerName(uint32_t samplerType)
 
 inline const char* cameraDumpReconstructionFilterName(uint32_t filter)
 {
-    return filter == 1u ? "mitchell" : filter == 2u ? "tent" : filter == 3u ? "lanczos2" : "box";
+    return filter == 1u ? "mitchell" :
+           filter == 2u ? "tent" :
+           filter == 3u ? "lanczos2" :
+           filter == 4u ? "gaussian" :
+           filter == 5u ? "blackman-harris" :
+                          "box";
 }
 
 /// `tonemap.type` likewise.
@@ -93,6 +98,8 @@ inline const char* cameraDumpTonemapName(uint32_t tonemapperType)
         return "aces";
     case 3:
         return "filmic";
+    case 4:
+        return "agx";
     default:
         return "none";
     }

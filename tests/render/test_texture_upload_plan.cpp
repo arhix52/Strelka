@@ -50,6 +50,19 @@ TEST_CASE("levelBytes counts whole blocks, and rounds up")
     CHECK(levelBytes(Format::BC3, 1024, 1024) * 4 == levelBytes(Format::RGBA8, 1024, 1024));
 }
 
+TEST_CASE("material textures carry a complete mip chain")
+{
+    CHECK(mipLevelCount(1, 1) == 1);
+    CHECK(mipLevelCount(2048, 1024) == 12);
+
+    PlanInputs in;
+    in.srcWidth = 4;
+    in.srcHeight = 4;
+    const Plan plan = planTexture(in);
+    CHECK(plan.levels == 3);
+    CHECK(plan.totalBytes() == (4 * 4 + 2 * 2 + 1) * 4);
+}
+
 TEST_CASE("only a colour texture gets a transfer function")
 {
     PlanInputs in;
@@ -98,10 +111,16 @@ TEST_CASE("format choice: what compresses, and to what")
     in.hasAlpha = true;
     CHECK(planTexture(in).format == Format::BC3);
 
-    // A normal map takes BC5 whether or not it has alpha: three channels do not
-    // survive a shared 5:6:5 line, and Z is rebuilt in the shader.
+    // Block colour compression creates plateaus in roughness and spikes in a
+    // finite-difference bump. Data maps stay exact until BC4 (or equivalent)
+    // is represented by every backend.
+    in.kind = Kind::NonColor;
+    CHECK(planTexture(in).format == Format::RGBA8);
+
+    // Variance-aware normal mips need alpha for |E[n]|, which BC5 discards.
+    // Keep RGBA8 until the backend has a compressed three-statistic format.
     in.kind = Kind::Normal;
-    CHECK(planTexture(in).format == Format::BC5);
+    CHECK(planTexture(in).format == Format::RGBA8);
     CHECK_FALSE(planTexture(in).srgbBlockFormat);
 
     // More than 8 bits per channel is the last thing to quantise: a float or
@@ -143,9 +162,9 @@ TEST_CASE("totalBytes reflects block compression")
     in.kind = Kind::Color;
 
     const Plan flat = planTexture(in);
-    CHECK(flat.totalBytes() == 1024ull * 1024 * 4);
+    CHECK(flat.totalBytes() > 1024ull * 1024 * 4);
     in.blockCompress = true;
-    CHECK(planTexture(in).totalBytes() == flat.totalBytes() / 8);
+    CHECK(planTexture(in).levelBytes(0) == flat.levelBytes(0) / 8);
 }
 
 TEST_CASE("the cache file's format tags are fixed, because files outlive builds")

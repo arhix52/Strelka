@@ -140,6 +140,7 @@ public:
         MaterialParams params = {}; // GPU-ready PBR material parameters
 
         OpenPBRParams openpbr = openpbr_make_default_params();
+        OpenPBRLayeredTextureParams openpbrLayeredTexture = {};
 
         std::array<std::string, MAX_OPENPBR_TEXTURES> openpbrTexPaths;
         /// Per-slot override of the renderer's own encoding guess, from a
@@ -161,8 +162,8 @@ public:
         uint32_t tangent = 0;
 
         uint32_t normal = 0;
-        uint32_t uv = 0;
-        uint32_t uv1 = 0; // byte 24, packUV format
+        uint32_t uv = 0; // byte 20, TEXCOORD_0.x float bits
+        uint32_t uv1 = 0; // byte 24, TEXCOORD_0.y float bits
         uint32_t color = 0xFFFFFFFFu; // byte 28, packed RGBA8, linear
     };
     static_assert(sizeof(Vertex) == 32, "Scene::Vertex must stay 32 bytes (Metal vtxStride)");
@@ -687,6 +688,21 @@ public:
         return mExposure;
     }
 
+    struct PresentationDesc
+    {
+        uint32_t tonemapperType = 1; // 0=None, 1=Reinhard, 2=ACES, 3=Filmic, 4=AgX
+        float gamma = 2.4f;
+        uint32_t materialModel = 0; // 0=glTF, 1=OpenPBR
+    };
+    void setPresentation(const PresentationDesc& desc)
+    {
+        mPresentation = desc;
+    }
+    const std::optional<PresentationDesc>& getPresentation() const
+    {
+        return mPresentation;
+    }
+
     struct AtmosphereDesc
     {
         glm::float3 color = glm::float3(1.0f); // single-scattering albedo
@@ -874,6 +890,7 @@ private:
     std::optional<EnvLightDesc> mEnvLight;
     std::optional<AtmosphereDesc> mAtmosphere;
     std::optional<ExposureDesc> mExposure;
+    std::optional<PresentationDesc> mPresentation;
 
     std::set<uint32_t> mDirtyInstances;
 

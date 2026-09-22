@@ -20,6 +20,9 @@ float3 toneMapForDisplay(const float3 color, constant UniformsTonemap& uniforms)
     case ToneMapperType::eFilmic:
         result = ACESFilm(color, maxOutput);
         break;
+    case ToneMapperType::eAgX:
+        result = AgX(color, maxOutput);
+        break;
     case ToneMapperType::eNone:
         result = color;
         break;

@@ -4,6 +4,7 @@ Render a production .blend in Cycles as a reference for Strelka's beauty pass.
 
     blender -b <file.blend> -P tools/feature_tests/beauty_ref.py -- --out FILE
             [--width 640] [--height 480] [--merge] [--cpu] [--seconds 60]
+            [--spp 4096] [--clamp 0] [--scene-color] [--denoise]
 
 Unlike the feature-test harness, which builds its scenes and therefore knows
 their exposure exactly, this renders a scene someone else authored. So it fixes
@@ -44,7 +45,7 @@ def merge_scenes():
 
 
 def pick_device(sc, want_cpu):
-    """Metal GPU unless asked otherwise.
+    """Use the fastest Cycles GPU backend available unless asked otherwise.
 
     Asked otherwise matters: on unified memory the GPU allocation comes out of
     the same pool as the scene, and a 50 M triangle forest is killed outright
@@ -56,15 +57,20 @@ def pick_device(sc, want_cpu):
         return
     try:
         prefs = bpy.context.preferences.addons["cycles"].preferences
-        prefs.compute_device_type = "METAL"
-        prefs.get_devices()
-        found = False
-        for dev in prefs.devices:
-            dev.use = True
-            found = found or dev.type == "METAL"
-        sc.cycles.device = "GPU" if found else "CPU"
-    except (KeyError, AttributeError, TypeError):
-        sc.cycles.device = "CPU"
+        for backend in ("OPTIX", "CUDA", "HIP", "METAL"):
+            try:
+                prefs.compute_device_type = backend
+                prefs.get_devices()
+            except (TypeError, ValueError):
+                continue
+            if any(dev.type == backend for dev in prefs.devices):
+                for dev in prefs.devices:
+                    dev.use = dev.type == backend
+                sc.cycles.device = "GPU"
+                return
+    except (KeyError, AttributeError):
+        pass
+    sc.cycles.device = "CPU"
 
 
 def main():
@@ -78,6 +84,8 @@ def main():
     width = opt("--width", 640, int)
     height = opt("--height", 480, int)
     seconds = opt("--seconds", 60.0, float)
+    spp = opt("--spp", 4096, int)
+    clamp = opt("--clamp", 0.0, float)
     if "--merge" in argv:
         merge_scenes()
 
@@ -89,11 +97,11 @@ def main():
     # that always arrives, and the noise it arrives with is visible in the
     # comparison anyway.
     sc.cycles.time_limit = seconds
-    sc.cycles.samples = 4096
-    sc.cycles.use_denoising = False
+    sc.cycles.samples = spp
+    sc.cycles.use_denoising = "--denoise" in argv
     sc.cycles.use_adaptive_sampling = True
     sc.cycles.blur_glossy = 0.0
-    sc.cycles.sample_clamp_indirect = 0.0
+    sc.cycles.sample_clamp_indirect = clamp
     sc.cycles.sample_clamp_direct = 0.0
 
     sc.render.resolution_x = width
@@ -108,14 +116,16 @@ def main():
     # has to be the render, not a graded version of it.
     sc.render.use_sequencer = False
     sc.render.use_compositing = False
-    sc.view_settings.view_transform = "Standard"
-    sc.view_settings.look = "None"
-    sc.view_settings.exposure = 0.0
-    sc.view_settings.gamma = 1.0
-    sc.render.image_settings.file_format = "OPEN_EXR"
+    if "--scene-color" not in argv:
+        sc.view_settings.view_transform = "Standard"
+        sc.view_settings.look = "None"
+        sc.view_settings.exposure = 0.0
+        sc.view_settings.gamma = 1.0
+    sc.render.image_settings.file_format = "PNG" if out.lower().endswith(".png") else "OPEN_EXR"
     sc.render.image_settings.color_mode = "RGB"
-    sc.render.image_settings.color_depth = "32"
-    sc.render.image_settings.exr_codec = "ZIP"
+    sc.render.image_settings.color_depth = "16" if out.lower().endswith(".png") else "32"
+    if not out.lower().endswith(".png"):
+        sc.render.image_settings.exr_codec = "ZIP"
 
     sc.render.filepath = out
     bpy.ops.render.render(write_still=True)

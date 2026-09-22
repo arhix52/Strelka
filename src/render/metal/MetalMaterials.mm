@@ -536,7 +536,8 @@ void MetalMaterials::publishParameters(Scene* scene)
                 // Hair keeps its own BSDF: OpenPBR has no fibre model, and a
                 // strand shaded as a surface is the defect open-defects.md entry
                 // 3 was closed for.
-                openpbrParams.push_back(openpbr_from_material_params(p));
+                OpenPBRParams converted = openpbr_from_material_params(p);
+                openpbrParams.push_back(converted);
                 st.gpuMaterials.back().material_type = MATERIAL_TYPE_OPENPBR;
                 mSceneHasOpenPBRMaterials = true;
             }
@@ -784,6 +785,7 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         if (mOpenPBRTexBuffer && (index + 1) * sizeof(OpenPBRTextures) <= mOpenPBRTexBuffer->length())
         {
             auto* table = static_cast<OpenPBRTextures*>(mOpenPBRTexBuffer->contents());
+            table[index].layered = currMatDesc.openpbrLayeredTexture;
             for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
             {
                 const auto kind = openpbrSlotKind(slot, currMatDesc.openpbrTexColorSpace[slot]);

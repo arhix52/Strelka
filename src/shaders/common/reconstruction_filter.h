@@ -3,6 +3,15 @@
 
 #include <strelka/material/material_math.h>
 
+#ifndef RECONSTRUCTION_FILTER_BOX
+#define RECONSTRUCTION_FILTER_BOX 0u
+#define RECONSTRUCTION_FILTER_MITCHELL 1u
+#define RECONSTRUCTION_FILTER_TENT 2u
+#define RECONSTRUCTION_FILTER_LANCZOS2 3u
+#define RECONSTRUCTION_FILTER_GAUSSIAN 4u
+#define RECONSTRUCTION_FILTER_BLACKMAN_HARRIS 5u
+#endif
+
 struct ReconstructionFilterSample
 {
     float offset;
@@ -16,6 +25,73 @@ DEVICE_FUNC ReconstructionFilterSample sampleTent(float xi)
     const float side = 2.0f * u - 1.0f;
     const float magnitude = radius * (1.0f - sqrtf(1.0f - fabsf(side)));
     return { copysignf(magnitude, side), 1.0f };
+}
+
+DEVICE_FUNC float reconstructionErf(float x)
+{
+    // Abramowitz-Stegun 7.1.26 is accurate enough for the inverse-CDF search.
+    const float sign = x < 0.0f ? -1.0f : 1.0f;
+    x = fabsf(x);
+    const float t = 1.0f / (1.0f + 0.3275911f * x);
+    const float p = (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t +
+                     0.254829592f) *
+                    t;
+    return sign * (1.0f - p * expf(-x * x));
+}
+
+DEVICE_FUNC float gaussianCdf(float x)
+{
+    constexpr float radius = 1.5f;
+    constexpr float edge = 0.0111089965f;
+    constexpr float gaussianIntegralScale = 0.6266570687f;
+    return gaussianIntegralScale * (reconstructionErf(1.4142135624f * x) +
+                                    reconstructionErf(1.4142135624f * radius)) -
+           edge * (x + radius);
+}
+
+DEVICE_FUNC ReconstructionFilterSample sampleGaussian(float xi)
+{
+    constexpr float radius = 1.5f;
+    constexpr float integral = 1.2166034551f;
+    const float target = fminf(fmaxf(xi, 0.0f), 1.0f) * integral;
+    float lo = -radius;
+    float hi = radius;
+    for (int i = 0; i < 12; ++i)
+    {
+        const float mid = 0.5f * (lo + hi);
+        if (gaussianCdf(mid) < target)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return { 0.5f * (lo + hi), 1.0f };
+}
+
+DEVICE_FUNC float blackmanHarrisCdf(float x)
+{
+    constexpr float radius = 2.0f;
+    const float phase = M_PI_F * x / radius;
+    return 0.35875f * (x + radius) + 0.48829f * radius / M_PI_F * sinf(phase) +
+           0.14128f * radius / (2.0f * M_PI_F) * sinf(2.0f * phase) +
+           0.01168f * radius / (3.0f * M_PI_F) * sinf(3.0f * phase);
+}
+
+DEVICE_FUNC ReconstructionFilterSample sampleBlackmanHarris(float xi)
+{
+    constexpr float radius = 2.0f;
+    constexpr float integral = 1.435f;
+    const float target = fminf(fmaxf(xi, 0.0f), 1.0f) * integral;
+    float lo = -radius;
+    float hi = radius;
+    for (int i = 0; i < 12; ++i)
+    {
+        const float mid = 0.5f * (lo + hi);
+        if (blackmanHarrisCdf(mid) < target)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return { 0.5f * (lo + hi), 1.0f };
 }
 
 // clang-format off
@@ -175,6 +251,26 @@ DEVICE_FUNC ReconstructionFilterSample sampleMitchell(float xi)
     result.offset = negativeSide ? -radius : radius;
     result.weight = radius > zeroCrossing ? -(367.0f / 343.0f) : (367.0f / 343.0f);
     return result;
+}
+
+DEVICE_FUNC ReconstructionFilterSample reconstructionFilterSample(unsigned int filter, float xi)
+{
+    if (filter == RECONSTRUCTION_FILTER_MITCHELL)
+        return sampleMitchell(xi);
+    if (filter == RECONSTRUCTION_FILTER_TENT)
+        return sampleTent(xi);
+    if (filter == RECONSTRUCTION_FILTER_LANCZOS2)
+        return sampleLanczos2(xi);
+    if (filter == RECONSTRUCTION_FILTER_GAUSSIAN)
+        return sampleGaussian(xi);
+    if (filter == RECONSTRUCTION_FILTER_BLACKMAN_HARRIS)
+        return sampleBlackmanHarris(xi);
+    return { xi - 0.5f, 1.0f };
+}
+
+DEVICE_FUNC bool reconstructionFilterIsSigned(unsigned int filter)
+{
+    return filter == RECONSTRUCTION_FILTER_MITCHELL || filter == RECONSTRUCTION_FILTER_LANCZOS2;
 }
 
 #endif

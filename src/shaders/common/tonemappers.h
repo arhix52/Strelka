@@ -103,6 +103,7 @@ enum class ToneMapperType : uint32_t
     eReinhard,
     eACES,
     eFilmic,
+    eAgX,
 };
 
 inline float3 nonnegativeDisplayRadiance(const float3 color)
@@ -227,6 +228,89 @@ inline float3 ACESFilm(float3 x, const float maxOutput)
         return sdr;
     }
     return spendHeadroomOnHighlights(x, sdr, maxOutput);
+}
+
+// Blender 5.x AgX Base Contrast, expressed analytically so CPU and GPU display
+// paths use the same transform without shipping an OCIO runtime or a 57^3 LUT.
+// The formation curve and matrices come from Blender's AgX LUT generator.
+static TONEMAP_CONST float3x3 AgXInputMat =
+{
+    {0.5448147465f, 0.3737873984f, 0.0813978551f},
+    {0.1404169485f, 0.7541375546f, 0.1054454970f},
+    {0.0888104196f, 0.1788717564f, 0.7323178240f}
+};
+
+static TONEMAP_CONST float3x3 AgXOutputMat =
+{
+    { 1.9648874117f, -0.8559884957f, -0.1088989160f},
+    {-0.2993133649f,  1.3263979646f, -0.0270845997f},
+    {-0.1643527425f, -0.2381839694f,  1.4025367120f}
+};
+
+inline float agxLog2(const float v)
+{
+#ifdef __METAL_VERSION__
+    return metal::log2(v);
+#else
+    return std::log2(v);
+#endif
+}
+
+inline float agxAbs(const float v)
+{
+#ifdef __METAL_VERSION__
+    return metal::abs(v);
+#else
+    return std::abs(v);
+#endif
+}
+
+inline float agxSqrt(const float v)
+{
+#ifdef __METAL_VERSION__
+    return metal::sqrt(v);
+#else
+    return std::sqrt(v);
+#endif
+}
+
+inline float agxFormation(float x)
+{
+    constexpr float minEv = -12.4739311883f;
+    constexpr float maxEv = 4.0260688117f;
+    constexpr float pivot = 0.6060606061f;
+    constexpr float pivotValue = 0.4894370896f;
+    constexpr float d = -80.0f / 55.0f;
+    constexpr float e = 132.0f / 55.0f;
+
+    x = saturate((agxLog2(x) - minEv) / (maxEv - minEv));
+    const bool upper = x >= pivot;
+    const float a = upper ? 0.9049684268f : -1.1441749659f;
+    const float b = upper ? -27.9642728229f : 35.3559527134f;
+    const float c = upper ? 46.1410501578f : -58.3373219771f;
+    const float base = agxAbs(1.0f + a * (x - pivot) * agxSqrt(agxAbs(b + c * x)));
+    return pivotValue + (d + e * x) / pow(base, 1.0f / 1.5f);
+}
+
+inline float3 AgX(float3 color)
+{
+    color = MAKE_FLOAT3(color.x > 2.0e-10f ? color.x : 2.0e-10f,
+                        color.y > 2.0e-10f ? color.y : 2.0e-10f,
+                        color.z > 2.0e-10f ? color.z : 2.0e-10f);
+    color = transpose(AgXInputMat) * color;
+    color = MAKE_FLOAT3(agxFormation(color.x), agxFormation(color.y), agxFormation(color.z));
+    color = MAKE_FLOAT3(pow(color.x, 2.4f), pow(color.y, 2.4f), pow(color.z, 2.4f));
+    return transpose(AgXOutputMat) * color;
+}
+
+inline float3 AgX(float3 color, const float maxOutput)
+{
+    const float3 sdr = AgX(color);
+    if (maxOutput <= 1.0f)
+    {
+        return sdr;
+    }
+    return spendHeadroomOnHighlights(color, sdr, maxOutput);
 }
 
 // original implementation https://github.com/NVIDIAGameWorks/Falcor/blob/5236495554f57a734cc815522d95ae9a7dfe458a/Source/RenderPasses/ToneMapper/ToneMapping.ps.slang

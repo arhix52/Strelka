@@ -11,7 +11,7 @@ static __forceinline__ __device__ float resolveOpacity(const MaterialParams& mat
                                                        const cudaTextureObject_t* textures,
                                                        float2 uv)
 {
-    if (material.alpha_mode == ALPHA_MODE_OPAQUE)
+    if (material.alpha_mode == ALPHA_MODE_OPAQUE || material.alpha_mode == ALPHA_MODE_SHADOW_TRANSPARENT)
     {
         return 1.0f;
     }

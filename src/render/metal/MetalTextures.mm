@@ -28,7 +28,7 @@ namespace oka::metal
 {
 namespace
 {
-inline constexpr uint32_t kMetalPayloadVersion = 3;
+inline constexpr uint32_t kMetalPayloadVersion = 4;
 
 struct CachedTextureHeader
 {
@@ -372,6 +372,9 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         STRELKA_ERROR("Unable to load texture from file: {}", fileName.c_str());
         return Payload{};
     }
+    const bool normalMap = kind == TextureKind::Normal && !srgb;
+    if (normalMap)
+        bc::normalizeNormalMap(data, texWidth, texHeight);
 
     const texture::Extent extent = texture::resolveExtent(texWidth, texHeight, params.maxDimension, params.downscale);
     if (extent.width != texWidth || extent.height != texHeight)
@@ -380,12 +383,18 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         // free() under another name, so it has to come from malloc.
         // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
         auto* scaled = (stbi_uc*)malloc((size_t)extent.width * extent.height * 4);
-        const int ok =
-            scaled ?
-                (srgb ? stbir_resize_uint8_srgb(
+        int ok = 0;
+        if (scaled && normalMap)
+        {
+            bc::downsampleNormalMoments(data, texWidth, texHeight, scaled, extent.width, extent.height);
+            ok = 1;
+        }
+        else if (scaled)
+        {
+            ok = srgb ? stbir_resize_uint8_srgb(
                             data, texWidth, texHeight, 0, scaled, extent.width, extent.height, 0, 4, 3, 0) :
-                        stbir_resize_uint8(data, texWidth, texHeight, 0, scaled, extent.width, extent.height, 0, 4)) :
-                0;
+                        stbir_resize_uint8(data, texWidth, texHeight, 0, scaled, extent.width, extent.height, 0, 4);
+        }
         if (ok)
         {
             stbi_image_free(data);
@@ -418,8 +427,12 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         const int w = std::max(1, texWidth >> l);
         const int h = std::max(1, texHeight >> l);
         std::vector<uint8_t> next((size_t)w * h * 4);
-        const int ok = srgb ? stbir_resize_uint8_srgb(prev, prevW, prevH, 0, next.data(), w, h, 0, 4, 3, 0) :
-                              stbir_resize_uint8(prev, prevW, prevH, 0, next.data(), w, h, 0, 4);
+        int ok = 1;
+        if (normalMap)
+            bc::downsampleNormalMoments(prev, prevW, prevH, next.data(), w, h);
+        else
+            ok = srgb ? stbir_resize_uint8_srgb(prev, prevW, prevH, 0, next.data(), w, h, 0, 4, 3, 0) :
+                        stbir_resize_uint8(prev, prevW, prevH, 0, next.data(), w, h, 0, 4);
         if (!ok)
         {
             levels = l;
@@ -429,16 +442,6 @@ MetalTextures::Payload MetalTextures::decodeToPayload(const std::string& fileNam
         prev = mips.back().data();
         prevW = w;
         prevH = h;
-    }
-
-    const bool normalMap = kind == TextureKind::Normal && !srgb;
-    if (normalMap)
-    {
-        bc::normalizeNormalMap(base.get(), texWidth, texHeight);
-        for (uint32_t l = 1; l < levels; ++l)
-        {
-            bc::normalizeNormalMap(mips[l - 1].data(), std::max(1, texWidth >> l), std::max(1, texHeight >> l));
-        }
     }
 
     texture::Recipe recipe;

@@ -4,11 +4,13 @@
 #include <optix.h>
 #include <OptixRenderParams.h>
 
-static __forceinline__ __device__ float3 clampIndirectContribution(const float3 radiance,
-                                                                   unsigned int depth,
-                                                                   float limit)
+static __forceinline__ __device__ float3 clampPathContribution(const float3 radiance,
+                                                               unsigned int depth,
+                                                               float directLimit,
+                                                               float indirectLimit)
 {
-    if (limit <= 0.0f || depth == 0u)
+    const float limit = depth == 0u ? directLimit : indirectLimit;
+    if (limit <= 0.0f)
     {
         return radiance;
     }
@@ -86,6 +88,11 @@ static __forceinline__ __device__ float2 unpackUV(uint32_t val)
     uv.y = ((val & 0xffff0000) >> 16) / 16383.99999f * 20.0f - 10.0f;
     uv.x = (val & 0x0000ffff) / 16383.99999f * 20.0f - 10.0f;
     return uv;
+}
+
+static __forceinline__ __device__ float2 unpackUV(uint32_t x, uint32_t y)
+{
+    return make_float2(__uint_as_float(x), __uint_as_float(y));
 }
 
 // ---- Ray offset for self-intersection avoidance ----------------------------

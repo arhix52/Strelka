@@ -56,8 +56,10 @@ struct OpenPBRTextures
 #else
     MTL::ResourceID tex[MAX_OPENPBR_TEXTURES];
 #endif
+    OpenPBRLayeredTextureParams layered;
 };
-static_assert(sizeof(OpenPBRTextures) == MAX_OPENPBR_TEXTURES * 8, "OpenPBR texture handles must stay eight bytes");
+static_assert(sizeof(OpenPBRTextures) == MAX_OPENPBR_TEXTURES * 8 + sizeof(OpenPBRLayeredTextureParams),
+              "OpenPBR texture table ABI changed");
 
 enum class DebugMode : uint32_t
 {
@@ -138,6 +140,8 @@ static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection p
 #define RECONSTRUCTION_FILTER_MITCHELL 1u
 #define RECONSTRUCTION_FILTER_TENT 2u
 #define RECONSTRUCTION_FILTER_LANCZOS2 3u
+#define RECONSTRUCTION_FILTER_GAUSSIAN 4u
+#define RECONSTRUCTION_FILTER_BLACKMAN_HARRIS 5u
 
 struct PrimitiveSurfaceData
 {
@@ -198,7 +202,7 @@ struct Uniforms
     /// sequence to the per-pixel scrambled one.
     uint32_t blueNoiseSwitchSpp;
 
-    uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
+    uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic", "AgX"
     float gamma; // 0 - off
     vector_float3 exposureValue;
 
@@ -288,6 +292,7 @@ struct Uniforms
     /// denoiser. Zero disables it.
     float denoiseFireflyClamp;
     float clampIndirect;
+    float clampDirect;
     // Sub-pixel offset applied to every pixel of this frame, in pixels. Temporal
     // upscaling needs the whole image shifted by a known amount it can undo; the
     // per-pixel random jitter that antialiases a still frame is noise to it.
@@ -303,6 +308,7 @@ struct Uniforms
     /// Low byte: 0 = level 0, 1 = ray-cone LOD. The next byte stores the
     /// reconstruction filter without growing this hot, shared ABI block.
     uint32_t textureLodMode;
+    float textureLodBias;
     uint32_t guidePrimaryHit;
 
     uint32_t restirDIEnabled;
@@ -458,8 +464,9 @@ struct Uniforms
     // x/y without issuing two dynamic integer divides on every stage.
     uint32_t widthDivMultiplier;
     uint32_t widthDivShiftAdd;
+    float cameraNear;
 };
-static_assert(sizeof(Uniforms) == 1136, "Uniforms host/Metal ABI changed");
+static_assert(sizeof(Uniforms) == 1152, "Uniforms host/Metal ABI changed");
 
 enum RenderWorkCounter : uint32_t
 {
@@ -647,7 +654,7 @@ struct UniformsTonemap
     uint32_t outWidth;
     uint32_t outHeight;
 
-    uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic"
+    uint32_t tonemapperType; // 0 - "None", "Reinhard", "ACES", "Filmic", "AgX"
     float gamma; // 0 - off
     float maxEDR;
     vector_float3 exposureValue;

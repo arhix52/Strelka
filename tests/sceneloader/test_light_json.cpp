@@ -50,6 +50,14 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
     env.rotationY = 42.0f;
     scene.setEnvLight(env);
 
+    Scene::ExposureDesc exposure{};
+    exposure.filmIso = 365.0f;
+    scene.setExposure(exposure);
+    Scene::PresentationDesc presentation{};
+    presentation.tonemapperType = 3;
+    presentation.materialModel = 1;
+    scene.setPresentation(presentation);
+
     const fs::path tmp = fs::temp_directory_path() / "strelka_test_scene.gltf";
     REQUIRE(saveLightsJson(scene, tmp.string()));
 
@@ -90,6 +98,12 @@ TEST_CASE("Light JSON round-trip preserves desc fields")
         CHECK(readBack.intensity == doctest::Approx(1.25f));
         CHECK(readBack.rotationY == doctest::Approx(42.0f));
     }
+    REQUIRE(loaded.getExposure().has_value());
+    CHECK(loaded.getExposure()->filmIso == doctest::Approx(365.0f));
+    REQUIRE(loaded.getPresentation().has_value());
+    CHECK(loaded.getPresentation()->tonemapperType == 3);
+    CHECK(loaded.getPresentation()->gamma == doctest::Approx(2.4f));
+    CHECK(loaded.getPresentation()->materialModel == 1);
 
     fs::remove(jsonPath);
 }

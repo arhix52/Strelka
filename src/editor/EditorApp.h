@@ -220,6 +220,7 @@ public:
     /// Take the exposure the freshly loaded scene asks for, or arrange to measure
     /// it. Must run after loadSettings(), which writes the photographic defaults.
     void applySceneExposure();
+    void applyScenePresentation();
     void loadAnimSettings();
     void checkLoadingComplete();
     void run();

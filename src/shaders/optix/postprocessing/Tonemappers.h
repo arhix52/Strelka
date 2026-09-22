@@ -11,6 +11,7 @@ enum class ToneMapperType : uint32_t
     eReinhard,
     eACES,
     eFilmic,
+    eAgX,
 };
 
 extern "C" void tonemap(const ToneMapperType type,

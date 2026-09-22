@@ -2,7 +2,8 @@
 """
 Export a production .blend for Strelka.
 
-    blender -b <file.blend> -P tools/feature_tests/export_scene.py -- --out DIR [--frame N]
+    blender -b <file.blend> -P tools/feature_tests/export_scene.py -- --out DIR
+            [--frame N] [--light-scale 1.0]
 
 Writes <DIR>/<name>.gltf (+ .bin + textures) and <DIR>/<name>_light.json.
 
@@ -24,10 +25,12 @@ Geometry Nodes are realised.
 import array
 
 import bpy
+import bmesh
 import importlib
 import json
 import math
 import os
+import subprocess
 import sys
 
 # Alongside this file, which is not on the path when Blender runs a script by
@@ -306,6 +309,14 @@ def promote_render_uv():
         first.data.foreach_get("uv", a)
         chosen.data.foreach_get("uv", b)
         first.data.foreach_set("uv", b)
+        if chosen.name.startswith("STRELKA_BAKE_"):
+            # Baked nodes no longer refer to the source UV by name. Keep its
+            # data in TEXCOORD_1 for runtime MaterialX graphs; previously both
+            # exported sets contained the atlas and the native unwrap was lost.
+            chosen.data.foreach_set("uv", a)
+            layers[0].active_render = True
+            moved.append("%s: %s" % (me.name, chosen.name))
+            continue
         chosen.data.foreach_set("uv", a)
         # Through a placeholder, because assigning a name a sibling still holds
         # makes Blender disambiguate it to "automap.001" and every material that
@@ -318,6 +329,26 @@ def promote_render_uv():
     if moved:
         print("  uv promoted to TEXCOORD_0 -> %s" % ", ".join(moved))
     return moved
+
+
+def triangulate_ngons_for_tangents():
+    """Remove the topology that makes Blender omit glTF MikkTSpace tangents."""
+    changed = []
+    for mesh in bpy.data.meshes:
+        if mesh.shape_keys or not any(len(poly.vertices) > 4 for poly in mesh.polygons):
+            continue
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
+        ngons = [face for face in bm.faces if len(face.verts) > 4]
+        if ngons:
+            bmesh.ops.triangulate(bm, faces=ngons)
+            bm.to_mesh(mesh)
+            mesh.update()
+            changed.append(mesh.name)
+        bm.free()
+    if changed:
+        print("triangulated ngons for tangent export: %d mesh(es)" % len(changed))
+    return changed
 
 
 def export_gltf(path):
@@ -348,6 +379,26 @@ def export_gltf(path):
     if dropped:
         print("  [warn] exporter ignored: %s" % ", ".join(dropped))
     bpy.ops.export_scene.gltf(**kwargs)
+
+
+def write_materialx(gltf_path):
+    sidecar = os.path.splitext(gltf_path)[0] + ".mtlx"
+    if os.path.exists(sidecar):
+        with open(sidecar, "r", encoding="utf-8") as stream:
+            if "<strelka_layered_texture " in stream.read():
+                print("preserved authored MaterialX sidecar: %s" % sidecar)
+                return
+    converter = os.path.join(os.path.dirname(os.path.dirname(__file__)), "gltf_to_mtlx.py")
+    subprocess.run(["python3", converter, "--simple-only", gltf_path], check=True)
+
+
+def write_native_materials(gltf_path):
+    """Restore source UVs and graph materials after atlas export."""
+    script = os.path.join(os.path.dirname(__file__), "export_native_materials.py")
+    subprocess.run([
+        bpy.app.binary_path, "-b", bpy.data.filepath, "-P", script, "--",
+        "--gltf", gltf_path,
+    ], check=True)
 
 
 def force_render_geometry():
@@ -809,7 +860,7 @@ def _report_missing(missing):
         print("        %-40s x%d" % (name, count))
 
 
-def write_material_extensions(gltf_path, translucency, volumes, hair, subsurface, tints):
+def write_material_extensions(gltf_path, translucency, volumes, hair, subsurface, tints, shadow_transparent):
     """Add the KHR material extensions the exporter has no mapping for.
 
     KHR_materials_diffuse_transmission from a Translucent BSDF: without it the
@@ -830,7 +881,8 @@ def write_material_extensions(gltf_path, translucency, volumes, hair, subsurface
         doc = json.load(f)
 
     used = set(doc.get("extensionsUsed", []))
-    counts = {"diffuse_transmission": 0, "volume": 0, "hair": 0, "subsurface": 0, "tint": 0}
+    counts = {"diffuse_transmission": 0, "volume": 0, "hair": 0, "subsurface": 0,
+              "tint": 0, "black_texture_factor": 0, "shadow_transparent": 0}
     materials = doc.setdefault("materials", [])
     by_name = {mat.get("name"): mat for mat in materials}
     for name, entry in hair.items():
@@ -855,6 +907,10 @@ def write_material_extensions(gltf_path, translucency, volumes, hair, subsurface
 
     for mat in materials:
         name = mat.get("name")
+        if name in shadow_transparent:
+            mat.setdefault("extensions", {})["STRELKA_materials_shadow_transparent"] = {}
+            used.add("STRELKA_materials_shadow_transparent")
+            counts["shadow_transparent"] += 1
         entry = translucency.get(name)
         if entry is not None:
             factor, colour = entry
@@ -897,11 +953,21 @@ def write_material_extensions(gltf_path, translucency, volumes, hair, subsurface
             pbr["baseColorFactor"] = [tint[0], tint[1], tint[2], alpha]
             counts["tint"] += 1
 
+        # Run after tint recovery: an unrecoverable grade can itself produce the
+        # zero multiplier that would erase an otherwise valid exported texture.
+        pbr = mat.get("pbrMetallicRoughness", {})
+        factor = pbr.get("baseColorFactor")
+        if (pbr.get("baseColorTexture") is not None and factor is not None and not any(factor[:3])):
+            pbr["baseColorFactor"] = [1.0, 1.0, 1.0, factor[3] if len(factor) > 3 else 1.0]
+            counts["black_texture_factor"] += 1
+
     doc["extensionsUsed"] = sorted(used)
     with open(gltf_path, "w") as f:
         json.dump(doc, f)
-    print("material extensions -> diffuse transmission %d, volume %d, hair %d, subsurface %d, tint %d"
-          % (counts["diffuse_transmission"], counts["volume"], counts["hair"], counts["subsurface"], counts["tint"]))
+    print("material extensions -> diffuse transmission %d, volume %d, hair %d, subsurface %d, tint %d, "
+          "black texture factor %d, shadow transparent %d"
+          % (counts["diffuse_transmission"], counts["volume"], counts["hair"], counts["subsurface"],
+             counts["tint"], counts["black_texture_factor"], counts["shadow_transparent"]))
     return counts
 
 
@@ -987,10 +1053,28 @@ def main():
     name = os.path.splitext(os.path.basename(bpy.data.filepath))[0] or "scene"
     merge_scenes()
     force_render_geometry()
+    # Tangent-space normal baking and glTF tangent export must see the same
+    # topology. Blender cannot build MikkTSpace tangents for n-gons; doing this
+    # only after flatten_materials() baked their normals encoded one basis and
+    # exported another.
+    triangulate_ngons_for_tangents()
     depsgraph = bpy.context.evaluated_depsgraph_get()
 
     lights = collect_lights(depsgraph)
+    light_scale = float(argv[argv.index("--light-scale") + 1]) if "--light-scale" in argv else 1.0
+    for light in lights:
+        light["intensity"] *= light_scale
     sidecar = {"lights": lights}
+    sidecar["exposure"] = {
+        "iso": 100.0 * (2.0 ** bpy.context.scene.view_settings.exposure),
+        "fstop": 1.0,
+        "shutter": 1.0,
+        "cm2_factor": 1.0,
+    }
+    # Match Blender's default view transform; enum 4 is AgX Base Contrast.
+    sidecar["presentation"] = {"tonemapper": 4, "gamma": 2.4, "materialModel": 1}
+    if light_scale != 1.0:
+        sidecar["sourceLightScale"] = light_scale
     # An environment baked earlier by bake_env.py, if it is sitting next to us.
     # Absolute, because the loader joins it onto the resource search path and an
     # absolute path replaces rather than appends.
@@ -1029,7 +1113,8 @@ def main():
     # Before the export, because it rewrites the graphs the exporter reads.
     import flatten_materials
     curve_sets, hair = collect_curve_sets(depsgraph, flatten_materials)
-    flat, translucency, volumes, subsurface, tints = flatten_materials.flatten(out)
+    flat, translucency, volumes, subsurface, tints, shadow_transparent = \
+        flatten_materials.flatten(out)
     if flat:
         print("materials rewritten for export: %d" % len(flat))
         for mat_name, note in flat:
@@ -1045,8 +1130,11 @@ def main():
         print("rewriting placements in %s (geometry left as it is)" % gltf)
         strip_instance_nodes(gltf)
         strip_unrendered_nodes(gltf, rendered_object_names())
+        write_material_extensions(gltf, translucency, volumes, hair, subsurface, tints, shadow_transparent)
         if instances:
             write_instances(gltf, instances)
+        write_materialx(gltf)
+        write_native_materials(gltf)
         return
 
     promote_render_uv()
@@ -1071,10 +1159,11 @@ def main():
 
     # After the summary, because these rewrite the file the summary was read from.
     strip_unrendered_nodes(gltf, rendered_object_names())
-    if translucency or volumes or hair or subsurface or tints:
-        write_material_extensions(gltf, translucency, volumes, hair, subsurface, tints)
+    write_material_extensions(gltf, translucency, volumes, hair, subsurface, tints, shadow_transparent)
     if instances:
         write_instances(gltf, instances)
+    write_materialx(gltf)
+    write_native_materials(gltf)
     if curve_sets:
         curve_sidecar = importlib.import_module("curve_sidecar")
         curves_path = os.path.join(out, name + "_curves.bin")

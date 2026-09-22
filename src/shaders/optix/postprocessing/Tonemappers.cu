@@ -123,6 +123,60 @@ __global__ void tonemapACESFitted(float4 *image,
     return;
 }
 
+__device__ __inline__ float agxFormation(float x)
+{
+    constexpr float minEv = -12.4739311883f;
+    constexpr float maxEv = 4.0260688117f;
+    constexpr float pivot = 0.6060606061f;
+    constexpr float pivotValue = 0.4894370896f;
+
+    x = saturate((log2f(x) - minEv) / (maxEv - minEv));
+    const bool upper = x >= pivot;
+    const float a = upper ? 0.9049684268f : -1.1441749659f;
+    const float b = upper ? -27.9642728229f : 35.3559527134f;
+    const float c = upper ? 46.1410501578f : -58.3373219771f;
+    const float base = fabsf(1.0f + a * (x - pivot) * sqrtf(fabsf(b + c * x)));
+    return pivotValue + ((-80.0f + 132.0f * x) / 55.0f) / powf(base, 1.0f / 1.5f);
+}
+
+__device__ __inline__ float3 AgX(float3 color)
+{
+    const sutil::Matrix3x3 input =
+    {
+        0.5448147465f, 0.3737873984f, 0.0813978551f,
+        0.1404169485f, 0.7541375546f, 0.1054454970f,
+        0.0888104196f, 0.1788717564f, 0.7323178240f
+    };
+    const sutil::Matrix3x3 output =
+    {
+         1.9648874117f, -0.8559884957f, -0.1088989160f,
+        -0.2993133649f,  1.3263979646f, -0.0270845997f,
+        -0.1643527425f, -0.2381839694f,  1.4025367120f
+    };
+
+    color = make_float3(fmaxf(color.x, 2.0e-10f), fmaxf(color.y, 2.0e-10f), fmaxf(color.z, 2.0e-10f));
+    color = input * color;
+    color = make_float3(agxFormation(color.x), agxFormation(color.y), agxFormation(color.z));
+    color = make_float3(powf(color.x, 2.4f), powf(color.y, 2.4f), powf(color.z, 2.4f));
+    return output * color;
+}
+
+__global__ void tonemapAgX(float4 *image,
+                           const float3 exposure,
+                           const float maxOutput,
+                           uint32_t width,
+                           uint32_t height)
+{
+    const uint32_t linearPixelIndex = blockIdx.x * blockDim.x + threadIdx.x;
+    if (linearPixelIndex >= height * width)
+    {
+        return;
+    }
+    const float output = fmaxf(maxOutput, 1.0f);
+    const float3 radiance = make_float3(image[linearPixelIndex]) * exposure / output;
+    image[linearPixelIndex] = make_float4(AgX(radiance) * output, 1.0f);
+}
+
 __global__ void applyExposure(float4 *image, const float3 exposure, uint32_t width, uint32_t height)
 {
     const uint32_t linearPixelIndex = blockIdx.x * blockDim.x + threadIdx.x;
@@ -162,6 +216,8 @@ __device__ __inline__ float3 applyLinearPresentation(
         return ACESFitted(exposed / output) * output;
     case ToneMapperType::eFilmic:
         return ACESFilm(exposed / output) * output;
+    case ToneMapperType::eAgX:
+        return AgX(exposed / output) * output;
     case ToneMapperType::eNone:
         return exposed;
     default:
@@ -271,6 +327,9 @@ void tonemap(const ToneMapperType type,
         break;
     case ToneMapperType::eFilmic:
         tonemapACESFilm<<<gridSize, blockSize, 0>>>(image, exposure, maxOutput, width, height);
+        break;
+    case ToneMapperType::eAgX:
+        tonemapAgX<<<gridSize, blockSize, 0>>>(image, exposure, maxOutput, width, height);
         break;
     case ToneMapperType::eNone:
         applyExposure<<<gridSize, blockSize, 0>>>(image, exposure, width, height);

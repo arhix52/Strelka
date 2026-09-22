@@ -793,9 +793,9 @@ struct Uv
     float y = 0.0f;
 };
 
-Uv unpackUvHost(uint32_t packed, const MaterialParams& material)
+Uv unpackUvHost(uint32_t x, uint32_t y, const MaterialParams& material)
 {
-    const glm::float2 uv = oka::unpackUV(packed);
+    const glm::float2 uv = oka::unpackUV(x, y);
     const float2 transformed = apply_texture_transform(make_float2(uv.x, uv.y), material);
     return Uv{ transformed.x, transformed.y };
 }
@@ -1014,6 +1014,10 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
     }
 
     const MaterialParams& material = descs[materialId].params;
+    if (material.alpha_mode == ALPHA_MODE_SHADOW_TRANSPARENT)
+    {
+        return out;
+    }
     omm::AlphaRule rule;
     rule.alphaMode = (uint32_t)material.alpha_mode;
     rule.baseAlpha = material.base_color_alpha;
@@ -1100,9 +1104,9 @@ OptiXRender::MeshOpacityMicromap OptiXRender::buildMeshOpacityMicromap(const oka
         {
             break;
         }
-        const Uv uv0 = unpackUvHost(vertices[v0].uv, material);
-        const Uv uv1 = unpackUvHost(vertices[v1].uv, material);
-        const Uv uv2 = unpackUvHost(vertices[v2].uv, material);
+        const Uv uv0 = unpackUvHost(vertices[v0].uv, vertices[v0].uv1, material);
+        const Uv uv1 = unpackUvHost(vertices[v1].uv, vertices[v1].uv1, material);
+        const Uv uv2 = unpackUvHost(vertices[v2].uv, vertices[v2].uv1, material);
 
         // The whole triangle first. A cutout is mostly leaf and mostly gap, and
         // both answer here for four bytes instead of sixty-four.
@@ -3407,6 +3411,16 @@ void OptiXRender::render(Buffer* output)
     settingsChanged |= (mPrevRectLightSamplingMethod != rectLightSamplingMethod);
     mPrevRectLightSamplingMethod = rectLightSamplingMethod;
 
+    const uint32_t reconstructionFilter = std::min(settings.getAs<uint32_t>("render/pt/reconstructionFilter"), 5u);
+    settingsChanged |= (mPrevReconstructionFilter != reconstructionFilter);
+    mPrevReconstructionFilter = reconstructionFilter;
+
+    const uint32_t textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod");
+    const float textureLodBias = settings.getAs<float>("render/pt/textureLodBias");
+    settingsChanged |= (mPrevTextureLodMode != textureLodMode) || (mPrevTextureLodBias != textureLodBias);
+    mPrevTextureLodMode = textureLodMode;
+    mPrevTextureLodBias = textureLodBias;
+
     bool enableAccumulation = settings.getAs<bool>("render/pt/enableAcc");
     settingsChanged |= (mPrevEnableAccumulation != enableAccumulation);
     mPrevEnableAccumulation = enableAccumulation;
@@ -3462,14 +3476,16 @@ void OptiXRender::render(Buffer* output)
     const uint32_t risCandidates = std::max(settings.getAs<uint32_t>("render/pt/risCandidates"), 1u);
     const uint32_t estimatorMode = settings.getAs<uint32_t>("render/validate/estimatorMode");
     const float clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
+    const float clampDirect = settings.getAs<float>("render/pt/clampDirect");
     if (params.risCandidates != risCandidates || params.estimatorMode != estimatorMode ||
-        params.clampIndirect != clampIndirect)
+        params.clampIndirect != clampIndirect || params.clampDirect != clampDirect)
     {
         getSharedContext().mSubframeIndex = 0;
     }
     params.risCandidates = risCandidates;
     params.estimatorMode = estimatorMode;
     params.clampIndirect = clampIndirect;
+    params.clampDirect = clampDirect;
 
     params.subsurfaceIterations = settings.contains("render/pt/subsurfaceIterations") ?
                                       std::min(settings.getAs<uint32_t>("render/pt/subsurfaceIterations"), 256u) :
@@ -3506,6 +3522,10 @@ void OptiXRender::render(Buffer* output)
     memcpy(params.clipToView, glm::value_ptr(glm::transpose(camera.matrices.invPerspective)), sizeof(params.clipToView));
 
     params.projectionType = (uint32_t)camera.projection;
+    params.reconstructionFilter = reconstructionFilter;
+    params.textureLodMode = textureLodMode;
+    params.textureLodBias = textureLodBias;
+    params.cameraNear = camera.getNearClip();
     {
         float halfWidth = camera.xmag;
         float halfHeight = camera.ymag;
@@ -4698,9 +4718,12 @@ void OptiXRender::createPrimitiveAlphaBuffer()
         for (uint32_t i = 0; i < mesh.mCount; i += 3u)
         {
             const size_t index = static_cast<size_t>(mesh.mIndex) + i;
-            records.push_back({vertices[static_cast<size_t>(mesh.mVbOffset) + indices[index + 0u]].uv,
-                               vertices[static_cast<size_t>(mesh.mVbOffset) + indices[index + 1u]].uv,
-                               vertices[static_cast<size_t>(mesh.mVbOffset) + indices[index + 2u]].uv});
+            const auto alphaUv = [&](uint32_t corner) {
+                const oka::Scene::Vertex& vertex =
+                    vertices[static_cast<size_t>(mesh.mVbOffset) + indices[index + corner]];
+                return oka::packUV(oka::unpackUV(vertex.uv, vertex.uv1));
+            };
+            records.push_back({ alphaUv(0u), alphaUv(1u), alphaUv(2u) });
         }
     }
     createOrUpdateBuffer(mPrimitiveAlphaBuffer, records);
@@ -5146,6 +5169,8 @@ Texture OptiXRender::loadTextureFromFile(const std::string& fileName, oka::optix
 
     if (res.array)
         mMaterialTextureArrays.push_back(res.array);
+    if (res.mipmapped)
+        mMaterialTextureMipArrays.push_back(res.mipmapped);
     mMaterialTextureObjects.push_back(res.object);
 
     return { res.object, make_uint3((uint32_t)payload.plan.extent.width, (uint32_t)payload.plan.extent.height, 1),
@@ -5277,9 +5302,10 @@ void OptiXRender::destroyMaterialTextures()
             cudaDestroyTextureObject(obj);
     mMaterialTextureObjects.clear();
 
-    for (auto arr : mMaterialTextureArrays)
+    for (auto arr : mMaterialTextureMipArrays)
         if (arr)
-            cudaFreeArray(arr);
+            cudaFreeMipmappedArray(arr);
+    mMaterialTextureMipArrays.clear();
     mMaterialTextureArrays.clear();
 
 }
@@ -5455,7 +5481,8 @@ void OptiXRender::publishOpenPBRParams()
             // Hair keeps its own BSDF: OpenPBR has no fibre model, and a strand
             // shaded as a surface is the defect open-defects.md entry 3 was
             // closed for.
-            openpbrParams.push_back(openpbr_from_material_params(p));
+            OpenPBRParams converted = openpbr_from_material_params(p);
+            openpbrParams.push_back(converted);
             mMaterials[i].params.material_type = MATERIAL_TYPE_OPENPBR;
         }
         else
@@ -5509,13 +5536,19 @@ void OptiXRender::publishOpenPBRParams()
     // Published zeroed and filled in as the maps decode, exactly like the
     // material table: a null handle means "use the constant", so the scene shades
     // correctly from the first frame and sharpens into its textures.
-    mHostOpenPBRTextures.assign(openpbrParams.size() * MAX_OPENPBR_TEXTURES, 0);
-    const size_t texBytes = mHostOpenPBRTextures.size() * sizeof(cudaTextureObject_t);
+    mHostOpenPBRTextures.resize(openpbrParams.size());
+    for (size_t i = 0; i < mHostOpenPBRTextures.size(); ++i)
+    {
+        mHostOpenPBRTextures[i] = {};
+        mHostOpenPBRTextures[i].layered = matDescs[i].openpbrLayeredTexture;
+    }
+    const size_t texBytes = mHostOpenPBRTextures.size() * sizeof(OpenPBRTextures);
     mOpenPBRTexturesBuffer = std::make_unique<OptixBuffer>(texBytes);
-    CUDA_CHECK(cudaMemset(optix::devicePtr<void>(mOpenPBRTexturesBuffer->getPtr()), 0, texBytes));
+    CUDA_CHECK(cudaMemcpy(optix::devicePtr<void>(mOpenPBRTexturesBuffer->getPtr()), mHostOpenPBRTextures.data(),
+                          texBytes, cudaMemcpyHostToDevice));
 
     mState.params.openpbrParams = optix::devicePtr<OpenPBRParams>(mOpenPBRParamsBuffer->getPtr());
-    mState.params.openpbrTextures = optix::devicePtr<cudaTextureObject_t>(mOpenPBRTexturesBuffer->getPtr());
+    mState.params.openpbrTextures = optix::devicePtr<OpenPBRTextures>(mOpenPBRTexturesBuffer->getPtr());
 
     STRELKA_INFO("OpenPBR enabled on OptiX: {} material(s), {} base-only, model={}, authored={}", openpbrParams.size(),
                  std::count(mOpenPBRBaseMaterials.begin(), mOpenPBRBaseMaterials.end(), 1u),
@@ -5595,20 +5628,20 @@ bool OptiXRender::stepMaterialTextures(double budgetMs)
         // one material becomes fully textured at once rather than half.
         if (!mHostOpenPBRTextures.empty())
         {
-            cudaTextureObject_t* openpbrSlots = &mHostOpenPBRTextures[i * MAX_OPENPBR_TEXTURES];
+            OpenPBRTextures& openpbrTable = mHostOpenPBRTextures[i];
             for (uint32_t slot = 0; slot < MAX_OPENPBR_TEXTURES; ++slot)
             {
-                openpbrSlots[slot] =
-                    loadOrCacheTex(desc.openpbrTexPaths[slot], openpbrSlotKind(slot, desc.openpbrTexColorSpace[slot]));
-                if (openpbrSlots[slot] == 0 && !desc.openpbrTexPaths[slot].empty())
+                const oka::optix_tex::Kind slotKind = openpbrSlotKind(slot, desc.openpbrTexColorSpace[slot]);
+                openpbrTable.tex[slot] = loadOrCacheTex(desc.openpbrTexPaths[slot], slotKind);
+                if (openpbrTable.tex[slot] == 0 && !desc.openpbrTexPaths[slot].empty())
                 {
                     STRELKA_WARNING("openpbr material '{}': slot {} named '{}' but no texture loaded", desc.name, slot,
                                     desc.openpbrTexPaths[slot]);
                 }
             }
             CUDA_CHECK(cudaMemcpy(
-                optix::devicePtr<cudaTextureObject_t>(mOpenPBRTexturesBuffer->getPtr()) + i * MAX_OPENPBR_TEXTURES,
-                openpbrSlots, MAX_OPENPBR_TEXTURES * sizeof(cudaTextureObject_t), cudaMemcpyHostToDevice));
+                optix::devicePtr<OpenPBRTextures>(mOpenPBRTexturesBuffer->getPtr()) + i, &openpbrTable,
+                sizeof(OpenPBRTextures), cudaMemcpyHostToDevice));
         }
 
         // Objects first, then the parameters that name them.

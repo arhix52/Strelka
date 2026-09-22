@@ -413,7 +413,9 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
                     static_cast<size_t>(mesh.mIndex) + static_cast<size_t>(blockFirst + localTriangle) * 3u;
                 for (uint32_t k = 0; k < 3u; ++k)
                 {
-                    const uint32_t packed = vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]].uv;
+                    const Scene::Vertex& vertex =
+                        vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]];
+                    const uint32_t packed = packUV(unpackUV(vertex.uv, vertex.uv1));
                     const uint32_t u = packed & 0xffffu;
                     const uint32_t v = packed >> 16u;
                     minU = std::min(minU, u);
@@ -452,7 +454,9 @@ void MetalGeometry::buildPrimitiveAlphaData(const Scene* scene, std::span<const 
                 uint32_t packedV = 0u;
                 for (uint32_t k = 0; k < 3u; ++k)
                 {
-                    const uint32_t packed = vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]].uv;
+                    const Scene::Vertex& vertex =
+                        vertices[static_cast<size_t>(mesh.mVbOffset) + indices[firstIndex + k]];
+                    const uint32_t packed = packUV(unpackUV(vertex.uv, vertex.uv1));
                     const uint32_t u = std::min(((packed & 0xffffu) - minU + stepU / 2u) / stepU, 1023u);
                     const uint32_t v = std::min(((packed >> 16u) - minV + stepV / 2u) / stepV, 1023u);
                     packedU |= u << (10u * k);

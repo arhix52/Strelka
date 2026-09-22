@@ -386,8 +386,20 @@ DEVICE_FUNC float3 openpbr_unpack_base_color(OpenPBR_BaseColor value)
 #endif
 }
 
+DEVICE_FUNC float openpbr_safe_base_lobe_weight(float value)
+{
+    // A non-finite path throughput must terminate locally, not reach the
+    // OpenPBR selector where NaN makes every interval comparison false.
+    if (!(value > 0.0f))
+        return 0.0f;
+    return min(value, 1.0e20f);
+}
+
 DEVICE_FUNC OpenPBR_BaseLobeWeights openpbr_pack_base_lobe_thresholds(float specular, float metalMms, float diffuse)
 {
+    specular = openpbr_safe_base_lobe_weight(specular);
+    metalMms = openpbr_safe_base_lobe_weight(metalMms);
+    diffuse = openpbr_safe_base_lobe_weight(diffuse);
     const float total = specular + metalMms + diffuse;
     if (!(total > OpenPBR_FloatMin))
     {
@@ -921,6 +933,7 @@ DEVICE_FUNC BsdfSampleResult openpbr_bsdf_sample(const THREAD_REF OpenPBR_BasePr
     result.event_type = openpbr_lobe_to_event(sampledType);
     return result;
 }
+
 #endif
 
 #endif // STRELKA_MATERIAL_OPENPBR_BRIDGE_H

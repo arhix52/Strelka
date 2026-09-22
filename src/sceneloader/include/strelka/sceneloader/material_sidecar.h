@@ -153,7 +153,9 @@ inline int textureSlotFromName(const std::string& name)
 
 /// Fills `paths` from one "textures" object. Returns the number of unrecognised
 /// slot names, having logged each.
-inline int parseTextures(const nlohmann::json& j, std::array<std::string, MAX_OPENPBR_TEXTURES>& paths)
+inline int parseTextures(const nlohmann::json& j,
+                         std::array<std::string, MAX_OPENPBR_TEXTURES>& paths,
+                         OpenPBRParams& params)
 {
     int unknown = 0;
     for (const auto& item : j.items())
@@ -167,8 +169,42 @@ inline int parseTextures(const nlohmann::json& j, std::array<std::string, MAX_OP
         }
         // Relative to the scene, exactly like a glTF image URI: the renderer
         // joins it with resource/searchPath, and the sidecar sits beside the
-        // scene it describes.
-        paths[(size_t)slot] = item.value().get<std::string>();
+        // scene it describes. Scalar maps use red unless the packed roughness
+        // map explicitly names another channel.
+        if (item.value().is_string())
+        {
+            paths[(size_t)slot] = item.value().get<std::string>();
+            continue;
+        }
+        if (!item.value().is_object() || !item.value().contains("path") ||
+            !item.value()["path"].is_string())
+        {
+            STRELKA_WARNING("materials sidecar: '{}' texture must be a path string or object", item.key());
+            ++unknown;
+            continue;
+        }
+        paths[(size_t)slot] = item.value()["path"].get<std::string>();
+        if (slot == OPENPBR_TEX_SPECULAR_ROUGHNESS && item.value().contains("channel"))
+        {
+            if (!item.value()["channel"].is_string())
+            {
+                STRELKA_WARNING("materials sidecar: roughness channel must be r, g, b, or a");
+                paths[(size_t)slot].clear();
+                ++unknown;
+                continue;
+            }
+            const std::string channel = item.value()["channel"].get<std::string>();
+            const size_t index = std::string("rgba").find(channel);
+            if (channel.size() != 1 || index == std::string::npos)
+            {
+                STRELKA_WARNING("materials sidecar: roughness channel '{}' is not r, g, b, or a", channel);
+                paths[(size_t)slot].clear();
+                ++unknown;
+                continue;
+            }
+            params.texture_scalar_flags =
+                (params.texture_scalar_flags & ~OPENPBR_ROUGHNESS_CHANNEL_MASK) | static_cast<unsigned int>(index);
+        }
     }
     return unknown;
 }
@@ -237,11 +273,14 @@ inline int loadMaterialsJson(Scene& scene, const std::string& path)
                 continue;
             }
             desc.openpbr = openpbr_make_default_params();
+            // A sidecar may replace the normal image, but glTF still owns the
+            // standard normalTexture scale authored for that same material.
+            desc.openpbr.texture_normal_scale = desc.params.normal_scale;
             parseOpenPBR(entry["openpbr"], desc.openpbr);
             desc.openpbrTexPaths = {};
             if (entry.contains("textures"))
             {
-                parseTextures(entry["textures"], desc.openpbrTexPaths);
+                parseTextures(entry["textures"], desc.openpbrTexPaths, desc.openpbr);
             }
             desc.params.material_type = MATERIAL_TYPE_OPENPBR;
             matched = true;

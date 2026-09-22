@@ -2,11 +2,56 @@
 #include <doctest/doctest.h>
 
 #include <strelka/material/openpbr/openpbr_params.h>
+#include <strelka/sceneloader/gltfloader.h>
 #include <strelka/sceneloader/material_sidecar.h>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 
 using nlohmann::json;
+
+TEST_CASE("glTF transmission without a volume is thin-walled")
+{
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "strelka_transmission_thickness.gltf";
+    {
+        std::ofstream out(path);
+        out << R"({
+            "asset":{"version":"2.0"},
+            "extensionsUsed":["KHR_materials_transmission","KHR_materials_volume"],
+            "materials":[
+                {"name":"thin","extensions":{"KHR_materials_transmission":{"transmissionFactor":1}}},
+                {"name":"solid","extensions":{"KHR_materials_transmission":{"transmissionFactor":1},
+                                                   "KHR_materials_volume":{"thicknessFactor":1}}},
+                {"name":"opaque"},
+                {"name":"shadow","extensions":{"STRELKA_materials_shadow_transparent":{}}},
+                {"name":"backplate","emissiveFactor":[1,1,1],
+                 "normalTexture":{"index":0},"emissiveTexture":{"index":0},
+                 "pbrMetallicRoughness":{"baseColorTexture":{"index":0},
+                                           "metallicRoughnessTexture":{"index":0}},"extensions":{
+                    "KHR_materials_emissive_strength":{"emissiveStrength":7}}}
+            ],
+            "images":[{"uri":"texture.png"}],"textures":[{"source":0}],
+            "scenes":[{"nodes":[]}],"scene":0
+        })";
+    }
+
+    oka::Scene scene;
+    oka::GltfLoader loader;
+    REQUIRE(loader.loadGltf(path.string(), scene));
+    REQUIRE(scene.getMaterials().size() == 5);
+    CHECK(scene.getMaterials()[0].params.thin_walled == 1u);
+    CHECK(scene.getMaterials()[1].params.thin_walled == 0u);
+    CHECK(scene.getMaterials()[2].params.thin_walled == 0u);
+    CHECK(scene.getMaterials()[3].params.alpha_mode == ALPHA_MODE_SHADOW_TRANSPARENT);
+    CHECK(scene.getMaterials()[4].params.emission_strength == doctest::Approx(7.0f));
+    CHECK(scene.getMaterials()[4].openpbrTexPaths[OPENPBR_TEX_BASE_COLOR] == "texture.png");
+    CHECK(scene.getMaterials()[4].openpbrTexPaths[OPENPBR_TEX_SPECULAR_ROUGHNESS] == "texture.png");
+    CHECK(scene.getMaterials()[4].openpbrTexPaths[OPENPBR_TEX_GEOMETRY_NORMAL] == "texture.png");
+    CHECK(scene.getMaterials()[4].openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR] == "texture.png");
+    std::filesystem::remove(path);
+}
 
 TEST_CASE("an omitted key keeps the OpenPBR default rather than going to zero")
 {
@@ -26,6 +71,42 @@ TEST_CASE("an omitted key keeps the OpenPBR default rather than going to zero")
     CHECK(p.specular_anisotropy_rotation_cos == doctest::Approx(1.0f));
     CHECK(p.base_weight == doctest::Approx(1.0f));
     CHECK(p.specular_roughness == doctest::Approx(0.3f));
+}
+
+TEST_CASE("an OpenPBR sidecar keeps the glTF normal scale")
+{
+    const std::filesystem::path stem =
+        std::filesystem::temp_directory_path() / "strelka_sidecar_normal_scale";
+    const std::filesystem::path gltf = stem.string() + ".gltf";
+    const std::filesystem::path sidecar = stem.string() + "_openpbr.json";
+    {
+        std::ofstream out(gltf);
+        out << R"({"asset":{"version":"2.0"},"materials":[{"name":"leather","normalTexture":{"index":0,"scale":0.15}}],"images":[{"uri":"normal.png"}],"textures":[{"source":0}],"scenes":[{"nodes":[]}],"scene":0})";
+    }
+    {
+        std::ofstream out(sidecar);
+        out << R"({"version":1,"materials":[{"gltfMaterial":"leather","openpbr":{},"textures":{"geometry_normal":"normal.png"}}]})";
+    }
+
+    oka::Scene scene;
+    oka::GltfLoader loader;
+    REQUIRE(loader.loadGltf(gltf.string(), scene));
+    REQUIRE(scene.getMaterials().size() == 1);
+    CHECK(scene.getMaterials()[0].openpbr.texture_normal_scale == doctest::Approx(0.15f));
+    std::filesystem::remove(gltf);
+    std::filesystem::remove(sidecar);
+}
+
+TEST_CASE("an OpenPBR sidecar can select packed glTF roughness")
+{
+    OpenPBRParams p = openpbr_make_default_params();
+    std::array<std::string, MAX_OPENPBR_TEXTURES> paths{};
+    const json j = json::parse(
+        R"({"specular_roughness":{"path":"metallic_roughness.png","channel":"g"}})");
+
+    CHECK(oka::materialsidecar::parseTextures(j, paths, p) == 0);
+    CHECK(paths[OPENPBR_TEX_SPECULAR_ROUGHNESS] == "metallic_roughness.png");
+    CHECK((p.texture_scalar_flags & OPENPBR_ROUGHNESS_CHANNEL_MASK) == 1u);
 }
 
 TEST_CASE("the parameters glTF cannot reach are settable here")

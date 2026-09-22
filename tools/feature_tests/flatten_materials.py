@@ -32,6 +32,7 @@ import bpy
 import math
 import numpy as np
 import os
+import zlib
 
 
 def _surface(mat):
@@ -56,6 +57,21 @@ def _find_principled(node, depth=0):
             if found is not None:
                 return found
     return None
+
+
+def _shadow_transparent_principled(node):
+    """Principled branch of Mix(Is Shadow Ray, Principled, Transparent)."""
+    if node is None or node.type != "MIX_SHADER":
+        return None
+    factor = node.inputs[0]
+    if not factor.links or factor.links[0].from_node.type != "LIGHT_PATH" or \
+            factor.links[0].from_socket.name != "Is Shadow Ray":
+        return None
+    shaders = [i for i in node.inputs if i.type == "SHADER"]
+    if len(shaders) != 2 or not all(i.links for i in shaders):
+        return None
+    return shaders[0].links[0].from_node if shaders[0].links[0].from_node.type == "BSDF_PRINCIPLED" and \
+        shaders[1].links[0].from_node.type == "BSDF_TRANSPARENT" else None
 
 
 def _alpha_source(node, depth=0):
@@ -193,6 +209,93 @@ def _reaches_texture(socket, depth=0):
     return any(_reaches_texture(i, depth + 1) for i in node.inputs)
 
 
+def _source_images(socket, depth=0, seen=None):
+    """Image nodes contributing to a socket, for spotting layered base colour."""
+    if depth > 12 or not socket.links:
+        return set()
+    seen = set() if seen is None else seen
+    node = socket.links[0].from_node
+    if node in seen:
+        return set()
+    seen.add(node)
+    if node.type == "TEX_IMAGE" and node.image is not None:
+        return {node.image}
+    out = set()
+    for inp in node.inputs:
+        out.update(_source_images(inp, depth + 1, seen))
+    return out
+
+
+def _walk_node_trees(tree, seen=None):
+    """The tree and its groups, once each."""
+    seen = set() if seen is None else seen
+    if tree in seen:
+        return
+    seen.add(tree)
+    yield tree
+    for node in tree.nodes:
+        if node.type == "GROUP" and node.node_tree is not None:
+            yield from _walk_node_trees(node.node_tree, seen)
+
+
+def _uv_image_bake_safe(mat, socket):
+    """Whether a socket is an image function of UV alone.
+
+    Such a graph can be evaluated on one 0..1 quad and reattached to the
+    original meshes without touching their UVs. Object/generated/attribute
+    coordinates cannot: their value depends on the destination geometry.
+    """
+    if not _source_images(socket):
+        return False
+    spatial = {"ATTRIBUTE", "VERTEX_COLOR", "NEW_GEOMETRY", "OBJECT_INFO",
+               "PARTICLE_INFO", "HAIR_INFO"}
+    mapping_periodic = True
+    for tree in _walk_node_trees(mat.node_tree):
+        for node in tree.nodes:
+            if node.type in spatial and any(out.links for out in node.outputs):
+                return False
+            if node.type == "TEX_COORD":
+                if any(out.links and out.name != "UV" for out in node.outputs):
+                    return False
+            if node.type == "MAPPING":
+                for name, expected in {"Location": (0.0, 0.0, 0.0),
+                                       "Rotation": (0.0, 0.0, 0.0),
+                                       "Scale": (1.0, 1.0, 1.0)}.items():
+                    inp = node.inputs.get(name)
+                    if inp is None or inp.links or any(
+                            abs(float(a) - b) > 1e-6 for a, b in zip(inp.default_value, expected)):
+                        mapping_periodic = False
+            if node.type == "GROUP" and node.node_tree is not None and \
+                    node.node_tree.name == "MAX_Texture_Mapping":
+                defaults = {
+                    "Angle": 0.0, "Location": (0.0, 0.0, 0.0),
+                    "Scale": (1.0, 1.0, 1.0), "CropU": 0.0, "CropV": 0.0,
+                    "CropWidth": 1.0, "CropHeight": 1.0,
+                }
+                for name, expected in defaults.items():
+                    inp = node.inputs.get(name)
+                    if inp is None or inp.links:
+                        mapping_periodic = False
+                        break
+                    value = inp.default_value
+                    if hasattr(value, "__len__"):
+                        if any(abs(float(a) - float(b)) > 1e-6 for a, b in zip(value, expected)):
+                            mapping_periodic = False
+                            break
+                    elif abs(float(value) - float(expected)) > 1e-6:
+                        mapping_periodic = False
+                        break
+    if mapping_periodic:
+        return True
+    users = [ob for ob in bpy.data.objects if ob.type == "MESH" and
+             any(slot.material == mat for slot in ob.material_slots)]
+    return bool(users) and all(
+        ob.data.uv_layers and all(0.0 <= p.uv.x <= 1.0 and 0.0 <= p.uv.y <= 1.0
+                                  for p in next((u for u in ob.data.uv_layers if u.active_render),
+                                                ob.data.uv_layers[0]).data)
+        for ob in users)
+
+
 def _mean_scalar(socket, depth=0):
     """The average value a scalar socket produces.
 
@@ -264,6 +367,31 @@ def _reduce_inputs(principled):
         socket.default_value = value
         changed.append("%s=%.3f" % (name, value))
     return changed
+
+
+def _flatten_emission_multiplier(principled):
+    """Move an RGB-multiply group into Principled's scalar emission strength."""
+    color = principled.inputs.get("Emission Color") or principled.inputs.get("Emission")
+    strength = principled.inputs.get("Emission Strength")
+    if color is None or strength is None or not color.links or strength.links:
+        return None
+    group = color.links[0].from_node
+    if group.type != "GROUP" or group.node_tree is None:
+        return None
+    source = group.inputs.get("Color")
+    value = group.inputs.get("Value")
+    multiplies = [n for n in group.node_tree.nodes if n.type == "MATH" and n.operation == "MULTIPLY"]
+    if source is None or not source.links or value is None or value.links or len(multiplies) < 3:
+        return None
+    gain = float(value.default_value)
+    if gain <= 0.0:
+        return None
+    upstream = source.links[0].from_socket
+    for link in list(color.links):
+        principled.id_data.links.remove(link)
+    principled.id_data.links.new(upstream, color)
+    strength.default_value = float(strength.default_value) * gain
+    return gain
 
 
 def _apply_rgb_curve(node, rgb):
@@ -508,8 +636,350 @@ def _normal_is_plain_map(socket):
     return bool(src.links) and src.links[0].from_node.type == "TEX_IMAGE"
 
 
-def _bake_normal_map(mat, principled, out_dir, size=2048):
-    """Bake a Normal input that glTF has no way to state into a normal map.
+def _connect_baked_map(tree, principled, target, kind):
+    normal = kind == "normal"
+    socket = principled.inputs["Normal" if normal else "Roughness" if kind == "roughness" else
+                               "Alpha" if kind == "alpha" else
+                               "Emission Color" if kind == "emission" else "Base Color"]
+    source = target.outputs["Color"]
+    if normal:
+        nmap = tree.nodes.new("ShaderNodeNormalMap")
+        nmap.space = "TANGENT"
+        tree.links.new(source, nmap.inputs["Color"])
+        source = nmap.outputs["Normal"]
+    for link in list(socket.links):
+        tree.links.remove(link)
+    tree.links.new(source, socket)
+
+
+def _bake_uv_image_map(mat, principled, out_dir, kind):
+    """Evaluate a UV-only texture graph on a quad, preserving every mesh UV.
+
+    This is deliberately before the object bake: colour correction, layering
+    and scalar math are image operations, so packing and resampling the scene's
+    UV islands only loses detail and creates seams.
+    """
+    normal = kind == "normal"
+    socket = principled.inputs["Normal" if normal else "Roughness" if kind == "roughness" else
+                               "Alpha" if kind == "alpha" else
+                               "Emission Color" if kind == "emission" else "Base Color"]
+    users = [ob for ob in bpy.data.objects if ob.type == "MESH" and
+             any(slot.material == mat for slot in ob.material_slots)]
+    # A previous object bake may already have replaced TEXCOORD_0 with an atlas.
+    # A source-UV image attached after that would be sampled through the atlas UV,
+    # which produced the sofa's displaced normal/roughness detail. Keep every
+    # later map in the same atlas space instead.
+    if any(any(uv.active_render and uv.name.startswith("STRELKA_BAKE_")
+               for uv in ob.data.uv_layers) for ob in users):
+        return None
+    if not _uv_image_bake_safe(mat, socket):
+        return None
+
+    images = _source_images(socket)
+    width = max((int(image.size[0]) for image in images), default=0)
+    height = max((int(image.size[1]) for image in images), default=0)
+    if width <= 0 or height <= 0:
+        return None
+
+    suffix = "normal" if normal else "roughness" if kind == "roughness" else "alpha" if kind == "alpha" else \
+             "emission" if kind == "emission" else "basecolor"
+    name = "%s_uv_%s" % (mat.name.replace(" ", "_"), suffix)
+    path = os.path.join(out_dir, name + ".png")
+    source_mtime = max(os.path.getmtime(bpy.data.filepath), os.path.getmtime(__file__))
+    for image in images:
+        source_path = bpy.path.abspath(image.filepath)
+        if source_path and os.path.exists(source_path):
+            source_mtime = max(source_mtime, os.path.getmtime(source_path))
+    non_color = normal or kind in {"roughness", "alpha"}
+    if os.path.exists(path) and os.path.getmtime(path) >= source_mtime:
+        image = bpy.data.images.load(path, check_existing=True)
+        if tuple(image.size) == (width, height):
+            image.colorspace_settings.name = "Non-Color" if non_color else "sRGB"
+            target = mat.node_tree.nodes.new("ShaderNodeTexImage")
+            target.image = image
+            _connect_baked_map(mat.node_tree, principled, target, kind)
+            return name
+        bpy.data.images.remove(image)
+
+    tree = mat.node_tree
+    target = tree.nodes.new("ShaderNodeTexImage")
+    image = bpy.data.images.new(name, width=width, height=height, alpha=False)
+    image.colorspace_settings.name = "Non-Color" if non_color else "sRGB"
+    target.image = image
+    for node in tree.nodes:
+        node.select = False
+    target.select = True
+    tree.nodes.active = target
+
+    mesh = bpy.data.meshes.new(name + "_quad")
+    mesh.from_pydata([(-1.0, -1.0, 0.0), (1.0, -1.0, 0.0),
+                      (1.0, 1.0, 0.0), (-1.0, 1.0, 0.0)], [], [(0, 1, 2, 3)])
+    uv_names = {"UVMap"}
+    for node_tree in _walk_node_trees(tree):
+        uv_names.update(node.uv_map for node in node_tree.nodes
+                        if node.type == "UVMAP" and node.uv_map)
+    coords = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+    for uv_name in uv_names:
+        layer = mesh.uv_layers.new(name=uv_name)
+        for loop in mesh.loops:
+            layer.data[loop.index].uv = coords[loop.vertex_index]
+        layer.active_render = True
+        mesh.uv_layers.active = layer
+    quad = bpy.data.objects.new(name + "_quad", mesh)
+    bpy.context.scene.collection.objects.link(quad)
+    mesh.materials.append(mat)
+
+    output = next((node for node in tree.nodes
+                   if node.type == "OUTPUT_MATERIAL" and node.is_active_output), None)
+    original_surface = output.inputs["Surface"].links[0].from_socket if output and \
+        output.inputs["Surface"].links else None
+    probe = None
+    if not normal:
+        probe = tree.nodes.new("ShaderNodeEmission")
+        if socket.links:
+            tree.links.new(socket.links[0].from_socket, probe.inputs["Color"])
+        else:
+            value = socket.default_value
+            probe.inputs["Color"].default_value = value if hasattr(value, "__len__") else \
+                (value, value, value, 1.0)
+        tree.links.new(probe.outputs["Emission"], output.inputs["Surface"])
+
+    scene, view = bpy.context.scene, bpy.context.view_layer
+    engine, samples = scene.render.engine, scene.cycles.samples
+    selected = list(bpy.context.selected_objects)
+    active = view.objects.active
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = 1
+    scene.render.bake.margin = 0
+    if normal:
+        scene.render.bake.normal_space = "TANGENT"
+    for ob in selected:
+        ob.select_set(False)
+    quad.select_set(True)
+    view.objects.active = quad
+    target.select = True
+    tree.nodes.active = target
+    try:
+        bpy.ops.object.bake(type="NORMAL" if normal else "EMIT")
+    except Exception:
+        tree.nodes.remove(target)
+        bpy.data.images.remove(image)
+        return None
+    finally:
+        if probe is not None and original_surface is not None:
+            tree.links.new(original_surface, output.inputs["Surface"])
+        if probe is not None:
+            tree.nodes.remove(probe)
+        bpy.data.objects.remove(quad, do_unlink=True)
+        bpy.data.meshes.remove(mesh)
+        scene.render.engine, scene.cycles.samples = engine, samples
+        for ob in selected:
+            ob.select_set(True)
+        view.objects.active = active
+
+    image.filepath_raw = path
+    image.file_format = "PNG"
+    image.save()
+    _connect_baked_map(tree, principled, target, kind)
+    target.select = False
+    tree.nodes.active = None
+    return name
+
+
+def _prepare_bake_uv(mat, users):
+    """Pack tiled source UVs for a baked texture, preserving the source UV."""
+    signatures = {tuple(slot.material.name if slot.material else "" for slot in ob.material_slots)
+                  for ob in users}
+    if len(signatures) != 1:
+        return None
+    signature = "\0".join(next(iter(signatures))).encode("utf-8")
+    suffix = "%08x" % (zlib.crc32(signature) & 0xffffffff)
+    name = "STRELKA_BAKE_" + suffix
+    source_key = "strelka_source_uv_" + suffix
+    if all(ob.data.uv_layers.get(name) and source_key in ob.data for ob in users):
+        for ob in users:
+            ob.data.uv_layers.get(name).active_render = True
+            ob.data.uv_layers.active = ob.data.uv_layers.get(name)
+        return users[0].data[source_key]
+    source_layers = [next((u for u in ob.data.uv_layers if u.active_render),
+                          ob.data.uv_layers[0]) for ob in users]
+    source_names = [u.name for u in source_layers]
+    if len(set(source_names)) != 1:
+        return None
+    if all(all(0.0 <= p.uv.x <= 1.0 and 0.0 <= p.uv.y <= 1.0 for p in u.data)
+           for u in source_layers):
+        return None
+
+    for ob, source_name in zip(users, source_names):
+        ob.data[source_key] = source_name
+        packed = ob.data.uv_layers.get(name) or ob.data.uv_layers.new(name=name, do_init=True)
+        packed.active_render = True
+        ob.data.uv_layers.active = packed
+
+    for ob in bpy.data.objects:
+        ob.select_set(False)
+    for ob in users:
+        ob.select_set(True)
+    bpy.context.view_layer.objects.active = users[0]
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.uv.select_all(action="SELECT")
+    bpy.ops.uv.pack_islands(rotate=False, margin=0.002)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    return source_names[0]
+
+
+def _pin_source_uv(tree, uv_name, seen=None):
+    """Make nested Texture Coordinate nodes keep using the pre-bake UV set."""
+    seen = set() if seen is None else seen
+    if tree in seen:
+        return []
+    seen.add(tree)
+    changes = []
+    for node in list(tree.nodes):
+        if node.type == "GROUP" and node.node_tree is not None:
+            changes.extend(_pin_source_uv(node.node_tree, uv_name, seen))
+        if (node.type == "TEX_IMAGE" and node.image is not None and
+                "_baked_" not in node.image.name and not node.inputs["Vector"].links):
+            uv = tree.nodes.new("ShaderNodeUVMap")
+            uv.uv_map = uv_name
+            tree.links.new(uv.outputs["UV"], node.inputs["Vector"])
+            changes.append((tree, uv, None, [node.inputs["Vector"]]))
+        if node.type != "TEX_COORD":
+            continue
+        links = list(node.outputs["UV"].links)
+        if not links:
+            continue
+        destinations = [link.to_socket for link in links]
+        uv = tree.nodes.new("ShaderNodeUVMap")
+        uv.uv_map = uv_name
+        for destination in destinations:
+            tree.links.new(uv.outputs["UV"], destination)
+        changes.append((tree, uv, node, destinations))
+    return changes
+
+
+def _unpin_source_uv(changes):
+    for tree, uv, texcoord, destinations in changes:
+        if texcoord is not None:
+            for destination in destinations:
+                tree.links.new(texcoord.outputs["UV"], destination)
+        tree.nodes.remove(uv)
+
+
+def _isolate_bake_material(mat, users):
+    """Make every baked face use mat; Blender otherwise targets every slot."""
+    state = []
+    seen = set()
+    for ob in users:
+        key = ob.data.as_pointer()
+        if key in seen:
+            continue
+        seen.add(key)
+        materials = list(ob.data.materials)
+        indices = [poly.material_index for poly in ob.data.polygons]
+        ob.data.materials.clear()
+        ob.data.materials.append(mat)
+        for poly in ob.data.polygons:
+            poly.material_index = 0
+        state.append((ob.data, materials, indices))
+    return state
+
+
+def _restore_bake_materials(state):
+    for mesh, materials, indices in state:
+        mesh.materials.clear()
+        for mat in materials:
+            mesh.materials.append(mat)
+        for poly, index in zip(mesh.polygons, indices):
+            poly.material_index = index
+
+
+def _ray_switch_principled(mat):
+    """Principled used for camera/diffuse rays inside a renderer-conversion group."""
+    groups = [n for n in mat.node_tree.nodes if n.type == "GROUP" and n.node_tree is not None]
+    group = next((n for n in groups if "direct" in n.node_tree.name.lower()), None)
+    if group is None:
+        group = next((n for n in groups if "gi" in n.node_tree.name.lower()), None)
+    if group is None:
+        group = next((g for g in groups
+                      if any(n.type == "BSDF_PRINCIPLED" for n in g.node_tree.nodes)), None)
+    if group is None:
+        return None
+    return next((n for n in group.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+
+
+def _bake_material_output(mat, out_dir, kind, size=2048):
+    """Bake a ray-switched material whose Principled node lives inside a group."""
+    users = [ob for ob in bpy.data.objects
+             if ob.type == "MESH" and ob.data.uv_layers and
+             any(s.material == mat for s in ob.material_slots)]
+    if not users:
+        return None
+    source_uv = _prepare_bake_uv(mat, users)
+    name = "%s_baked_%s" % (mat.name.replace(" ", "_"), kind)
+    path = os.path.join(out_dir, name + ".png")
+    normal = kind == "normal"
+    roughness = kind == "roughness"
+    tree = mat.node_tree
+    target = tree.nodes.new("ShaderNodeTexImage")
+    if os.path.exists(path) and os.path.getmtime(path) >= max(os.path.getmtime(bpy.data.filepath),
+                                                               os.path.getmtime(__file__)):
+        target.image = bpy.data.images.load(path, check_existing=True)
+        target.image.colorspace_settings.name = "Non-Color" if normal or roughness else "sRGB"
+        if source_uv:
+            _pin_source_uv(tree, source_uv)
+        return target
+
+    img = bpy.data.images.new(name, width=size, height=size, alpha=False, float_buffer=False)
+    img.colorspace_settings.name = "Non-Color" if normal or roughness else "sRGB"
+    target.image = img
+    for node in tree.nodes:
+        node.select = False
+    target.select = True
+    tree.nodes.active = target
+    scene, view = bpy.context.scene, bpy.context.view_layer
+    engine, samples = scene.render.engine, scene.cycles.samples
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = 1
+    scene.render.bake.use_selected_to_active = False
+    scene.render.bake.margin = 8
+    scene.render.bake.use_pass_direct = False
+    scene.render.bake.use_pass_indirect = False
+    scene.render.bake.use_pass_color = True
+    for ob in bpy.data.objects:
+        ob.select_set(False)
+    for ob in users:
+        ob.select_set(True)
+        ob.active_material_index = next(i for i, slot in enumerate(ob.material_slots) if slot.material == mat)
+    view.objects.active = users[0]
+    pinned = _pin_source_uv(tree, source_uv) if source_uv else []
+    target.select = True
+    tree.nodes.active = target
+    material_state = _isolate_bake_material(mat, users)
+    try:
+        bpy.ops.object.bake(type="NORMAL" if normal else "ROUGHNESS" if roughness else "DIFFUSE")
+    except Exception:
+        _unpin_source_uv(pinned)
+        tree.nodes.remove(target)
+        bpy.data.images.remove(img)
+        scene.render.engine, scene.cycles.samples = engine, samples
+        return None
+    finally:
+        _restore_bake_materials(material_state)
+    # Keep source images explicitly bound to the authored UV set. The packed UV
+    # remains active for baked maps and is what glTF exports as TEXCOORD_0.
+    img.filepath_raw = path
+    img.file_format = "PNG"
+    img.save()
+    scene.render.engine, scene.cycles.samples = engine, samples
+    target.select = False
+    tree.nodes.active = None
+    return target
+
+
+def _bake_principled_map(mat, principled, out_dir, kind, size=2048):
+    """Bake a Principled input that glTF cannot express into one texture.
 
     The floor's relief is a Bump node fed a Brick texture -- the parquet's plank
     seams -- mixed with the laminate photo. glTF has neither a bump node nor a
@@ -529,13 +999,42 @@ def _bake_normal_map(mat, principled, out_dir, size=2048):
     if not users:
         return None
 
-    name = "%s_baked_normal" % mat.name.replace(" ", "_")
+    unique_meshes = {ob.data.as_pointer(): ob.data for ob in users}
+    if (size == 2048 and len(unique_meshes) >= 5 and
+            sum(len(mesh.polygons) for mesh in unique_meshes.values()) >= 250000):
+        size = 4096
+
+    source_uv = _prepare_bake_uv(mat, users)
+
+    normal = kind == "normal"
+    emission = kind == "emission"
+    roughness = kind == "roughness"
+    alpha = kind == "alpha"
+    name = "%s_baked_%s" % (mat.name.replace(" ", "_"),
+                             "normal" if normal else "roughness" if roughness else
+                             "emission" if emission else "alpha" if alpha else "basecolor")
+    path = os.path.join(out_dir, name + ".png")
+    source_mtime = max(os.path.getmtime(bpy.data.filepath), os.path.getmtime(__file__))
+    if os.path.exists(path) and os.path.getmtime(path) >= source_mtime:
+        img = bpy.data.images.load(path, check_existing=True)
+        if img.size[0] >= size and img.size[1] >= size:
+            img.colorspace_settings.name = "Non-Color" if normal or roughness or alpha else "sRGB"
+            target = mat.node_tree.nodes.new("ShaderNodeTexImage")
+            target.image = img
+            if source_uv:
+                _pin_source_uv(mat.node_tree, source_uv)
+            _connect_baked_map(mat.node_tree, principled, target, kind)
+            return name
+        bpy.data.images.remove(img)
+
     img = bpy.data.images.new(name, width=size, height=size, alpha=False, float_buffer=False)
-    img.colorspace_settings.name = "Non-Color"
+    img.colorspace_settings.name = "Non-Color" if normal or roughness or alpha else "sRGB"
 
     tree = mat.node_tree
     target = tree.nodes.new("ShaderNodeTexImage")
     target.image = img
+    for node in tree.nodes:
+        node.select = False
     target.select = True
     tree.nodes.active = target
 
@@ -544,12 +1043,28 @@ def _bake_normal_map(mat, principled, out_dir, size=2048):
     scene.render.engine = "CYCLES"
     scene.render.bake.use_selected_to_active = False
     scene.render.bake.margin = 8
-    scene.cycles.bake_type = "NORMAL"
-    scene.render.bake.normal_space = "TANGENT"
-    # One sample, not the scene's. A normal bake asks the surface where it points
-    # and gets the same answer every time -- there is no light in it to converge.
-    # Inheriting this file's 1024 spends all of them per texel and takes the bake
-    # from seconds to past twenty minutes, which reads as a hang.
+    socket_bake = roughness or alpha or (not normal and not emission)
+    output = next((n for n in tree.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None)
+    original_surface = output.inputs["Surface"].links[0].from_socket if output and output.inputs["Surface"].links else None
+    probe = None
+    if socket_bake and output is not None:
+        probe = tree.nodes.new("ShaderNodeEmission")
+        source_socket = principled.inputs["Roughness" if roughness else "Alpha" if alpha else "Base Color"]
+        if source_socket.links:
+            tree.links.new(source_socket.links[0].from_socket, probe.inputs["Color"])
+        else:
+            value = source_socket.default_value
+            probe.inputs["Color"].default_value = value if hasattr(value, "__len__") else (value, value, value, 1.0)
+        tree.links.new(probe.outputs["Emission"], output.inputs["Surface"])
+    scene.cycles.bake_type = "NORMAL" if normal else "EMIT"
+    if normal:
+        scene.render.bake.normal_space = "TANGENT"
+    elif not emission and not socket_bake:
+        scene.render.bake.use_pass_direct = False
+        scene.render.bake.use_pass_indirect = False
+        scene.render.bake.use_pass_color = True
+    # Neither a tangent normal nor the diffuse colour pass contains lighting, so
+    # one sample gets the exact result. Inheriting the scene's 1024 only burns CPU.
     samples = scene.cycles.samples
     scene.cycles.samples = 1
 
@@ -557,6 +1072,8 @@ def _bake_normal_map(mat, principled, out_dir, size=2048):
         ob.select_set(False)
     for ob in users:
         ob.select_set(True)
+        ob.active_material_index = next(i for i, slot in enumerate(ob.material_slots)
+                                        if slot.material == mat)
         # The bake writes through the active layer, while the exporter numbers by
         # position and Strelka reads TEXCOORD_0; promote_render_uv() moves the
         # render layer there, so the bake has to agree with that one.
@@ -565,26 +1082,86 @@ def _bake_normal_map(mat, principled, out_dir, size=2048):
         uvs.active = chosen
     view.objects.active = users[0]
 
+    strength = principled.inputs.get("Emission Strength") if emission else None
+    authored_strength = float(strength.default_value) if strength is not None else 1.0
+    if strength is not None:
+        strength.default_value = 1.0
+    pinned = _pin_source_uv(tree, source_uv) if source_uv else []
+    target.select = True
+    tree.nodes.active = target
+    material_state = _isolate_bake_material(mat, users)
     try:
-        bpy.ops.object.bake(type="NORMAL")
+        bpy.ops.object.bake(type="NORMAL" if normal else "EMIT")
     except Exception as exc:
+        _unpin_source_uv(pinned)
+        if strength is not None:
+            strength.default_value = authored_strength
         tree.nodes.remove(target)
         bpy.data.images.remove(img)
+        if probe is not None:
+            if original_surface is not None:
+                tree.links.new(original_surface, output.inputs["Surface"])
+            tree.nodes.remove(probe)
         scene.render.engine, scene.cycles.samples = engine, samples
         return "bake failed: %s" % exc
+    finally:
+        _restore_bake_materials(material_state)
 
-    img.filepath_raw = os.path.join(out_dir, name + ".png")
+    # Keep the explicit authored-UV bindings; only the baked target uses the
+    # packed active UV set exported as TEXCOORD_0.
+    if strength is not None:
+        strength.default_value = authored_strength
+    img.filepath_raw = path
     img.file_format = "PNG"
     img.save()
     scene.render.engine, scene.cycles.samples = engine, samples
 
-    nmap = tree.nodes.new("ShaderNodeNormalMap")
-    nmap.space = "TANGENT"
-    tree.links.new(target.outputs["Color"], nmap.inputs["Color"])
-    for link in list(principled.inputs["Normal"].links):
-        tree.links.remove(link)
-    tree.links.new(nmap.outputs["Normal"], principled.inputs["Normal"])
+    if probe is not None:
+        if original_surface is not None:
+            tree.links.new(original_surface, output.inputs["Surface"])
+        tree.nodes.remove(probe)
+
+    _connect_baked_map(tree, principled, target, kind)
+    # Objects commonly have several materials. Leaving this image active lets a
+    # later bake for a neighbouring slot overwrite it (base colour became the
+    # characteristic [0.5, 0.5, 1] normal-map blue in the interior scene).
+    target.select = False
+    tree.nodes.active = None
     return name
+
+
+def _bake_normal_map(mat, principled, out_dir, size=2048):
+    return _bake_uv_image_map(mat, principled, out_dir, "normal") or \
+        _bake_principled_map(mat, principled, out_dir, "normal", size)
+
+
+def _bake_roughness_map(mat, principled, out_dir, size=2048):
+    roughness = principled.inputs.get("Roughness")
+    if roughness is None or not roughness.links or roughness.links[0].from_node.type == "TEX_IMAGE":
+        return None
+    return _bake_uv_image_map(mat, principled, out_dir, "roughness") or \
+        _bake_principled_map(mat, principled, out_dir, "roughness", size)
+
+
+def _bake_transformed_base_color(mat, principled, out_dir, size=2048):
+    base = principled.inputs.get("Base Color")
+    if base is None or not base.links or base.links[0].from_node.type == "TEX_IMAGE":
+        return None
+    return _bake_uv_image_map(mat, principled, out_dir, "basecolor") or \
+        _bake_principled_map(mat, principled, out_dir, "basecolor", size)
+
+
+def _bake_alpha_map(mat, principled, out_dir, size=2048):
+    alpha = principled.inputs.get("Alpha")
+    if alpha is None or not alpha.links or alpha.links[0].from_node.type == "TEX_IMAGE":
+        return None
+    return _bake_uv_image_map(mat, principled, out_dir, "alpha") or \
+        _bake_principled_map(mat, principled, out_dir, "alpha", size)
+
+
+def _bake_emission_color(mat, principled, out_dir, size=2048):
+    return _bake_uv_image_map(mat, principled, out_dir, "emission") or \
+        _bake_principled_map(mat, principled, out_dir, "emission", size)
 
 
 def _gradient_value(kind, p):
@@ -750,14 +1327,15 @@ def _resolve_emission_strength(mat, emission):
 def flatten(out_dir):
     """Rewrite every material that needs it.
 
-    Returns (report, translucency, volumes, subsurface, tints): the extension
-    payloads the exporter cannot derive on its own, keyed by material name.
+    Returns the report and extension payloads the exporter cannot derive on its
+    own, keyed by material name.
     """
     report = []
     translucency = {}
     volumes = {}
     subsurface = {}
     tints = {}
+    shadow_transparent = set()
     for mat in bpy.data.materials:
         if not mat.use_nodes or mat.node_tree is None:
             continue
@@ -773,6 +1351,11 @@ def flatten(out_dir):
         if surface.type == "BSDF_PRINCIPLED":
             # Already the shape the exporter wants -- but its inputs may still be
             # driven by nodes it cannot read.
+            emission_gain = _flatten_emission_multiplier(surface)
+            baked_emission = _bake_emission_color(mat, surface, out_dir) if emission_gain is not None else None
+            baked_base = _bake_transformed_base_color(mat, surface, out_dir)
+            baked_alpha = _bake_alpha_map(mat, surface, out_dir)
+            baked_roughness = _bake_roughness_map(mat, surface, out_dir)
             sss = _subsurface(surface)
             if sss is not None:
                 subsurface[mat.name] = sss
@@ -784,6 +1367,16 @@ def flatten(out_dir):
                 baked = _bake_normal_map(mat, surface, out_dir)
                 if baked is not None:
                     report.append((mat.name, "normal baked -> %s" % baked))
+            if baked_base is not None:
+                report.append((mat.name, "transformed base colour baked -> %s" % baked_base))
+            if baked_alpha is not None:
+                report.append((mat.name, "alpha baked -> %s" % baked_alpha))
+            if baked_roughness is not None:
+                report.append((mat.name, "roughness baked -> %s" % baked_roughness))
+            if emission_gain is not None:
+                report.append((mat.name, "emission multiplier %.3f moved to strength" % emission_gain))
+            if baked_emission is not None:
+                report.append((mat.name, "emission colour baked -> %s" % baked_emission))
             reduced = _reduce_inputs(surface)
             if reduced or volume is not None or sss is not None:
                 note = "inputs reduced: %s" % ", ".join(reduced) if reduced else "volume only"
@@ -804,13 +1397,38 @@ def flatten(out_dir):
                            else "emission strength left as authored"))
             continue
 
-        principled = _find_principled(surface)
+        shadow_principled = _shadow_transparent_principled(surface)
+        principled = shadow_principled or _find_principled(surface)
         if principled is None:
+            nested = _ray_switch_principled(mat)
+            if nested is not None:
+                baked_base = _bake_material_output(mat, out_dir, "basecolor")
+                baked_roughness = _bake_material_output(mat, out_dir, "roughness")
+                baked_normal = _bake_material_output(mat, out_dir, "normal")
+                proxy = mat.node_tree.nodes.new("ShaderNodeBsdfPrincipled")
+                proxy.inputs["Metallic"].default_value = nested.inputs["Metallic"].default_value
+                proxy.inputs["Roughness"].default_value = _mean_scalar(nested.inputs["Roughness"])
+                proxy.inputs["IOR"].default_value = nested.inputs["IOR"].default_value
+                proxy.inputs["Specular IOR Level"].default_value = nested.inputs["Specular IOR Level"].default_value
+                if baked_base is not None:
+                    mat.node_tree.links.new(baked_base.outputs["Color"], proxy.inputs["Base Color"])
+                if baked_roughness is not None:
+                    mat.node_tree.links.new(baked_roughness.outputs["Color"], proxy.inputs["Roughness"])
+                if baked_normal is not None:
+                    nmap = mat.node_tree.nodes.new("ShaderNodeNormalMap")
+                    mat.node_tree.links.new(baked_normal.outputs["Color"], nmap.inputs["Color"])
+                    mat.node_tree.links.new(nmap.outputs["Normal"], proxy.inputs["Normal"])
+                mat.node_tree.links.new(proxy.outputs["BSDF"], out_node.inputs["Surface"])
+                report.append((mat.name, "grouped material baked"))
+                continue
             report.append((mat.name, "no Principled BSDF under %s" % surface.type))
             continue
 
         nt = mat.node_tree
 
+        baked_base = _bake_transformed_base_color(mat, principled, out_dir)
+        baked_alpha = _bake_alpha_map(mat, principled, out_dir)
+        baked_roughness = _bake_roughness_map(mat, principled, out_dir)
         sss = _subsurface(principled)
         if sss is not None:
             subsurface[mat.name] = sss
@@ -834,8 +1452,12 @@ def flatten(out_dir):
             # the graph to read.
             translucency[mat.name] = (0.5, colour)
 
-        alpha = _alpha_source(surface)
+        alpha = None if shadow_principled is not None else _alpha_source(surface)
         note = "flattened"
+
+        if shadow_principled is not None:
+            shadow_transparent.add(mat.name)
+            note = "shadow rays transparent"
 
         if alpha is not None:
             link, transparent_first = alpha
@@ -889,5 +1511,11 @@ def flatten(out_dir):
                 "".join("%.3f " % r for r in subsurface[mat.name]["radius"]).strip())
         if mat.name in tints:
             note += ", tint %s" % "".join("%.2f " % t for t in tints[mat.name]).strip()
+        if baked_base is not None:
+            note += ", transformed base colour baked -> %s" % baked_base
+        if baked_alpha is not None:
+            note += ", alpha baked -> %s" % baked_alpha
+        if baked_roughness is not None:
+            note += ", roughness baked -> %s" % baked_roughness
         report.append((mat.name, note))
-    return report, translucency, volumes, subsurface, tints
+    return report, translucency, volumes, subsurface, tints, shadow_transparent

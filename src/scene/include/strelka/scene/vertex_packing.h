@@ -3,6 +3,7 @@
 // GPU-side counterparts: src/shaders/optix/optix_device_utils.h (CUDA)
 //                        src/shaders/metal/pathtrace.metal (Metal)
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <strelka/scene/glm_wrapper.hpp>
@@ -81,6 +82,19 @@ inline glm::float2 unpackUV(uint32_t val)
     uv.y = static_cast<float>((val & 0xffff0000u) >> 16) / 16383.99999f * 20.0f - 10.0f;
     uv.x = static_cast<float>(val & 0x0000ffffu) / 16383.99999f * 20.0f - 10.0f;
     return uv;
+}
+
+// Primary vertex UVs use both 32-bit words in Scene::Vertex. The older packed
+// form above remains only for compact alpha records; its ~0.00122 step can move
+// a 4K material by several texels and is not accurate enough for shading.
+inline glm::uvec2 packUVFloat(const glm::float2& uv)
+{
+    return { std::bit_cast<uint32_t>(uv.x), std::bit_cast<uint32_t>(uv.y) };
+}
+
+inline glm::float2 unpackUV(uint32_t x, uint32_t y)
+{
+    return { std::bit_cast<float>(x), std::bit_cast<float>(y) };
 }
 
 } // namespace oka

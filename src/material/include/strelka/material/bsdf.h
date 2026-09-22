@@ -18,20 +18,23 @@
 #include "bxdfs/hair_chiang.h"
 
 #if defined(__CUDA_ARCH__)
-DEVICE_FUNC void bsdf_init(SurfaceInteraction& si, const MaterialParams& params, const cudaTextureObject_t* textures)
+DEVICE_FUNC void bsdf_init(SurfaceInteraction& si,
+                           const MaterialParams& params,
+                           const cudaTextureObject_t* textures,
+                           float4 textureGradients)
 {
     // -- Base color --
-    float4 base_tex = texture_sample_2d(textures, params.base_color_tex, si.uv);
+    float4 base_tex = texture_sample_2d(textures, params.base_color_tex, si.uv, textureGradients);
     si.albedo = make_float3(
         params.base_color.x * base_tex.x, params.base_color.y * base_tex.y, params.base_color.z * base_tex.z);
 
     // -- Metallic / Roughness (glTF packs: G = roughness, B = metallic) --
-    float4 mr_tex = texture_sample_2d(textures, params.metallic_roughness_tex, si.uv);
+    float4 mr_tex = texture_sample_2d(textures, params.metallic_roughness_tex, si.uv, textureGradients);
     si.roughness = fmaxf(params.roughness * mr_tex.y, 0.0001f);
     si.metallic = saturate(params.metallic * mr_tex.z);
 
     // -- Emission --
-    float4 em_tex = texture_sample_2d(textures, params.emission_tex, si.uv);
+    float4 em_tex = texture_sample_2d(textures, params.emission_tex, si.uv, textureGradients);
     si.emission = make_float3(params.emission.x * em_tex.x * params.emission_strength,
                               params.emission.y * em_tex.y * params.emission_strength,
                               params.emission.z * em_tex.z * params.emission_strength);

@@ -182,10 +182,14 @@ private:
         float anamorphicRatio = 1.0f;
         float shiftX = 0.0f;
         float shiftY = 0.0f;
+        float cameraNear = 0.0f;
         uint32_t maxDepth = 0;
         uint32_t subsurfaceIterations = 0;
         uint32_t debug = 0;
+        uint32_t textureLodMode = 0;
+        float textureLodBias = 0.0f;
         float clampIndirect = 0.0f;
+        float clampDirect = 0.0f;
         uint32_t risCandidates = 0;
         uint32_t restirDIEnabled = 0;
         uint32_t initialCandidateCount = 0;

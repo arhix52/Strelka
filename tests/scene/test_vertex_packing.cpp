@@ -13,6 +13,7 @@ using oka::kTangentSignBit;
 using oka::packNormal;
 using oka::packTangent;
 using oka::packUV;
+using oka::packUVFloat;
 using oka::unpackNormal;
 using oka::unpackTangentSign;
 using oka::unpackUV;
@@ -261,4 +262,13 @@ TEST_CASE("packUV keeps the two components independent")
               (packUV(glm::float2(2.5f, 0.0f)) & 0x0000ffffu));
         CHECK((packUV(glm::float2(other, 2.5f)) >> 16) == (packUV(glm::float2(0.0f, 2.5f)) >> 16));
     }
+}
+
+TEST_CASE("full precision vertex UVs preserve texel-scale differences")
+{
+    const glm::float2 uv(0.500001f, -3.1250007f);
+    const glm::uvec2 bits = packUVFloat(uv);
+    const glm::float2 restored = unpackUV(bits.x, bits.y);
+    CHECK(restored.x == uv.x);
+    CHECK(restored.y == uv.y);
 }

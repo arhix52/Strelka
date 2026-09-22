@@ -67,6 +67,97 @@ def normal_override():
     return mat
 
 
+def material_input_pass(names, roughness=False, base_color=False, data=False, no_bump=False,
+                        data_node=None, uv=False):
+    """Emit selected materials' Normal, Roughness, or Base Color input."""
+    black = bpy.data.materials.new("__normal_black")
+    black.diffuse_color = (0.0, 0.0, 0.0, 1.0)
+    black.use_nodes = True
+    black_nodes = black.node_tree.nodes
+    black_links = black.node_tree.links
+    for node in list(black_nodes):
+        black_nodes.remove(node)
+    black_emission = black_nodes.new("ShaderNodeEmission")
+    black_emission.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+    black_output = black_nodes.new("ShaderNodeOutputMaterial")
+    black_links.new(black_emission.outputs["Emission"], black_output.inputs["Surface"])
+
+    wanted = set(names)
+    for ob in bpy.data.objects:
+        if ob.type != "MESH":
+            continue
+        for slot in ob.material_slots:
+            mat = slot.material
+            if mat is None or mat.name not in wanted:
+                slot.material = black
+
+    for name in wanted:
+        mat = bpy.data.materials.get(name)
+        if mat is None or not mat.use_nodes:
+            continue
+        nt = mat.node_tree
+        principled = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        output = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None)
+        if principled is None or output is None:
+            continue
+        if roughness or base_color or data or uv:
+            if uv:
+                source = nt.nodes.new("ShaderNodeTexCoord").outputs["UV"]
+                socket = None
+            elif data:
+                node = nt.nodes.get(data_node) if data_node else None
+                if node is not None:
+                    socket = node.outputs.get("Color")
+                else:
+                    normal = principled.inputs["Normal"]
+                    bump = normal.links[0].from_node if normal.links else None
+                    socket = bump.inputs["Height"] if bump and bump.type == "BUMP" else None
+            else:
+                socket = principled.inputs["Roughness" if roughness else "Base Color"]
+            if socket is None and not uv:
+                continue
+            if uv:
+                pass
+            elif socket.links:
+                source = socket.links[0].from_socket
+            else:
+                value = nt.nodes.new("ShaderNodeValue" if roughness else "ShaderNodeRGB")
+                value.outputs[0].default_value = socket.default_value
+                source = value.outputs[0]
+            emission = nt.nodes.new("ShaderNodeEmission")
+            if data and not data_node:
+                scale = nt.nodes.new("ShaderNodeVectorMath")
+                scale.operation = "SCALE"
+                scale.inputs[3].default_value = 0.1
+                nt.links.new(source, scale.inputs[0])
+                source = scale.outputs[0]
+            if roughness:
+                clamp = nt.nodes.new("ShaderNodeClamp")
+                clamp.inputs[1].default_value = 0.0
+                clamp.inputs[2].default_value = 1.0
+                nt.links.new(source, clamp.inputs[0])
+                source = clamp.outputs[0]
+            nt.links.new(source, emission.inputs["Color"])
+            nt.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+            continue
+
+        normal = principled.inputs["Normal"]
+        if no_bump:
+            normal = None
+        source = normal.links[0].from_socket if normal and normal.links else nt.nodes.new("ShaderNodeNewGeometry").outputs["Normal"]
+        mul = nt.nodes.new("ShaderNodeVectorMath")
+        mul.operation = "MULTIPLY"
+        mul.inputs[1].default_value = (0.5, 0.5, 0.5)
+        add = nt.nodes.new("ShaderNodeVectorMath")
+        add.operation = "ADD"
+        add.inputs[1].default_value = (0.5, 0.5, 0.5)
+        emission = nt.nodes.new("ShaderNodeEmission")
+        nt.links.new(source, mul.inputs[0])
+        nt.links.new(mul.outputs["Vector"], add.inputs[0])
+        nt.links.new(add.outputs["Vector"], emission.inputs["Color"])
+        nt.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+
+
 def merge_scenes():
     target = bpy.context.scene
     for sc in bpy.data.scenes:
@@ -87,10 +178,14 @@ def main():
     out = os.path.abspath(argv[argv.index("--out") + 1]) if "--out" in argv else "/tmp/normals.exr"
     width = int(argv[argv.index("--width") + 1]) if "--width" in argv else 1280
     height = int(argv[argv.index("--height") + 1]) if "--height" in argv else 720
+    samples = int(argv[argv.index("--spp") + 1]) if "--spp" in argv else 8
+    camera = argv[argv.index("--camera") + 1] if "--camera" in argv else None
     if "--merge" in argv:
         merge_scenes()
 
     sc = bpy.context.scene
+    if camera:
+        sc.camera = bpy.data.objects[camera]
     sc.render.engine = "CYCLES"
 
     # Metal GPU where it exists. This pass is geometry-only, so the CPU/GPU
@@ -124,7 +219,7 @@ def main():
     # returns a noisier image instead of never returning. Normals are constant
     # per direction, so the only thing extra samples buy is edge antialiasing.
     sc.cycles.time_limit = 60.0
-    sc.cycles.samples = 8
+    sc.cycles.samples = samples
     sc.cycles.use_denoising = False
     sc.cycles.use_adaptive_sampling = False
     for b in ("max_bounces", "diffuse_bounces", "glossy_bounces", "transmission_bounces"):
@@ -166,7 +261,17 @@ def main():
                 n.inputs["Strength"].default_value = 0.0
     sc.world = w
 
-    bpy.context.view_layer.material_override = normal_override()
+    if ("--material-normal" in argv or "--material-roughness" in argv or
+            "--material-base-color" in argv or "--material-data" in argv or
+            "--material-uv" in argv):
+        names = argv[argv.index("--materials") + 1].split(",") if "--materials" in argv else []
+        material_input_pass(names, "--material-roughness" in argv, "--material-base-color" in argv,
+                            "--material-data" in argv, "--no-bump" in argv,
+                            argv[argv.index("--material-data-node") + 1]
+                            if "--material-data-node" in argv else None,
+                            "--material-uv" in argv)
+    else:
+        bpy.context.view_layer.material_override = normal_override()
 
     sc.render.filepath = out
     bpy.ops.render.render(write_still=True)

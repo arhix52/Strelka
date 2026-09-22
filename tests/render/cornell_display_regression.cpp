@@ -53,6 +53,8 @@ float3 applyCurve(ToneMapperType type, const float3 color, float maxOutput)
         return oka::tonemap::ACESFitted(color, maxOutput);
     case ToneMapperType::eFilmic:
         return oka::tonemap::ACESFilm(color, maxOutput);
+    case ToneMapperType::eAgX:
+        return oka::tonemap::AgX(color, maxOutput);
     case ToneMapperType::eNone:
         break;
     }
@@ -74,6 +76,8 @@ const char* curveName(ToneMapperType type)
         return "ACES";
     case ToneMapperType::eFilmic:
         return "Filmic";
+    case ToneMapperType::eAgX:
+        return "AgX";
     case ToneMapperType::eNone:
         break;
     }

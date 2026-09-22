@@ -165,6 +165,122 @@ TEST_CASE("a bare image still reaches its slot")
     std::filesystem::remove(path);
 }
 
+TEST_CASE("the layered texture node preserves its four source images and graph parameters")
+{
+    const auto path = writeDoc(
+        "layered",
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"leather\" output=\"base_color\"/>\n"
+        "    <input name=\"specular_weight\" type=\"float\" nodename=\"leather\" output=\"specular_weight\"/>\n"
+        "    <input name=\"specular_ior\" type=\"float\" nodename=\"leather\" output=\"specular_ior\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" nodename=\"leather\" output=\"roughness\"/>\n"
+        "    <input name=\"geometry_opacity\" type=\"float\" nodename=\"leather\" output=\"opacity\"/>\n"
+        "    <input name=\"geometry_normal\" type=\"vector3\" nodename=\"leather\" output=\"normal\"/>\n",
+        "  <strelka_layered_texture name=\"leather\" type=\"multioutput\">\n"
+        "    <input name=\"file0\" type=\"filename\" value=\"base.jpg\"/>\n"
+        "    <input name=\"file1\" type=\"filename\" value=\"grain.png\" colorspace=\"lin_rec709\"/>\n"
+        "    <input name=\"data_file0\" type=\"filename\" value=\"height.exr\" colorspace=\"srgb_texture\"/>\n"
+        "    <input name=\"uv_scale0\" type=\"vector2\" value=\"1.4, 1.5\"/>\n"
+        "    <input name=\"data_uv_scale0\" type=\"vector2\" value=\"3, 4\"/>\n"
+        "    <input name=\"color_opacity\" type=\"vector4\" value=\"1, 0.05, 0.05, 0.02\"/>\n"
+        "    <input name=\"data_opacity\" type=\"vector4\" value=\"1, 0.2, 0.1, 0.05\"/>\n"
+        "    <input name=\"data_blend_mode\" type=\"vector4\" value=\"0, 1, 0, 0\"/>\n"
+        "    <input name=\"color_adjust1\" type=\"vector3\" value=\"0.1, 0.8, 2\"/>\n"
+        "    <input name=\"color_tone1\" type=\"vector3\" value=\"1.8, 0.2, -0.1\"/>\n"
+        "    <input name=\"color_blend_mode\" type=\"vector4\" value=\"0, 3, 0, 0\"/>\n"
+        "    <input name=\"color_factor_base\" type=\"vector4\" value=\"1, 0, 0, 0\"/>\n"
+        "    <input name=\"color_factor_facing\" type=\"vector4\" value=\"0, 0.7, 0, 0\"/>\n"
+        "    <input name=\"color_factor_facing_data\" type=\"vector4\" value=\"0, 0.3, 0, 0\"/>\n"
+        "    <input name=\"color_factor_data_layer\" type=\"vector4\" value=\"4, 1, 4, 4\"/>\n"
+        "    <input name=\"color_post_adjust\" type=\"vector3\" value=\"0.01, 0.5, 2\"/>\n"
+        "    <input name=\"color_post_tone\" type=\"vector3\" value=\"3, 0, 0\"/>\n"
+        "    <input name=\"color_base\" type=\"vector3\" value=\"0.1, 0.2, 0.3\"/>\n"
+        "    <input name=\"data_base\" type=\"vector3\" value=\"0.4, 0.5, 0.6\"/>\n"
+        "    <input name=\"color_adjust\" type=\"vector3\" value=\"0, 0, 2\"/>\n"
+        "    <input name=\"color_tone\" type=\"vector3\" value=\"0.8, -0.1, 0.2\"/>\n"
+        "    <input name=\"data_adjust\" type=\"vector3\" value=\"0.1, 0.5, 1.2\"/>\n"
+        "    <input name=\"roughness_gain\" type=\"float\" value=\"5.5\"/>\n"
+        "    <input name=\"specular_gain\" type=\"float\" value=\"5\"/>\n"
+        "    <input name=\"specular_ior_base\" type=\"float\" value=\"0.25\"/>\n"
+        "    <input name=\"specular_ior_mix\" type=\"float\" value=\"0.3\"/>\n"
+        "    <input name=\"specular_ior_authored\" type=\"float\" value=\"1.8\"/>\n"
+        "    <input name=\"specular_ior_uses_color\" type=\"integer\" value=\"1\"/>\n"
+        "    <input name=\"specular_color_base\" type=\"color3\" value=\"0.1, 0.2, 0.3\"/>\n"
+        "    <input name=\"specular_color_mix\" type=\"float\" value=\"0.4\"/>\n"
+        "    <input name=\"specular_color_uses_color\" type=\"integer\" value=\"1\"/>\n"
+        "    <input name=\"opacity_base\" type=\"float\" value=\"0.6\"/>\n"
+        "    <input name=\"opacity_mix\" type=\"float\" value=\"0.4\"/>\n"
+        "    <input name=\"opacity_facing_mix\" type=\"float\" value=\"0.2\"/>\n"
+        "    <input name=\"opacity_layer\" type=\"integer\" value=\"1\"/>\n"
+        "    <input name=\"bump_data_layer\" type=\"integer\" value=\"1\"/>\n"
+        "    <input name=\"bump_procedural\" type=\"integer\" value=\"2\"/>\n"
+        "    <input name=\"bump_procedural_scale\" type=\"float\" value=\"100\"/>\n"
+        "    <input name=\"bump_texture_mix\" type=\"float\" value=\"0.5\"/>\n"
+        "    <input name=\"layer_count\" type=\"integer\" value=\"2\"/>\n"
+        "  </strelka_layered_texture>\n");
+    const oka::mtlx::MaterialXMaterial m = load(path);
+
+    CHECK(m.texPaths[OPENPBR_TEX_LAYER_COLOR_0].find("base.jpg") != std::string::npos);
+    CHECK(m.texPaths[OPENPBR_TEX_LAYER_DATA_0].find("height.exr") != std::string::npos);
+    CHECK(m.texPaths[OPENPBR_TEX_LAYER_DATA_1].find("grain.png") != std::string::npos);
+    CHECK(m.texColorSpace[OPENPBR_TEX_LAYER_COLOR_0] == oka::TexColorSpace::Srgb);
+    CHECK(m.texColorSpace[OPENPBR_TEX_LAYER_DATA_0] == oka::TexColorSpace::Srgb);
+    CHECK(m.texColorSpace[OPENPBR_TEX_LAYER_COLOR_1] == oka::TexColorSpace::Linear);
+    CHECK(m.texColorSpace[OPENPBR_TEX_LAYER_DATA_1] == oka::TexColorSpace::Linear);
+    CHECK(m.layeredTexture.uv_scale_x[0] == doctest::Approx(1.4f));
+    CHECK(m.layeredTexture.data_uv_scale_x[0] == doctest::Approx(3.0f));
+    CHECK(m.layeredTexture.data_uv_scale_y[0] == doctest::Approx(4.0f));
+    CHECK(m.layeredTexture.color_opacity[1] == doctest::Approx(0.05f));
+    CHECK(m.layeredTexture.color_gamma[0] == doctest::Approx(0.8f));
+    CHECK(m.layeredTexture.color_brightness[0] == doctest::Approx(-0.1f));
+    CHECK(m.layeredTexture.data_hue[0] == doctest::Approx(0.1f));
+    CHECK(m.layeredTexture.data_saturation[0] == doctest::Approx(0.5f));
+    CHECK(m.layeredTexture.data_blend_mode[1] == OPENPBR_LAYER_BLEND_MIX);
+    CHECK(m.layeredTexture.color_blend_mode[1] == OPENPBR_LAYER_BLEND_SCREEN);
+    CHECK(m.layeredTexture.color_hue[1] == doctest::Approx(0.1f));
+    CHECK(m.layeredTexture.color_gamma[1] == doctest::Approx(1.8f));
+    CHECK(m.layeredTexture.color_factor_facing[1] == doctest::Approx(0.7f));
+    CHECK(m.layeredTexture.color_factor_facing_data[1] == doctest::Approx(0.3f));
+    CHECK(m.layeredTexture.color_factor_data_layer[1] == 1u);
+    CHECK(m.layeredTexture.color_post_gamma == doctest::Approx(3.0f));
+    CHECK(m.layeredTexture.color_has_base == 1u);
+    CHECK(m.layeredTexture.color_base[1] == doctest::Approx(0.2f));
+    CHECK(m.layeredTexture.data_has_base == 1u);
+    CHECK(m.layeredTexture.data_base[2] == doctest::Approx(0.6f));
+    CHECK(m.layeredTexture.roughness_gain == doctest::Approx(5.5f));
+    CHECK(m.layeredTexture.specular_gain == doctest::Approx(5.0f));
+    CHECK(m.layeredTexture.specular_ior_base == doctest::Approx(0.25f));
+    CHECK(m.layeredTexture.specular_ior_mix == doctest::Approx(0.3f));
+    CHECK(m.layeredTexture.specular_ior_authored == doctest::Approx(1.8f));
+    CHECK(m.layeredTexture.specular_ior_uses_color == 1u);
+    CHECK(m.layeredTexture.specular_color_base[0] == doctest::Approx(0.1f));
+    CHECK(m.layeredTexture.specular_color_base[2] == doctest::Approx(0.3f));
+    CHECK(m.layeredTexture.specular_color_mix == doctest::Approx(0.4f));
+    CHECK(m.layeredTexture.specular_color_uses_color == 1u);
+    CHECK(m.layeredTexture.opacity_base == doctest::Approx(0.6f));
+    CHECK(m.layeredTexture.opacity_mix == doctest::Approx(0.4f));
+    CHECK(m.layeredTexture.opacity_facing_mix == doctest::Approx(0.2f));
+    CHECK(m.layeredTexture.opacity_layer == 1u);
+    CHECK(m.layeredTexture.bump_data_layer == 1u);
+    CHECK(m.layeredTexture.bump_procedural == OPENPBR_LAYER_PROCEDURAL_NOISE);
+    CHECK(m.layeredTexture.bump_procedural_scale == doctest::Approx(100.0f));
+    CHECK(m.layeredTexture.bump_texture_mix == doctest::Approx(0.5f));
+    CHECK(m.layeredTexture.layer_count == 2u);
+    CHECK(m.layeredTexture.output_mask ==
+          (OPENPBR_LAYER_OUTPUT_BASE_COLOR | OPENPBR_LAYER_OUTPUT_SPECULAR_WEIGHT |
+           OPENPBR_LAYER_OUTPUT_SPECULAR_IOR |
+           OPENPBR_LAYER_OUTPUT_ROUGHNESS | OPENPBR_LAYER_OUTPUT_NORMAL |
+           OPENPBR_LAYER_OUTPUT_OPACITY));
+    CHECK(m.unsupported.empty());
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("MAX color correction uses Blender's reciprocal gamma")
+{
+    CHECK(max_color_correction_exponent(2.0f) == doctest::Approx(0.5f));
+    CHECK(max_color_correction_exponent(0.5f) == doctest::Approx(2.0f));
+    CHECK(max_color_correction_exponent(0.0f) == 0.0f);
+}
+
 // The library MaterialX ships is the honest measure of what folding bought: 48
 // materials across 50 documents, and the only inputs left unexpressed are the
 // ones no amount of arithmetic could reduce to a number.

@@ -120,7 +120,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     const bool outputScaled = width != outWidth || height != outHeight;
     const bool metalFxActive = temporalOn || outputScaled;
     const uint32_t requestedReconstructionFilter =
-        std::min(settings.getAs<uint32_t>("render/pt/reconstructionFilter"), RECONSTRUCTION_FILTER_LANCZOS2);
+        std::min(settings.getAs<uint32_t>("render/pt/reconstructionFilter"), RECONSTRUCTION_FILTER_BLACKMAN_HARRIS);
     // MetalFX temporal reconstruction owns a single frame-wide jitter that it
     // later removes. Per-pixel filter offsets cannot be expressed through that
     // API. Spatial scaling and non-accumulating playback have no such conflict.
@@ -133,7 +133,9 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     {
         const char* filterName = requestedReconstructionFilter == RECONSTRUCTION_FILTER_MITCHELL ? "Mitchell" :
                                  requestedReconstructionFilter == RECONSTRUCTION_FILTER_TENT     ? "Tent" :
-                                                                                                   "Lanczos 2";
+                                 requestedReconstructionFilter == RECONSTRUCTION_FILTER_LANCZOS2 ? "Lanczos 2" :
+                                 requestedReconstructionFilter == RECONSTRUCTION_FILTER_GAUSSIAN ? "Gaussian" :
+                                                                                                    "Blackman-Harris";
         STRELKA_WARNING(
             "Reconstruction filter '{}' is bypassed because MetalFX temporal jitter or a debug view owns camera sampling",
             filterName);
@@ -181,7 +183,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
     const uint32_t textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod") & TEXTURE_LOD_MODE_MASK;
     pUniformData->textureLodMode = textureLodMode | (reconstructionFilter << RECONSTRUCTION_FILTER_SHIFT);
-    pUniformData->textureLodBias = metalFxActive ? metal::metalFxMipBias(width, outWidth, temporalOn) : 0.0f;
+    pUniformData->textureLodBias = settings.getAs<float>("render/pt/textureLodBias") +
+                                   (metalFxActive ? metal::metalFxMipBias(width, outWidth, temporalOn) : 0.0f);
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
     pUniformData->subsurfaceIterations =
@@ -228,6 +231,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     pUniformData->useFrameJitter = temporalOn ? 1u : 0u;
     pUniformData->denoiseFireflyClamp = settings.getAs<float>("render/pt/denoiseFireflyClamp");
     pUniformData->clampIndirect = settings.getAs<float>("render/pt/clampIndirect");
+    pUniformData->clampDirect = settings.getAs<float>("render/pt/clampDirect");
     pUniformData->hasBoundedMedium = in.materials->hasBoundedMedium() ? 1u : 0u;
     {
         glm::float3 boundsMin(0.0f);
@@ -276,6 +280,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // Lens shift
     pUniformData->shiftX = camera.shiftX;
     pUniformData->shiftY = camera.shiftY;
+    pUniformData->cameraNear = camera.getNearClip();
 
     // Projection. The half-extents are adapted to the render aspect the same way
     // the perspective fov is (Camera::magForAspect), so a camera authored square
@@ -514,10 +519,14 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     settingsChanged |= (mPrevSettings.bladeRotation != pUniformData->bladeRotation);
     settingsChanged |= (mPrevSettings.anamorphicRatio != pUniformData->anamorphicRatio);
     settingsChanged |= (mPrevSettings.shiftX != pUniformData->shiftX) || (mPrevSettings.shiftY != pUniformData->shiftY);
+    settingsChanged |= (mPrevSettings.cameraNear != pUniformData->cameraNear);
     settingsChanged |= (mPrevSettings.maxDepth != maxDepth);
     settingsChanged |= (mPrevSettings.subsurfaceIterations != pUniformData->subsurfaceIterations);
     settingsChanged |= (mPrevSettings.debug != debug);
+    settingsChanged |= (mPrevSettings.textureLodMode != pUniformData->textureLodMode);
+    settingsChanged |= (mPrevSettings.textureLodBias != pUniformData->textureLodBias);
     settingsChanged |= (mPrevSettings.clampIndirect != pUniformData->clampIndirect);
+    settingsChanged |= (mPrevSettings.clampDirect != pUniformData->clampDirect);
     settingsChanged |= (mPrevSettings.risCandidates != pUniformData->risCandidates);
     settingsChanged |= (mPrevSettings.restirDIEnabled != pUniformData->restirDIEnabled);
     settingsChanged |= (mPrevSettings.initialCandidateCount != pUniformData->initialCandidateCount);
@@ -552,10 +561,14 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     mPrevSettings.anamorphicRatio = pUniformData->anamorphicRatio;
     mPrevSettings.shiftX = pUniformData->shiftX;
     mPrevSettings.shiftY = pUniformData->shiftY;
+    mPrevSettings.cameraNear = pUniformData->cameraNear;
     mPrevSettings.maxDepth = maxDepth;
     mPrevSettings.subsurfaceIterations = pUniformData->subsurfaceIterations;
     mPrevSettings.debug = debug;
+    mPrevSettings.textureLodMode = pUniformData->textureLodMode;
+    mPrevSettings.textureLodBias = pUniformData->textureLodBias;
     mPrevSettings.clampIndirect = pUniformData->clampIndirect;
+    mPrevSettings.clampDirect = pUniformData->clampDirect;
     mPrevSettings.risCandidates = pUniformData->risCandidates;
     mPrevSettings.restirDIEnabled = pUniformData->restirDIEnabled;
     mPrevSettings.initialCandidateCount = pUniformData->initialCandidateCount;

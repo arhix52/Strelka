@@ -16,6 +16,7 @@ struct MaterialXMaterial
     /// The <surfacematerial> name, which is what a scene binds by.
     std::string name;
     OpenPBRParams params{};
+    OpenPBRLayeredTextureParams layeredTexture{};
     /// Absolute paths, resolved against the document's own directory the way
     /// MaterialX resolves a filename input.
     std::array<std::string, MAX_OPENPBR_TEXTURES> texPaths;

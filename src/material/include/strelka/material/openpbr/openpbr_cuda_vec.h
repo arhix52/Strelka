@@ -144,10 +144,13 @@ STRELKA_OPENPBR_VEC_FUNC inline vec3 operator-(const vec3 a)
 
 STRELKA_OPENPBR_VEC_CMP(vec2, 2, ==)
 STRELKA_OPENPBR_VEC_CMP(vec2, 2, >)
+STRELKA_OPENPBR_VEC_CMP(vec2, 2, >=)
 STRELKA_OPENPBR_VEC_CMP(vec3, 3, ==)
 STRELKA_OPENPBR_VEC_CMP(vec3, 3, >)
+STRELKA_OPENPBR_VEC_CMP(vec3, 3, >=)
 STRELKA_OPENPBR_VEC_CMP(vec4, 4, ==)
 STRELKA_OPENPBR_VEC_CMP(vec4, 4, >)
+STRELKA_OPENPBR_VEC_CMP(vec4, 4, >=)
 #undef STRELKA_OPENPBR_VEC_CMP
 
 // `!=` is the negation of the all-component `==`, i.e. "differs in at least one

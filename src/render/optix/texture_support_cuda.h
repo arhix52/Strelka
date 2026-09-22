@@ -41,7 +41,7 @@ namespace oka::optix_tex
 
 // Bumped whenever the payload this backend writes changes meaning. It rides in
 // the cache key, so a bump orphans the old files rather than misreading them.
-inline constexpr uint32_t kOptixPayloadVersion = 1;
+inline constexpr uint32_t kOptixPayloadVersion = 3;
 
 /// One decoded, resampled, mipped and possibly compressed texture, in the form
 /// the CUDA array wants and in the form the cache file holds.
@@ -246,7 +246,7 @@ inline Payload readCachedPayload(const std::string& cachePath)
     detail::CachedHeader header{};
     detail::readRaw(in, &header, sizeof(header));
     if (!in || std::memcmp(header.magic, "OTEX", 4) != 0 || header.payloadVersion != kOptixPayloadVersion ||
-        header.width == 0 || header.height == 0 || header.levels != 1 ||
+        header.width == 0 || header.height == 0 || header.levels == 0 ||
         !isSupportedFormat(static_cast<Format>(header.format)))
         return payload;
     payload.plan.extent = Extent{ (int)header.width, (int)header.height };
@@ -274,7 +274,8 @@ inline Payload readCachedPayload(const std::string& cachePath)
 
 inline void writeCachedPayload(const Payload& payload, const std::string& cachePath)
 {
-    if (cachePath.empty() || !payload.valid || payload.plan.levels != 1 || payload.levels.size() != 1 ||
+    if (cachePath.empty() || !payload.valid || payload.plan.levels == 0 ||
+        payload.levels.size() != payload.plan.levels ||
         !isSupportedFormat(payload.plan.format))
         return;
     namespace fs = std::filesystem;
@@ -363,12 +364,22 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
     Plan plan = planTexture(planIn);
 
     const size_t texelBytesRaw = detail::rawTexelBytes(plan);
+    const bool normalMoments = plan.normalizeLevels && plan.format == Format::RGBA8;
+    if (normalMoments)
+        oka::bc::normalizeNormalMap(base.data(), srcW, srcH);
 
     // Resample to the planned extent, if it is not what the file holds.
     if (plan.extent.width != srcW || plan.extent.height != srcH)
     {
         std::vector<uint8_t> scaled((size_t)plan.extent.width * plan.extent.height * texelBytesRaw);
-        if (detail::resampleLevel(plan, base.data(), srcW, srcH, scaled.data(), plan.extent.width, plan.extent.height))
+        bool ok = true;
+        if (normalMoments)
+            oka::bc::downsampleNormalMoments(
+                base.data(), srcW, srcH, scaled.data(), plan.extent.width, plan.extent.height);
+        else
+            ok = detail::resampleLevel(
+                plan, base.data(), srcW, srcH, scaled.data(), plan.extent.width, plan.extent.height);
+        if (ok)
         {
             base = std::move(scaled);
         }
@@ -378,17 +389,42 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
         }
     }
 
-    if (plan.normalizeLevels && plan.format != Format::RGBA32F && plan.format != Format::RGBA16)
-    {
-        oka::bc::normalizeNormalMap(base.data(), plan.extent.width, plan.extent.height);
-    }
-
     Payload payload;
     payload.plan = plan;
-    payload.levels.push_back(
-        isCompressed(plan.format) ?
-            oka::bc::compressImage(base.data(), plan.extent.width, plan.extent.height, detail::bcFormat(plan.format)) :
-            std::move(base));
+    std::vector<std::vector<uint8_t>> rawLevels;
+    rawLevels.reserve(plan.levels);
+    rawLevels.push_back(std::move(base));
+    for (uint32_t level = 1; level < plan.levels; ++level)
+    {
+        const int prevW = std::max(1, plan.extent.width >> (level - 1));
+        const int prevH = std::max(1, plan.extent.height >> (level - 1));
+        const int width = std::max(1, plan.extent.width >> level);
+        const int height = std::max(1, plan.extent.height >> level);
+        std::vector<uint8_t> next((size_t)width * height * texelBytesRaw);
+        bool ok = true;
+        if (normalMoments)
+            oka::bc::downsampleNormalMoments(rawLevels.back().data(), prevW, prevH, next.data(), width, height);
+        else
+            ok = detail::resampleLevel(plan, rawLevels.back().data(), prevW, prevH, next.data(), width, height);
+        if (!ok)
+            return Payload{};
+        rawLevels.push_back(std::move(next));
+    }
+    payload.levels.reserve(plan.levels);
+    for (uint32_t level = 0; level < plan.levels; ++level)
+    {
+        if (isCompressed(plan.format))
+        {
+            payload.levels.push_back(oka::bc::compressImage(rawLevels[level].data(),
+                                                            std::max(1, plan.extent.width >> level),
+                                                            std::max(1, plan.extent.height >> level),
+                                                            detail::bcFormat(plan.format)));
+        }
+        else
+        {
+            payload.levels.push_back(std::move(rawLevels[level]));
+        }
+    }
     payload.valid = true;
     return payload;
 }
@@ -397,6 +433,7 @@ inline Payload decodeToPayload(const std::string& fileName, Kind kind, const Dec
 struct TextureResources
 {
     cudaArray_t array = nullptr;
+    cudaMipmappedArray_t mipmapped = nullptr;
     cudaTextureObject_t object = 0;
 };
 
@@ -405,7 +442,7 @@ inline TextureResources createTexture(const Payload& payload,
                                       cudaTextureAddressMode addressModeV = cudaAddressModeWrap)
 {
     TextureResources out;
-    if (!payload.valid || payload.plan.levels != 1 || payload.levels.size() != 1 ||
+    if (!payload.valid || payload.plan.levels == 0 || payload.levels.size() != payload.plan.levels ||
         !isSupportedFormat(payload.plan.format))
         return out;
 
@@ -413,23 +450,37 @@ inline TextureResources createTexture(const Payload& payload,
     const cudaChannelFormatDesc channel = detail::channelDesc(plan);
 
     cudaResourceDesc resDesc{};
-    if (cudaMallocArray(&out.array, &channel, (size_t)plan.extent.width, (size_t)plan.extent.height) != cudaSuccess)
+    if (cudaMallocMipmappedArray(&out.mipmapped, &channel,
+                                 make_cudaExtent((size_t)plan.extent.width, (size_t)plan.extent.height, 0),
+                                 plan.levels) != cudaSuccess)
         return TextureResources{};
-    const size_t pitch = detail::levelPitch(plan, plan.extent.width);
-    if (cudaMemcpy2DToArray(out.array, 0, 0, payload.levels[0].data(), pitch, pitch,
-                            detail::levelRows(plan, plan.extent.height), cudaMemcpyHostToDevice) != cudaSuccess)
+    for (uint32_t level = 0; level < plan.levels; ++level)
     {
-        cudaFreeArray(out.array);
-        return TextureResources{};
+        cudaArray_t levelArray = nullptr;
+        const int width = std::max(1, plan.extent.width >> level);
+        const int height = std::max(1, plan.extent.height >> level);
+        const size_t pitch = detail::levelPitch(plan, width);
+        if (cudaGetMipmappedArrayLevel(&levelArray, out.mipmapped, level) != cudaSuccess ||
+            cudaMemcpy2DToArray(levelArray, 0, 0, payload.levels[level].data(), pitch, pitch,
+                                detail::levelRows(plan, height), cudaMemcpyHostToDevice) != cudaSuccess)
+        {
+            cudaFreeMipmappedArray(out.mipmapped);
+            return TextureResources{};
+        }
+        if (level == 0)
+            out.array = levelArray;
     }
-    resDesc.resType = cudaResourceTypeArray;
-    resDesc.res.array.array = out.array;
+    resDesc.resType = cudaResourceTypeMipmappedArray;
+    resDesc.res.mipmap.mipmap = out.mipmapped;
 
     cudaTextureDesc texDesc{};
     texDesc.addressMode[0] = addressModeU;
     texDesc.addressMode[1] = addressModeV;
     texDesc.addressMode[2] = cudaAddressModeWrap;
     texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.mipmapFilterMode = cudaFilterModeLinear;
+    texDesc.maxAnisotropy = 16;
+    texDesc.maxMipmapLevelClamp = (float)(plan.levels - 1);
     // A float array is read as it was written; everything else is a normalized
     // integer format and comes back in [0,1].
     texDesc.readMode = plan.format == Format::RGBA32F ? cudaReadModeElementType : cudaReadModeNormalizedFloat;
@@ -437,8 +488,8 @@ inline TextureResources createTexture(const Payload& payload,
     texDesc.sRGB = (plan.srgbTextureFlag || plan.srgbBlockFormat) ? 1 : 0;
     if (cudaCreateTextureObject(&out.object, &resDesc, &texDesc, nullptr) != cudaSuccess)
     {
-        if (out.array)
-            cudaFreeArray(out.array);
+        if (out.mipmapped)
+            cudaFreeMipmappedArray(out.mipmapped);
         return TextureResources{};
     }
     return out;

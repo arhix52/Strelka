@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Express a glTF scene's materials as MaterialX OpenPBR.
 
-    tools/gltf_to_mtlx.py scenes/iso_bathroom/iso_bathroom.gltf
+    tools/gltf_to_mtlx.py [--exact-only] [--simple-only] scenes/iso_bathroom/iso_bathroom.gltf
 
 Writes <stem>.mtlx beside the scene, which the loader picks up automatically
 (gltfloader.cpp::loadMaterialXFromSidecar). Materials are matched by name, so no
@@ -66,8 +66,9 @@ def convert(mat, images, textures, notes):
     # The factor of two: gltfloader.cpp stores specularFactor halved, and OpenPBR
     # means the unhalved thing. Here we read the glTF directly, so no halving has
     # happened and none is undone -- the value goes across as written.
-    inputs["specular_weight"] = ("float",
-                                 min(1.0, ext(mat, "KHR_materials_specular", "specularFactor", 1.0)))
+    inputs["specular_weight"] = (
+        "float", 1.0 if inputs["base_metalness"][1] >= 1.0 else
+        min(1.0, ext(mat, "KHR_materials_specular", "specularFactor", 1.0)))
     sc = ext(mat, "KHR_materials_specular", "specularColorFactor", None)
     if sc:
         inputs["specular_color"] = ("color3", sc)
@@ -80,15 +81,10 @@ def convert(mat, images, textures, notes):
             inputs["transmission_depth"] = ("float", d)
             inputs["transmission_color"] = (
                 "color3", ext(mat, "KHR_materials_volume", "attenuationColor", [1, 1, 1]))
-        # Thin-walled only when KHR_materials_volume is actually there and says
-        # so. Absence of the extension reads as *solid*, deliberately against a
-        # plain reading of the spec -- gltfloader.cpp carries the same rule and
-        # the note about the Blender export quirk behind it. Defaulting
-        # thicknessFactor to 0 instead made every untouched glass thin-walled,
-        # which is what put 4.3% between this file and the renderer's own
-        # mapping the first time the two were compared.
+        # Transmission without KHR_materials_volume is a thin surface. A volume
+        # only becomes solid when it explicitly has positive thickness.
         vol = mat.get("extensions", {}).get("KHR_materials_volume")
-        if isinstance(vol, dict) and vol.get("thicknessFactor", 0.0) <= 0.0:
+        if not isinstance(vol, dict) or vol.get("thicknessFactor", 0.0) <= 0.0:
             inputs["geometry_thin_walled"] = ("boolean", True)
 
     cc = ext(mat, "KHR_materials_clearcoat", "clearcoatFactor", 0.0)
@@ -220,10 +216,14 @@ def fmt(kind, value):
 
 
 def main():
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    exact_only = "--exact-only" in args
+    simple_only = "--simple-only" in args
+    args = [arg for arg in args if arg not in ("--exact-only", "--simple-only")]
+    if not args:
         print(__doc__)
         return 1
-    src = sys.argv[1]
+    src = args[0]
     doc = json.load(open(src))
     images = doc.get("images", [])
     textures = doc.get("textures", [])
@@ -236,12 +236,22 @@ def main():
            f'       mapping is exact about and what it approximates. -->']
 
     textured = 0
+    emitted = 0
+    skipped = 0
     notes = []
+    simple_extensions = {"KHR_materials_ior", "KHR_materials_specular"}
     for m in mats:
         name = m.get("name")
         if not name:
             continue
+        note_count = len(notes)
         inputs, maps = convert(m, images, textures, notes)
+        if (exact_only and len(notes) != note_count) or \
+                (simple_only and (maps or not set(m.get("extensions", {})) <= simple_extensions or
+                                  m.get("alphaMode", "OPAQUE") != "OPAQUE")):
+            skipped += 1
+            continue
+        emitted += 1
         if maps:
             textured += 1
         # Only the *internal* node names are sanitised. The surfacematerial keeps
@@ -286,7 +296,9 @@ def main():
 
     dst = os.path.splitext(src)[0] + ".mtlx"
     open(dst, "w").write("\n".join(out) + "\n")
-    print(f"{len(mats)} material(s), {textured} with maps -> {dst}")
+    print(f"{emitted} material(s), {textured} with maps -> {dst}")
+    if skipped:
+        print(f"  skipped {skipped} lossy material(s); use render.material_model=openpbr for them")
     for n in notes:
         print(f"  not carried: {n}")
     return 0

@@ -9,7 +9,7 @@
 namespace oka::texture
 {
 
-inline constexpr uint32_t kTextureCacheKeyVersion = 2;
+inline constexpr uint32_t kTextureCacheKeyVersion = 3;
 
 struct TextureCacheKeyInputs
 {

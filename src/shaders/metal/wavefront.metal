@@ -53,10 +53,20 @@ static void applyOpenPBRBaseTextures(thread OpenPBR_BaseParams& p,
     t.tex[slot].sample(openpbrSampler, tuv, level(texLod(t.tex[slot], lodBase, hasLod)))
 
     const uint32_t mask = source.texture_mask;
+    if (t.layered.output_mask != 0u)
+    {
+        OpenPBRParams layered = source;
+        applyOpenPBRLayeredTexture(layered, t, si, uv, lodBase);
+        p.base_color = layered.base_color;
+        p.specular_color = layered.specular_color;
+        p.specular_roughness = layered.specular_roughness;
+    }
     if ((mask & (1u << OPENPBR_TEX_BASE_COLOR)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_BASE_COLOR]))
     {
         const float3 v = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_BASE_COLOR).rgb;
-        p.base_color = OpenPBRColor{ v.r, v.g, v.b };
+        p.base_color = (source.texture_scalar_flags & OPENPBR_TEXTURES_GLTF) != 0u ?
+                           OpenPBRColor{ p.base_color.r * v.r, p.base_color.g * v.g, p.base_color.b * v.b } :
+                           OpenPBRColor{ v.r, v.g, v.b };
     }
     if ((mask & (1u << OPENPBR_TEX_BASE_METALNESS)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_BASE_METALNESS]))
     {
@@ -64,7 +74,11 @@ static void applyOpenPBRBaseTextures(thread OpenPBR_BaseParams& p,
     }
     if ((mask & (1u << OPENPBR_TEX_SPECULAR_ROUGHNESS)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ROUGHNESS]))
     {
-        p.specular_roughness = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_SPECULAR_ROUGHNESS).r;
+        const float4 v = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_SPECULAR_ROUGHNESS);
+        const float roughness = v[source.texture_scalar_flags & OPENPBR_ROUGHNESS_CHANNEL_MASK];
+        p.specular_roughness = (source.texture_scalar_flags & OPENPBR_ROUGHNESS_MULTIPLY) != 0u ?
+                                   p.specular_roughness * roughness :
+                                   roughness;
     }
     if ((mask & (1u << OPENPBR_TEX_SPECULAR_ANISOTROPY)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ANISOTROPY]))
     {
@@ -79,14 +93,17 @@ static void applyOpenPBRBaseTextures(thread OpenPBR_BaseParams& p,
     {
         constexpr sampler emissionSampler(mag_filter::linear, min_filter::linear, address::repeat);
         const float3 v = t.tex[OPENPBR_TEX_EMISSION_COLOR].sample(emissionSampler, tuv).rgb;
-        si.emission = v * source.emission_luminance;
+        const float3 tint = (source.texture_scalar_flags & OPENPBR_TEXTURES_GLTF) != 0u ?
+                                float3(source.emission_color.r, source.emission_color.g, source.emission_color.b) * v :
+                                v;
+        si.emission = tint * source.emission_luminance;
     }
     if ((mask & (1u << OPENPBR_TEX_GEOMETRY_NORMAL)) != 0u && !is_null_texture(t.tex[OPENPBR_TEX_GEOMETRY_NORMAL]))
     {
         const float2 xy = SAMPLE_OPENPBR_BASE_TEXTURE(OPENPBR_TEX_GEOMETRY_NORMAL).xy * 2.0f - 1.0f;
         const float z = sqrt(saturate(1.0f - dot(xy, xy)));
         const float3x3 TBN = float3x3(si.tangent, si.bitangent, si.shading_normal);
-        si.shading_normal = normalize(TBN * float3(xy, z));
+        si.shading_normal = normalize(TBN * float3(xy * source.texture_normal_scale, z));
         si.bump_normal = si.shading_normal;
         if (dot(si.shading_normal, si.wo) <= 0.0f)
         {
@@ -243,6 +260,11 @@ static inline void auditExtendWork(constant Uniforms& uniforms, uint32_t bounce)
     }
 }
 
+static inline void addFilteredRadiance(device float4* radianceOut, uint32_t pixelIndex, float3 radiance)
+{
+    radianceOut[pixelIndex] += float4(radiance * radianceOut[pixelIndex].w, 0.0f);
+}
+
 static inline device RestirDiagnosticRecord* restirDiagnosticRecord(constant Uniforms& uniforms, uint32_t pixelIndex)
 {
     if (!SPEC_RENDER_WORK_AUDIT || uniforms.renderWorkCounters == nullptr)
@@ -349,6 +371,10 @@ static inline float cutoutOpacityAt(uint primitive_id,
     const GeometryEntry entry = geometryEntries[geometry_entry_base + geometry_id];
     device const Material& mat = materials[entry.materialId];
 
+    if (mat.alpha_mode == ALPHA_MODE_SHADOW_TRANSPARENT)
+    {
+        return 0.0f;
+    }
     if (mat.alpha_mode == ALPHA_MODE_OPAQUE)
     {
         return 1.0f; // blocks outright
@@ -360,7 +386,9 @@ static inline float cutoutOpacityAt(uint primitive_id,
     for (uint32_t k = 0; k < 3; ++k)
     {
         const uint32_t idx = indexBuffer[entry.indexOffset + primitive_id * 3 + k];
-        uvv[k] = unpackUV(*(device const uint32_t*)(vertexBuffer + (entry.vbOffset + idx) * vtxStride + uvOff));
+        device const char* vertex = vertexBuffer + (entry.vbOffset + idx) * vtxStride;
+        uvv[k] = unpackUV(*(device const uint32_t*)(vertex + uvOff),
+                          *(device const uint32_t*)(vertex + uvOff + 4u));
     }
     const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], barycentric_coord);
     return resolveOpacity(mat, uv);
@@ -397,6 +425,10 @@ static inline float cutoutOpacityAtPrimitive(uint primitive_id,
 {
     const GeometryEntry entry = geometryEntries[geometry_entry_base + geometry_id];
     device const Material& mat = materials[entry.materialId];
+    if (mat.alpha_mode == ALPHA_MODE_SHADOW_TRANSPARENT)
+    {
+        return 0.0f;
+    }
     if (mat.alpha_mode == ALPHA_MODE_OPAQUE)
     {
         return 1.0f;
@@ -434,6 +466,10 @@ static inline float cutoutOpacityAtSelected(uint primitive_id,
 // full Material spreads these few fields across a 296-byte shading record.
 static inline float resolveKnownCutoutOpacity(device const AlphaMaterialData& material, float2 uv)
 {
+    if (material.alphaMode == ALPHA_MODE_SHADOW_TRANSPARENT)
+    {
+        return 0.0f;
+    }
     constexpr sampler alphaSampler(mag_filter::linear, min_filter::linear, address::repeat);
     constexpr sampler alphaNearestSampler(mag_filter::nearest, min_filter::nearest, address::repeat);
     float alpha = SPEC_ALPHA_BASE_COLOR_ONE ? 1.0f : material.baseColorAlpha;
@@ -479,6 +515,10 @@ static inline bool cutoutShadowAccept(float2 barycentricCoord,
                                       device const AlphaMaterialData* alphaMaterials)
 {
     device const AlphaMaterialData& material = alphaMaterials[entry.materialId];
+    if (material.alphaMode == ALPHA_MODE_SHADOW_TRANSPARENT)
+    {
+        return false;
+    }
     float2 uv = decodeInterpolatedCutoutUv(primitive, recordIndex, primitiveAlphaDecode, barycentricCoord);
     if ((material.features & MATERIAL_TEX_BASE_COLOR) != 0u && !is_null_texture(material.baseColorTexture))
     {
@@ -571,13 +611,15 @@ static inline float cutoutOpacityAtCompact(uint primitive_id,
     }
     constexpr uint32_t vtxStride = 32;
     constexpr uint32_t uvOff = 20;
-    uint32_t uvv[3];
+    float2 uvv[3];
     for (uint32_t k = 0; k < 3; ++k)
     {
         const uint32_t idx = indexBuffer[entry.indexOffset + primitive_id * 3 + k];
-        uvv[k] = *(device const uint32_t*)(vertexBuffer + (entry.vbOffset + idx) * vtxStride + uvOff);
+        device const char* vertex = vertexBuffer + (entry.vbOffset + idx) * vtxStride;
+        uvv[k] = unpackUV(*(device const uint32_t*)(vertex + uvOff),
+                          *(device const uint32_t*)(vertex + uvOff + 4u));
     }
-    const float2 uv = decodeInterpolatedCutoutUv(uvv[0], uvv[1], uvv[2], barycentric_coord);
+    const float2 uv = interpolateAttrib(uvv[0], uvv[1], uvv[2], barycentric_coord);
     return resolveKnownCutoutOpacity(material, uv);
 }
 
@@ -1293,8 +1335,7 @@ static inline PrimaryPathData initializePrimaryPath(uint2 pixel,
     float3 origin, direction;
     float reconstructionWeight;
     generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime, reconstructionWeight);
-    const bool signedReconstruction = reconstructionFilter == RECONSTRUCTION_FILTER_MITCHELL ||
-                                      reconstructionFilter == RECONSTRUCTION_FILTER_LANCZOS2;
+    const bool signedReconstruction = reconstructionFilterIsSigned(reconstructionFilter);
     if (signedReconstruction)
     {
         if (sampleIdx == 0u)
@@ -1956,7 +1997,7 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
 
     const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
     const uint32_t depth = pathDepth(pathFlags);
-    const float coneSpread = (depth == 0u || (pathFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
+    const float coneSpread = pixelSpread;
     const float coneWidthHere = coneSpread * hit.distance;
     if (SPEC_TEXTURE_LOD_CODE && (uniforms.textureLodMode & TEXTURE_LOD_MODE_MASK) != 0u && uvArea2 > 0.0f &&
         coneWidthHere > 0.0f)
@@ -2396,7 +2437,7 @@ static void fetchTriangle(device const char* vertexBuffer,
         const uint32_t tanPacked = *(device const uint32_t*)(v + tangentOff);
         const float4 tanUnorm = unpack_unorm10a2_to_float(tanPacked);
         const float3 tan = tanUnorm.xyz * 2.0f - 1.0f;
-        uv[k] = unpackUV(*(device const uint32_t*)(v + uvOff));
+        uv[k] = unpackUV(*(device const uint32_t*)(v + uvOff), *(device const uint32_t*)(v + uvOff + 4u));
         // Vertex colour is not skinned and does not animate, so it is read from
         // the current frame even when the rest is motion-interpolated.
         vcol[k] = unpackVertexColor(*(device const uint32_t*)(v + colorOff));
@@ -2578,7 +2619,8 @@ static void fetchTriangleBlended(device const char* vertexBuffer,
 
         outNormal += nrm * weight[k];
         outTangent += tan * weight[k];
-        const float2 vertUv = unpackUV(*(device const uint32_t*)(v + uvOff));
+        const float2 vertUv =
+            unpackUV(*(device const uint32_t*)(v + uvOff), *(device const uint32_t*)(v + uvOff + 4u));
         outUv += vertUv * weight[k];
         if (k == 0)
             uv0 = vertUv;
@@ -3027,7 +3069,8 @@ kernel void wavefrontMiss(uint gid [[thread_position_in_grid]],
         sharcUpdateMiss(updateState, uniforms, sharcAccumulation, sharcEnvironment, -rayDir);
         sharcUpdates[updateIndex] = updateState;
     }
-    radianceOut[tid] += float4(clampIndirectContribution(radiance, depth, uniforms.clampIndirect), 0.0f);
+    addFilteredRadiance(radianceOut, tid,
+                        clampPathContribution(radiance, depth, uniforms.clampDirect, uniforms.clampIndirect));
 }
 
 // ---------------------------------------------------------------------------
@@ -3696,7 +3739,8 @@ static inline void wavefrontShadeImpl(uint gid,
                     ShadowRay sr;
                     sr.origin = packed_float3(scatterPoint);
                     sr.direction = packed_float3(visibility.direction);
-                    sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                    sr.weight = packed_float3(
+                        clampPathContribution(weight, depth, uniforms.clampDirect, uniforms.clampIndirect));
                     sr.maxDistance = visibility.maxDistance;
                     sr.pixelIndex = tid;
                     sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
@@ -3720,7 +3764,7 @@ static inline void wavefrontShadeImpl(uint gid,
             random2<SampleDimension::eFogPhaseU, SampleDimension::eFogPhaseV>(rng, uniforms.samplerType).value;
         const float3 nextDir = hgSample(-rayDir, uniforms.fogAnisotropy, phaseRandom.x, phaseRandom.y, phasePdf);
 
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
 
         // Roulette on the medium's albedo, which is the only thing multiplying
         // the throughput here. Without it a thin haze is a very long random walk
@@ -3805,7 +3849,8 @@ static inline void wavefrontShadeImpl(uint gid,
                                          (SPEC_ENV_MAP && uniforms.hasEnvMap));
         if (isBounded)
         {
-            radiance += clampIndirectContribution(throughput * float3(mm.medium_emission), depth, uniforms.clampIndirect);
+            radiance += clampPathContribution(throughput * float3(mm.medium_emission), depth,
+                                              uniforms.clampDirect, uniforms.clampIndirect);
 
             if (didNeeVolume)
             {
@@ -3833,7 +3878,8 @@ static inline void wavefrontShadeImpl(uint gid,
                         ShadowRay sr;
                         sr.origin = packed_float3(scatterPoint);
                         sr.direction = packed_float3(visibility.direction);
-                        sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.weight = packed_float3(
+                            clampPathContribution(weight, depth, uniforms.clampDirect, uniforms.clampIndirect));
                         sr.maxDistance = visibility.maxDistance;
                         sr.pixelIndex = tid;
                         sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
@@ -3858,7 +3904,7 @@ static inline void wavefrontShadeImpl(uint gid,
             random2<SampleDimension::eSssPhaseU, SampleDimension::eSssPhaseV>(wrng, uniforms.samplerType).value;
         const float3 nextDir = hgSample(-rayDir, mm.subsurface_anisotropy, phaseRandom.x, phaseRandom.y, phasePdf);
 
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
 
         // Roulette on what the walk has left. The step ceiling is a backstop for
         // a medium dense enough that roulette alone would take thousands of
@@ -4035,7 +4081,8 @@ static inline void wavefrontShadeImpl(uint gid,
             sharcUpdateMiss(updateState, uniforms, sharcAccumulation, sharcLight, -rayDir);
             sharcUpdates[updateIndex] = updateState;
         }
-        radianceOut[tid] += float4(clampIndirectContribution(radiance, depth, uniforms.clampIndirect), 0.0f);
+        addFilteredRadiance(radianceOut, tid,
+                            clampPathContribution(radiance, depth, uniforms.clampDirect, uniforms.clampIndirect));
         return;
     }
 
@@ -4104,7 +4151,7 @@ static inline void wavefrontShadeImpl(uint gid,
             shadingTangent = orthonormalizeTangent(shadingNormal, transformDirection(objectTangent, axisX, axisY, axisZ));
 
             const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
-            const float coneSpread = (depth == 0u || (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
+            const float coneSpread = pixelSpread;
             const float coneWidthHere = coneSpread * rec.distance;
             if (SPEC_TEXTURE_LOD_CODE && (uniforms.textureLodMode & TEXTURE_LOD_MODE_MASK) != 0u && uvArea2 > 0.0f &&
                 worldArea2 > 1e-20f && coneWidthHere > 0.0f)
@@ -4128,7 +4175,7 @@ static inline void wavefrontShadeImpl(uint gid,
         const uint32_t passes = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
         if (passes >= PATH_PASSTHROUGH_MAX)
         {
-            radianceOut[tid] += float4(radiance, 0.0f);
+            addFilteredRadiance(radianceOut, tid, radiance);
             return;
         }
         p.depthAndFlags = (p.depthAndFlags & ~PATH_PASSTHROUGH_MASK) |
@@ -4148,7 +4195,7 @@ static inline void wavefrontShadeImpl(uint gid,
         rays[tid] = nextRay;
 
         p.misDistance += rec.distance;
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
         if (SPEC_SHARC_UPDATE)
         {
             const uint32_t updateIndex = sharcUpdateStateIndex(uniforms, tid);
@@ -4227,7 +4274,8 @@ static inline void wavefrontShadeImpl(uint gid,
                         ShadowRay sr;
                         sr.origin = packed_float3(shadowOrigin);
                         sr.direction = packed_float3(visibility.direction);
-                        sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.weight = packed_float3(
+                            clampPathContribution(weight, depth, uniforms.clampDirect, uniforms.clampIndirect));
                         sr.maxDistance = visibility.maxDistance;
                         sr.pixelIndex = tid;
                         sr.medium = 0u;
@@ -4251,7 +4299,7 @@ static inline void wavefrontShadeImpl(uint gid,
             random2<SampleDimension::eSssPhaseU, SampleDimension::eSssPhaseV>(xrng, uniforms.samplerType).value;
         const float3 exitDir = sssCosineDirection(outward, phaseRandom.x, phaseRandom.y);
 
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
 
         const float survive = clamp(max(max(throughput.x, throughput.y), throughput.z), 0.05f, 1.0f);
         if (random<SampleDimension::eRussianRoulette>(xrng, uniforms.samplerType) >= survive)
@@ -4333,7 +4381,7 @@ static inline void wavefrontShadeImpl(uint gid,
         if (u >= si.opacity)
         {
             const uint32_t passes = (p.depthAndFlags & PATH_PASSTHROUGH_MASK) >> PATH_PASSTHROUGH_SHIFT;
-            radianceOut[tid] += float4(radiance, 0.0f);
+            addFilteredRadiance(radianceOut, tid, radiance);
             if (passes >= PATH_PASSTHROUGH_MAX)
             {
                 return;
@@ -4420,7 +4468,7 @@ static inline void wavefrontShadeImpl(uint gid,
             dbg = float3(
                 motionTime, clamp(length(normalize(motionNormal) - normalize(nCur[0])) * 10.0f, 0.0f, 1.0f), 0.0f);
         }
-        radianceOut[tid] += float4(dbg, 0.0f);
+        addFilteredRadiance(radianceOut, tid, dbg);
         return;
     }
 
@@ -4671,7 +4719,7 @@ static inline void wavefrontShadeImpl(uint gid,
                     cached += surfaceEmission;
                 }
                 radiance += throughput * cached;
-                radianceOut[tid] += float4(radiance, 0.0f);
+                addFilteredRadiance(radianceOut, tid, radiance);
                 paths[tid] = p;
                 return;
             }
@@ -4860,7 +4908,7 @@ static inline void wavefrontShadeImpl(uint gid,
                 const float3 weight = throughput * candidate.integrand * W;
                 if (SPEC_SHADE_PROBE == 9u)
                 {
-                    radiance += clampIndirectContribution(weight, depth, uniforms.clampIndirect);
+                    radiance += clampPathContribution(weight, depth, uniforms.clampDirect, uniforms.clampIndirect);
                 }
                 else
                 {
@@ -4873,7 +4921,8 @@ static inline void wavefrontShadeImpl(uint gid,
                         ShadowRay sr;
                         sr.origin = packed_float3(shadowOrigin);
                         sr.direction = packed_float3(visibility.direction);
-                        sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.weight = packed_float3(
+                            clampPathContribution(weight, depth, uniforms.clampDirect, uniforms.clampIndirect));
                         sr.maxDistance = visibility.maxDistance;
                         sr.pixelIndex = tid;
                         sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
@@ -5340,7 +5389,8 @@ static inline void wavefrontShadeImpl(uint gid,
                         ShadowRay sr;
                         sr.origin = packed_float3(shadowOrigin);
                         sr.direction = packed_float3(visibility.direction);
-                        sr.weight = packed_float3(clampIndirectContribution(weight, depth, uniforms.clampIndirect));
+                        sr.weight = packed_float3(
+                            clampPathContribution(weight, depth, uniforms.clampDirect, uniforms.clampIndirect));
                         sr.maxDistance = visibility.maxDistance;
                         sr.pixelIndex = tid;
                         sr.medium = mediumState.medium & MEDIUM_INDEX_MASK;
@@ -5372,19 +5422,19 @@ static inline void wavefrontShadeImpl(uint gid,
     {
         // NEE has already emitted its shadow record. Probe 2 retains the full
         // path, while probe 8 omits BSDF prepare/eval; both remove continuation.
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
         return;
     }
 
     if (!SPEC_SHARC_UPDATE && depth + 1u >= uniforms.maxDepth)
     {
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
         return;
     }
 
     if (kShadeBase)
     {
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
         radiance = float3(0.0f);
     }
 
@@ -5423,7 +5473,7 @@ static inline void wavefrontShadeImpl(uint gid,
     {
         // Whatever next-event estimation queued above stays: it is this vertex's
         // direct lighting and does not depend on where the path went next.
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
         return;
     }
 
@@ -5626,7 +5676,7 @@ static inline void wavefrontShadeImpl(uint gid,
 
     if (sssRefractedEntry && dot(faceNg, nextDir) >= 0.0f)
     {
-        radianceOut[tid] += float4(radiance, 0.0f);
+        addFilteredRadiance(radianceOut, tid, radiance);
         return;
     }
 
@@ -5648,7 +5698,7 @@ static inline void wavefrontShadeImpl(uint gid,
     didNee = neePairsWithBounce(
         didNee, neeCrosses, neeFrame.frontFace, neeFrame.normalSign * dot(si.shading_normal, nextDir));
 
-    radianceOut[tid] += float4(radiance, 0.0f);
+    addFilteredRadiance(radianceOut, tid, radiance);
 
     bool alive = dot(nextThroughput, nextThroughput) >= 1e-4f;
     if (alive && depth > 3u)
@@ -6157,7 +6207,8 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
                   connection.origin;
     const EmissiveVisibilitySegment visibility = lightVisibilitySegment(connection, shadowOrigin);
     const float3 weight =
-        clampIndirectContribution(storedThroughput * evaluated.integrand * W, 0u, uniforms.clampIndirect);
+        clampPathContribution(storedThroughput * evaluated.integrand * W, 0u, uniforms.clampDirect,
+                              uniforms.clampIndirect);
     if (!any(weight != 0.0f) || !visibility.valid)
     {
         return;
@@ -6208,7 +6259,7 @@ kernel void wavefrontRestirSpatialFinal(uint gid [[thread_position_in_grid]],
         {
             return;
         }
-        radianceOut[tid] += float4(visibleWeight, 0.0f);
+        addFilteredRadiance(radianceOut, tid, visibleWeight);
         restirDiagnosticVisibility(uniforms, tid, visibleWeight);
         if (restirVisibilityAge(reservoir.visibility) == 0u)
             auditWork(uniforms, WORK_RESTIR_INITIAL_VISIBILITY_REUSED);
@@ -7094,7 +7145,7 @@ static void shadowImpl(uint gid,
             if (restirHistoryRay)
                 auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
         }
-        radianceOut[contribution.pixelIndex] += float4(weight, 0.0f);
+        addFilteredRadiance(radianceOut, contribution.pixelIndex, weight);
         if (SPEC_SHARC_UPDATE)
         {
             const uint32_t sharcPathIndex = pathIndex & RESTIR_AUDIT_PATH_INDEX_MASK;
@@ -7179,7 +7230,7 @@ static void shadowImpl(uint gid,
         if (restirHistoryRay)
             auditWork(uniforms, WORK_RESTIR_FINAL_HISTORY_VISIBLE);
     }
-    radianceOut[contribution.pixelIndex] += float4(weight, 0.0f);
+    addFilteredRadiance(radianceOut, contribution.pixelIndex, weight);
     if (SPEC_SHARC_UPDATE)
     {
         const uint32_t sharcPathIndex = pathIndex & RESTIR_AUDIT_PATH_INDEX_MASK;

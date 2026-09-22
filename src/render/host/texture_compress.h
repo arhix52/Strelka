@@ -174,6 +174,7 @@ inline void normalizeNormalMap(uint8_t* rgba, int width, int height)
             p[0] = 128;
             p[1] = 128;
             p[2] = 255;
+            p[3] = 255;
             continue;
         }
         const auto encode = [](float v) {
@@ -183,6 +184,58 @@ inline void normalizeNormalMap(uint8_t* rgba, int width, int height)
         p[0] = encode(x / len);
         p[1] = encode(y / len);
         p[2] = encode(z / len);
+        // Normal-map alpha is not a glTF material input. Reserve it for the
+        // length of the average unit normal in coarser mips: 1 at mip zero.
+        p[3] = 255;
+    }
+}
+
+/// Box-filter a normal map while retaining the length of E[n] in alpha.
+/// RGB stores the normalized mean direction; alpha stores its concentration.
+/// Feeding direction * concentration into the next level makes the statistic
+/// associative, so every mip represents all level-zero normals below it.
+inline void downsampleNormalMoments(
+    const uint8_t* src, int srcWidth, int srcHeight, uint8_t* dst, int dstWidth, int dstHeight)
+{
+    const auto decode = [](uint8_t v) { return (float)v / 255.0f * 2.0f - 1.0f; };
+    const auto encode = [](float v) {
+        return (uint8_t)std::lround(std::clamp((v * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+    };
+
+    for (int y = 0; y < dstHeight; ++y)
+    {
+        const int y0 = y * srcHeight / dstHeight;
+        const int y1 = std::max(y0 + 1, (y + 1) * srcHeight / dstHeight);
+        for (int x = 0; x < dstWidth; ++x)
+        {
+            const int x0 = x * srcWidth / dstWidth;
+            const int x1 = std::max(x0 + 1, (x + 1) * srcWidth / dstWidth);
+            float mx = 0.0f, my = 0.0f, mz = 0.0f;
+            int count = 0;
+            for (int sy = y0; sy < std::min(y1, srcHeight); ++sy)
+            {
+                for (int sx = x0; sx < std::min(x1, srcWidth); ++sx)
+                {
+                    const uint8_t* p = src + ((size_t)sy * srcWidth + sx) * 4;
+                    const float c = (float)p[3] / 255.0f;
+                    mx += decode(p[0]) * c;
+                    my += decode(p[1]) * c;
+                    mz += decode(p[2]) * c;
+                    ++count;
+                }
+            }
+            const float invCount = 1.0f / (float)std::max(count, 1);
+            mx *= invCount;
+            my *= invCount;
+            mz *= invCount;
+            const float concentration = std::clamp(std::sqrt(mx * mx + my * my + mz * mz), 1.0f / 255.0f, 1.0f);
+            const float invLength = 1.0f / concentration;
+            uint8_t* out = dst + ((size_t)y * dstWidth + x) * 4;
+            out[0] = encode(mx * invLength);
+            out[1] = encode(my * invLength);
+            out[2] = encode(mz * invLength);
+            out[3] = (uint8_t)std::lround(concentration * 255.0f);
+        }
     }
 }
 

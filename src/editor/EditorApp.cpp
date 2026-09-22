@@ -510,6 +510,16 @@ void EditorApp::applySceneExposure()
     }
 }
 
+void EditorApp::applyScenePresentation()
+{
+    if (const auto& presentation = m_scene->getPresentation(); presentation.has_value())
+    {
+        m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", presentation->tonemapperType);
+        m_settingsManager->setAs<float>("render/post/gamma", presentation->gamma);
+        m_settingsManager->setAs<uint32_t>("render/material/model", presentation->materialModel);
+    }
+}
+
 void EditorApp::loadSettings()
 {
     STRELKA_DEBUG("Resource search path {}", m_resourceSearchPath);
@@ -525,7 +535,7 @@ void EditorApp::loadSettings()
     m_settingsManager->setAs<uint32_t>("render/pt/spp", 1);
     // stratified sampling, 3 -
     // optimized stratified sampling
-    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 1); // 0 - None, 1 - Reinhard, 2 - ACES, 3 - Filmic
+    m_settingsManager->setAs<uint32_t>("render/pt/tonemapperType", 1); // 0=None, 1=Reinhard, 2=ACES, 3=Filmic, 4=AgX
     m_settingsManager->setAs<uint32_t>("render/pt/debug", 0); // 0 - none, 1 - normals
     m_settingsManager->setAs<float>("render/cameraSpeed", 1.0f);
     m_settingsManager->setAs<bool>("editor/gamepad/enabled", true);
@@ -566,11 +576,12 @@ void EditorApp::loadSettings()
     // 0 disables it.
     m_settingsManager->setAs<float>("render/pt/denoiseFireflyClamp", 8.0f);
     m_settingsManager->setAs<float>("render/pt/clampIndirect", 0.0f);
+    m_settingsManager->setAs<float>("render/pt/clampDirect", 0.0f);
     if (envFlag("STRELKA_DENOISE"))
     {
         m_settingsManager->setAs<bool>("render/pt/denoise", envBool("STRELKA_DENOISE", false));
     }
-    m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 0);
+    m_settingsManager->setAs<uint32_t>("render/pt/textureLod", 1);
     m_settingsManager->setAs<uint32_t>("render/pt/guidePrimaryHit", 0);
     m_settingsManager->setAs<uint32_t>("render/pt/upscaleMode", envUint("STRELKA_UPSCALE_MODE", 0) != 0 ? 1u : 0u);
     if (envFlag("STRELKA_UPSCALE"))
@@ -821,6 +832,7 @@ void EditorApp::checkLoadingComplete()
 
     m_sharedCtx = std::make_unique<SharedContext>();
 
+    applyScenePresentation();
     initializeRendererForCurrentScene(reuseInitialRenderer);
 
     m_resourceSearchPath = m_pendingResourcePath;

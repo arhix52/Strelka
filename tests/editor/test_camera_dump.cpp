@@ -113,11 +113,14 @@ TEST_CASE("sampler and tonemapper are spelled the way the CLI parses them")
     CHECK(std::string(oka::cameraDumpReconstructionFilterName(1)) == "mitchell");
     CHECK(std::string(oka::cameraDumpReconstructionFilterName(2)) == "tent");
     CHECK(std::string(oka::cameraDumpReconstructionFilterName(3)) == "lanczos2");
+    CHECK(std::string(oka::cameraDumpReconstructionFilterName(4)) == "gaussian");
+    CHECK(std::string(oka::cameraDumpReconstructionFilterName(5)) == "blackman-harris");
 
     CHECK(std::string(oka::cameraDumpTonemapName(0)) == "none");
     CHECK(std::string(oka::cameraDumpTonemapName(1)) == "reinhard");
     CHECK(std::string(oka::cameraDumpTonemapName(2)) == "aces");
     CHECK(std::string(oka::cameraDumpTonemapName(3)) == "filmic");
+    CHECK(std::string(oka::cameraDumpTonemapName(4)) == "agx");
 }
 
 TEST_CASE("booleans are TOML booleans, not C++ ones")

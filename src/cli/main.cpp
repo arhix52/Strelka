@@ -51,8 +51,11 @@ int main(int argc, const char* argv[])
                                                             cxxopts::value<float>())
         ("clamp",        "Clamp each indirect path's contribution (0 = off)",
                                                             cxxopts::value<float>())
+        ("highlight-clamp", "Clamp each primary/direct contribution (0 = off)",
+                                                            cxxopts::value<float>())
         ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid, sobol_notable", cxxopts::value<std::string>())
-        ("reconstruction-filter", "Pixel reconstruction: box, tent, mitchell, lanczos2", cxxopts::value<std::string>())
+        ("reconstruction-filter", "Pixel reconstruction: box, mitchell, tent, lanczos2, gaussian, blackman-harris",
+                                                            cxxopts::value<std::string>())
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
         ("restir-di",    "Enable ReSTIR DI",                 cxxopts::value<bool>()->implicit_value("true"))
         ("restir-candidates", "ReSTIR initial candidates",   cxxopts::value<uint32_t>())
@@ -88,7 +91,7 @@ int main(int argc, const char* argv[])
                                                             cxxopts::value<uint32_t>())
         ("animation-fps", "Playback rate used by --animation-frames",
                                                             cxxopts::value<float>())
-        ("tonemap",      "Tonemap: none, reinhard, aces, filmic", cxxopts::value<std::string>())
+        ("tonemap",      "Tonemap: none, reinhard, aces, filmic, agx", cxxopts::value<std::string>())
         ("h,help",       "Print usage");
     // clang-format on
 
@@ -181,6 +184,10 @@ int main(int argc, const char* argv[])
     if (result.count("clamp"))
     {
         cfg.clampIndirect = result["clamp"].as<float>();
+    }
+    if (result.count("highlight-clamp"))
+    {
+        cfg.clampDirect = result["highlight-clamp"].as<float>();
     }
     if (result.count("camera"))
     {

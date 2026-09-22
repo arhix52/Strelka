@@ -30,6 +30,7 @@ MaterialParams plainGltfMaterial()
     p.material_type = MATERIAL_TYPE_STANDARD_PBR;
     p.uv_scale_x = 1.0f;
     p.uv_scale_y = 1.0f;
+    p.normal_scale = 1.0f;
     p.clearcoat_ior = 1.5f;
     return p;
 }
@@ -50,6 +51,14 @@ TEST_CASE("the specular halving is undone, or every material loses half its high
 
     // And it must not run past the top of the range.
     p.specular = 0.9f;
+    CHECK(openpbr_from_material_params(p).specular_weight == doctest::Approx(1.0f));
+}
+
+TEST_CASE("KHR specular strength does not darken a metal")
+{
+    MaterialParams p = plainGltfMaterial();
+    p.metallic = 1.0f;
+    p.specular = 0.1f;
     CHECK(openpbr_from_material_params(p).specular_weight == doctest::Approx(1.0f));
 }
 
@@ -188,6 +197,18 @@ TEST_CASE("a plain metallic-roughness material converts with no extra lobe switc
     // A zero UV scale would collapse every lookup to one texel.
     CHECK(o.uv_scale_x == doctest::Approx(1.0f));
     CHECK(o.uv_scale_y == doctest::Approx(1.0f));
+}
+
+TEST_CASE("glTF texture composition metadata survives OpenPBR conversion")
+{
+    MaterialParams p = plainGltfMaterial();
+    p.normal_scale = 0.25f;
+    const OpenPBRParams o = openpbr_from_material_params(p);
+
+    CHECK((o.texture_scalar_flags & OPENPBR_ROUGHNESS_CHANNEL_MASK) == 1u);
+    CHECK((o.texture_scalar_flags & OPENPBR_ROUGHNESS_MULTIPLY) != 0u);
+    CHECK((o.texture_scalar_flags & OPENPBR_TEXTURES_GLTF) != 0u);
+    CHECK(o.texture_normal_scale == doctest::Approx(0.25f));
 }
 
 TEST_CASE("anisotropy rotation is carried as a direction, not an angle")

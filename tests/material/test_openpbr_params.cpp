@@ -45,7 +45,9 @@ TEST_CASE("OpenPBRParams layout is the one every backend was told to expect")
     CHECK(offsetof(OpenPBRParams, texture_mask) == 236);
 
     // Nothing may be added past the padding without moving it.
-    CHECK(offsetof(OpenPBRParams, _pad) == 260);
+    CHECK(offsetof(OpenPBRParams, texture_scalar_flags) == 260);
+    CHECK(offsetof(OpenPBRParams, texture_normal_scale) == 264);
+    CHECK(offsetof(OpenPBRParams, _pad) == 268);
 }
 
 TEST_CASE("texture slot ids are the ABI the loader and both backends share")
@@ -59,7 +61,9 @@ TEST_CASE("texture slot ids are the ABI the loader and both backends share")
     // Appended when real content asked; the earlier sixteen kept their numbers.
     CHECK(OPENPBR_TEX_SUBSURFACE_WEIGHT == 16);
     CHECK(OPENPBR_TEX_FUZZ_COLOR == 18);
-    CHECK(MAX_OPENPBR_TEXTURES == 19);
+    CHECK(OPENPBR_TEX_LAYER_COLOR_0 == 19);
+    CHECK(OPENPBR_TEX_LAYER_DATA_3 == 26);
+    CHECK(MAX_OPENPBR_TEXTURES == 27);
     // The mask has one bit per slot and must fit the word that carries it.
     CHECK(MAX_OPENPBR_TEXTURES <= 32);
 }

@@ -18,8 +18,10 @@
 #include <reconstruction_filter.h>
 #include <temporal_reconstruction.h>
 #include <strelka/material/ior_stack.h>
+#include <strelka/material/blender_procedural.h>
 #include <strelka/material/volume.h>
 #include <strelka/material/bsdf.h>
+#include <strelka/material/normal_filter.h>
 #include <strelka/material/valid_reflection.h>
 
 using namespace metal;
@@ -179,6 +181,271 @@ static float2 applyOpenPBRTextureTransform(float2 uv, float rotation, float2 sca
     return float2(uv.x * scale.x * c - uv.y * scale.y * sn, uv.x * scale.x * sn + uv.y * scale.y * c) + offset;
 }
 
+static float3 adjustLayeredTextureValues(float3 rgb,
+                                         float hue,
+                                         float saturation,
+                                         float value,
+                                         float gamma,
+                                         float brightness,
+                                         float contrast)
+{
+    if (gamma == 0.0f)
+        rgb = float3(1.0f);
+    else if (gamma != 1.0f)
+    {
+        const float exponent = max_color_correction_exponent(gamma);
+        rgb = select(rgb, pow(rgb, float3(exponent)), rgb > 0.0f);
+    }
+    const float hi = max(rgb.x, max(rgb.y, rgb.z));
+    const float lo = min(rgb.x, min(rgb.y, rgb.z));
+    const float d = hi - lo;
+    float h = 0.0f;
+    if (d > 1.0e-8f)
+    {
+        if (hi == rgb.x)
+            h = (rgb.y - rgb.z) / d;
+        else if (hi == rgb.y)
+            h = 2.0f + (rgb.z - rgb.x) / d;
+        else
+            h = 4.0f + (rgb.x - rgb.y) / d;
+        h = fract(h / 6.0f + hue);
+    }
+    const float s = hi > 0.0f ? saturate((d / hi) * saturation) : 0.0f;
+    const float v = hi * value;
+    const float sector = h * 6.0f;
+    const int i = int(floor(sector));
+    const float f = fract(sector);
+    const float a = v * (1.0f - s);
+    const float b = v * (1.0f - s * f);
+    const float c = v * (1.0f - s * (1.0f - f));
+    float3 adjusted;
+    switch (i % 6)
+    {
+    case 0: adjusted = float3(v, c, a); break;
+    case 1: adjusted = float3(b, v, a); break;
+    case 2: adjusted = float3(a, v, c); break;
+    case 3: adjusted = float3(a, b, v); break;
+    case 4: adjusted = float3(c, a, v); break;
+    default: adjusted = float3(v, a, b); break;
+    }
+    return max(adjusted * (1.0f + contrast) + brightness - contrast * 0.5f, 0.0f);
+}
+
+static float3 adjustLayeredTexture(float3 rgb,
+                                   device const OpenPBRLayeredTextureParams& p,
+                                   bool data,
+                                   uint layer)
+{
+    return data ?
+               adjustLayeredTextureValues(rgb, p.data_hue[layer], p.data_saturation[layer], p.data_value[layer],
+                                          p.data_gamma[layer], p.data_brightness[layer], p.data_contrast[layer]) :
+               adjustLayeredTextureValues(rgb, p.color_hue[layer], p.color_saturation[layer],
+                                          p.color_value[layer], p.color_gamma[layer],
+                                          p.color_brightness[layer], p.color_contrast[layer]);
+}
+
+static float3 sampleLayeredSource(device const OpenPBRTextures& t,
+                                  uint firstSlot,
+                                  uint layer,
+                                  float2 uv,
+                                  float lodBase,
+                                  bool hasLod)
+{
+    constexpr sampler textureSampler(mag_filter::linear, min_filter::linear, mip_filter::linear, address::repeat);
+    const uint slot = firstSlot + layer;
+    if (is_null_texture(t.tex[slot]))
+        return 0.0f;
+    device const OpenPBRLayeredTextureParams& p = t.layered;
+    const bool data = firstSlot == OPENPBR_TEX_LAYER_DATA_0;
+    const float2 scale = data ? float2(p.data_uv_scale_x[layer], p.data_uv_scale_y[layer]) :
+                                float2(p.uv_scale_x[layer], p.uv_scale_y[layer]);
+    const float rotation = data ? p.data_uv_rotation[layer] : p.uv_rotation[layer];
+    const float2 offset = data ? float2(p.data_uv_offset_x[layer], p.data_uv_offset_y[layer]) :
+                                 float2(p.uv_offset_x[layer], p.uv_offset_y[layer]);
+    const float c = cos(rotation);
+    const float sn = sin(rotation);
+    const float2 centered = uv - 0.5f;
+    const float2 transformed = float2((centered.x * c - centered.y * sn) * scale.x,
+                                       (centered.x * sn + centered.y * c) * scale.y) +
+                               float2(0.5f) + offset;
+    const float transformedLodBase = hasLod ? lodBase + log2(max(max(abs(scale.x), abs(scale.y)), 1.0e-8f)) : lodBase;
+    return t.tex[slot].sample(textureSampler, transformed,
+                              level(texLod(t.tex[slot], transformedLodBase, hasLod))).rgb;
+}
+
+static float3 blendLayered(float3 base, float3 layer, float factor, uint mode)
+{
+    if (mode == OPENPBR_LAYER_BLEND_MIX)
+        return mix(base, layer, factor);
+    if (mode == OPENPBR_LAYER_BLEND_SCREEN)
+        return 1.0f - ((1.0f - factor) + (1.0f - layer) * factor) * (1.0f - base);
+    if (mode == OPENPBR_LAYER_BLEND_OVERLAY)
+        return select(1.0f - ((1.0f - factor) + 2.0f * factor * (1.0f - layer)) * (1.0f - base),
+                      base * ((1.0f - factor) + 2.0f * factor * layer), base < 0.5f);
+    return base * ((1.0f - factor) + layer * factor);
+}
+
+static float3 sampleLayeredTexture(device const OpenPBRTextures& t,
+                                   uint firstSlot,
+                                   float2 uv,
+                                   float lodBase,
+                                   bool hasLod,
+                                   float facing)
+{
+    device const OpenPBRLayeredTextureParams& p = t.layered;
+    const bool data = firstSlot == OPENPBR_TEX_LAYER_DATA_0;
+    const bool hasBase = data ? p.data_has_base != 0u : p.color_has_base != 0u;
+    float3 result = hasBase ?
+                        (data ? float3(p.data_base[0], p.data_base[1], p.data_base[2]) :
+                                float3(p.color_base[0], p.color_base[1], p.color_base[2])) :
+                        float3(1.0f);
+    for (uint layer = 0; layer < p.layer_count; ++layer)
+    {
+        if (is_null_texture(t.tex[firstSlot + layer]))
+            continue;
+        const float3 source = sampleLayeredSource(t, firstSlot, layer, uv, lodBase, hasLod);
+        const float3 value = adjustLayeredTexture(source, p, data, layer);
+        if (layer == 0u && !hasBase)
+        {
+            result = value;
+        }
+        else
+        {
+            if (data)
+                result = blendLayered(result, value, p.data_opacity[layer], p.data_blend_mode[layer]);
+            else
+            {
+                float map = 0.0f;
+                const uint factorLayer = p.color_factor_data_layer[layer];
+                if (factorLayer < 4u && !is_null_texture(t.tex[OPENPBR_TEX_LAYER_DATA_0 + factorLayer]))
+                    map = luminance(sampleLayeredSource(
+                        t, OPENPBR_TEX_LAYER_DATA_0, factorLayer, uv, lodBase, hasLod));
+                const float factor = p.color_factor_base[layer] + p.color_factor_data[layer] * map +
+                                     p.color_factor_facing[layer] * facing +
+                                     p.color_factor_facing_data[layer] * facing * map;
+                result = blendLayered(result, value, factor, p.color_blend_mode[layer]);
+            }
+        }
+    }
+    if (!data)
+        result = adjustLayeredTextureValues(result, p.color_post_hue, p.color_post_saturation,
+                                            p.color_post_value, p.color_post_gamma,
+                                            p.color_post_brightness, p.color_post_contrast);
+    return result;
+}
+
+static float layeredBumpHeight(device const OpenPBRTextures& t,
+                               float2 uv,
+                               float lodBase,
+                               bool hasLod)
+{
+    device const OpenPBRLayeredTextureParams& p = t.layered;
+    float texture = 0.0f;
+    if (p.bump_data_layer < 4u && !is_null_texture(t.tex[OPENPBR_TEX_LAYER_DATA_0 + p.bump_data_layer]))
+        texture = luminance(adjustLayeredTexture(
+            sampleLayeredSource(t, OPENPBR_TEX_LAYER_DATA_0, p.bump_data_layer, uv, lodBase, hasLod),
+            p, true, p.bump_data_layer));
+    else if (p.bump_procedural == OPENPBR_LAYER_PROCEDURAL_NONE)
+        texture = luminance(sampleLayeredTexture(
+            t, OPENPBR_TEX_LAYER_DATA_0, uv, lodBase, hasLod, 0.0f));
+    float procedural = texture;
+    if (p.bump_procedural == OPENPBR_LAYER_PROCEDURAL_VORONOI_RIDGE)
+        procedural = blender_voronoi_ridge(uv, p.bump_procedural_scale);
+    else if (p.bump_procedural == OPENPBR_LAYER_PROCEDURAL_NOISE)
+        procedural = blender_noise_fbm(uv, p.bump_procedural_scale, p.bump_procedural_detail,
+                                       p.bump_procedural_roughness, p.bump_procedural_lacunarity);
+    return mix(procedural, texture, p.bump_texture_mix) * p.bump_gain;
+}
+
+static void applyOpenPBRLayeredTexture(thread OpenPBRParams& p,
+                                       device const OpenPBRTextures& t,
+                                       thread SurfaceInteraction& si,
+                                       float2 uv,
+                                       float lodBase)
+{
+    device const OpenPBRLayeredTextureParams& graph = t.layered;
+    if (graph.output_mask == 0u)
+        return;
+
+    const bool hasLod = lodBase > -1e29f;
+    const float facing = 1.0f - saturate(abs(dot(si.shading_normal, si.wo)));
+    const float3 data = sampleLayeredTexture(t, OPENPBR_TEX_LAYER_DATA_0, uv, lodBase, hasLod, facing);
+    const float3 color = sampleLayeredTexture(t, OPENPBR_TEX_LAYER_COLOR_0, uv, lodBase, hasLod, facing);
+    if ((graph.output_mask & OPENPBR_LAYER_OUTPUT_BASE_COLOR) != 0u)
+        p.base_color = OpenPBRColor{ saturate(color.r), saturate(color.g), saturate(color.b) };
+    if ((graph.output_mask & OPENPBR_LAYER_OUTPUT_SPECULAR_COLOR) != 0u)
+    {
+        const float3 source = graph.specular_color_uses_color != 0u ? color : data;
+        const float3 base = float3(graph.specular_color_base[0], graph.specular_color_base[1],
+                                   graph.specular_color_base[2]);
+        const float3 specular = mix(base, saturate(source * graph.specular_gain),
+                                    graph.specular_color_mix);
+        p.specular_color = OpenPBRColor{ specular.r, specular.g, specular.b };
+    }
+    if ((graph.output_mask & OPENPBR_LAYER_OUTPUT_SPECULAR_WEIGHT) != 0u)
+    {
+        const float reflectivity = luminance(data) * graph.specular_gain;
+        p.specular_weight = saturate(p.specular_weight * reflectivity);
+    }
+    if ((graph.output_mask & OPENPBR_LAYER_OUTPUT_SPECULAR_IOR) != 0u)
+    {
+        const float3 source = graph.specular_ior_uses_color != 0u ? color : data;
+        const float map = saturate(luminance(source) * graph.specular_gain);
+        const float reflectivity = mix(graph.specular_ior_base, map, graph.specular_ior_mix);
+        p.specular_ior = mix(1.0f, graph.specular_ior_authored, reflectivity);
+    }
+    if ((graph.output_mask & OPENPBR_LAYER_OUTPUT_OPACITY) != 0u)
+    {
+        constexpr sampler opacitySampler(mag_filter::linear, min_filter::linear, mip_filter::linear,
+                                         address::repeat);
+        const uint layer = graph.opacity_layer;
+        const uint slot = OPENPBR_TEX_LAYER_DATA_0 + layer;
+        if (!is_null_texture(t.tex[slot]))
+        {
+            const float2 scale = float2(graph.data_uv_scale_x[layer], graph.data_uv_scale_y[layer]);
+            const float c = cos(graph.data_uv_rotation[layer]);
+            const float sn = sin(graph.data_uv_rotation[layer]);
+            const float2 centered = uv - 0.5f;
+            const float2 tuv = float2((centered.x * c - centered.y * sn) * scale.x,
+                                      (centered.x * sn + centered.y * c) * scale.y) +
+                               float2(0.5f, 0.5f) +
+                               float2(graph.data_uv_offset_x[layer], graph.data_uv_offset_y[layer]);
+            const float3 value = t.tex[slot].sample(opacitySampler, tuv).rgb;
+            p.geometry_opacity = saturate(graph.opacity_base + luminance(value) * graph.opacity_mix +
+                                          facing * graph.opacity_facing_mix);
+        }
+    }
+    if ((graph.output_mask & OPENPBR_LAYER_OUTPUT_ROUGHNESS) != 0u)
+    {
+        const float height = luminance(data) * graph.roughness_gain;
+        p.specular_roughness = saturate(mix(graph.roughness_base, 1.0f - height, graph.roughness_mix));
+    }
+    if ((graph.output_mask & OPENPBR_LAYER_OUTPUT_NORMAL) == 0u)
+        return;
+
+    constexpr float bumpFilterWidth = 0.1f;
+    float step = bumpFilterWidth / 2048.0f;
+    if (hasLod && !is_null_texture(t.tex[OPENPBR_TEX_LAYER_DATA_0]))
+    {
+        step *= exp2(texLod(t.tex[OPENPBR_TEX_LAYER_DATA_0], lodBase, true));
+    }
+    // Match Cycles' Color-to-Float conversion (scene-linear luminance).
+    const float h = layeredBumpHeight(t, uv, lodBase, hasLod);
+    const float hx = layeredBumpHeight(t, uv + float2(step, 0.0f), lodBase, hasLod);
+    const float hy = layeredBumpHeight(t, uv + float2(0.0f, step), lodBase, hasLod);
+    const float dhdu =
+        (hx - h) * graph.bump_scale / step;
+    const float dhdv =
+        (hy - h) * graph.bump_scale / step;
+    si.shading_normal = normalize(si.shading_normal - si.tangent * dhdu - si.bitangent * dhdv);
+    if (dot(si.shading_normal, si.wo) <= 0.0f)
+    {
+        const float3 facingGeom = dot(si.geometry_normal, si.wo) > 0.0f ? si.geometry_normal : -si.geometry_normal;
+        si.shading_normal = ensureValidSpecularReflection(facingGeom, si.wo, si.shading_normal);
+        si.diffuse_faces_away = true;
+    }
+}
+
 static void applyOpenPBRTextures(thread OpenPBRParams& p,
                                  device const OpenPBRTextures& t,
                                  thread SurfaceInteraction& si,
@@ -198,12 +465,20 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
     if (openpbrHasMap(p, OPENPBR_TEX_BASE_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_BASE_COLOR]))
     {
         const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_BASE_COLOR).rgb;
-        p.base_color = OpenPBRColor{ v.r, v.g, v.b };
+        p.base_color = (p.texture_scalar_flags & OPENPBR_TEXTURES_GLTF) != 0u ?
+                           OpenPBRColor{ p.base_color.r * v.r, p.base_color.g * v.g, p.base_color.b * v.b } :
+                           OpenPBRColor{ v.r, v.g, v.b };
     }
     if (openpbrHasMap(p, OPENPBR_TEX_BASE_METALNESS) && !is_null_texture(t.tex[OPENPBR_TEX_BASE_METALNESS]))
         p.base_metalness = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_BASE_METALNESS).r;
     if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_ROUGHNESS) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ROUGHNESS]))
-        p.specular_roughness = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SPECULAR_ROUGHNESS).r;
+    {
+        const float4 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SPECULAR_ROUGHNESS);
+        const float roughness = v[p.texture_scalar_flags & OPENPBR_ROUGHNESS_CHANNEL_MASK];
+        p.specular_roughness = (p.texture_scalar_flags & OPENPBR_ROUGHNESS_MULTIPLY) != 0u ?
+                                   p.specular_roughness * roughness :
+                                   roughness;
+    }
     if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_ANISOTROPY) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_ANISOTROPY]))
         p.specular_roughness_anisotropy = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SPECULAR_ANISOTROPY).r;
     if (openpbrHasMap(p, OPENPBR_TEX_SPECULAR_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_SPECULAR_COLOR]))
@@ -251,13 +526,19 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
         const float3 v = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_SUBSURFACE_RADIUS).rgb;
         p.subsurface_radius_scale = OpenPBRColor{ v.r, v.g, v.b };
     }
+    // Preserve nonlinear graph semantics: reconstruct evaluated samples, not
+    // independently mipped graph inputs. This matches Cycles Image Texture.
+    applyOpenPBRLayeredTexture(p, t, si, uv, -1e30f);
     if (openpbrHasMap(p, OPENPBR_TEX_EMISSION_COLOR) && !is_null_texture(t.tex[OPENPBR_TEX_EMISSION_COLOR]))
     {
         // Emissive-mesh NEE cannot reconstruct this surface ray's cone. Keep
         // both strategies on level zero until they share an explicit footprint.
         constexpr sampler emissionSampler(mag_filter::linear, min_filter::linear, address::repeat);
         const float3 v = t.tex[OPENPBR_TEX_EMISSION_COLOR].sample(emissionSampler, tuv).rgb;
-        p.emission_color = OpenPBRColor{ v.r, v.g, v.b };
+        p.emission_color = (p.texture_scalar_flags & OPENPBR_TEXTURES_GLTF) != 0u ?
+                               OpenPBRColor{ p.emission_color.r * v.r, p.emission_color.g * v.g,
+                                             p.emission_color.b * v.b } :
+                               OpenPBRColor{ v.r, v.g, v.b };
     }
     si.emission = float3(p.emission_color.r, p.emission_color.g, p.emission_color.b) * p.emission_luminance;
 
@@ -265,10 +546,13 @@ static void applyOpenPBRTextures(thread OpenPBRParams& p,
     // because a compressed normal map is BC5 and stores two channels.
     if (openpbrHasMap(p, OPENPBR_TEX_GEOMETRY_NORMAL) && !is_null_texture(t.tex[OPENPBR_TEX_GEOMETRY_NORMAL]))
     {
-        const float2 xy = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_GEOMETRY_NORMAL).xy * 2.0f - 1.0f;
+        const float4 normalSample = SAMPLE_OPENPBR_TEXTURE(OPENPBR_TEX_GEOMETRY_NORMAL);
+        const float2 xy = normalSample.xy * 2.0f - 1.0f;
         const float z = sqrt(saturate(1.0f - dot(xy, xy)));
+        p.specular_roughness = normal_filter_roughness(p.specular_roughness, normalSample.a, p.texture_normal_scale);
+        p.coat_roughness = normal_filter_roughness(p.coat_roughness, normalSample.a, p.texture_normal_scale);
         const float3x3 TBN = float3x3(si.tangent, si.bitangent, si.shading_normal);
-        si.shading_normal = normalize(TBN * float3(xy, z));
+        si.shading_normal = normalize(TBN * float3(xy * p.texture_normal_scale, z));
         si.bump_normal = si.shading_normal;
         // Same grazing-angle correction as the glTF path, from the same header,
         // so the two do not disagree about a surface a map bent past the viewer.
@@ -292,7 +576,7 @@ static float2 applyTextureTransform(float2 uv, device const Material& m)
 // [0,1] and never need to branch on the mode themselves.
 static float resolveOpacity(device const Material& material, float2 uv, bool uvPretransformed = false)
 {
-    if (material.alpha_mode == ALPHA_MODE_OPAQUE)
+    if (material.alpha_mode == ALPHA_MODE_OPAQUE || material.alpha_mode == ALPHA_MODE_SHADOW_TRANSPARENT)
         return 1.0f;
     // glTF defaults to REPEAT, so transformed UVs must not use Metal's clamp-to-edge default.
     constexpr sampler alphaSampler(mag_filter::linear, min_filter::linear, address::repeat);
@@ -326,6 +610,11 @@ static float2 unpackUV(uint32_t val)
     uv.y = ((val & 0xffff0000) >> 16) / 16383.99999f * 20.0f - 10.0f;
     uv.x = (val & 0x0000ffff) / 16383.99999f * 20.0f - 10.0f;
     return uv;
+}
+
+static float2 unpackUV(uint32_t x, uint32_t y)
+{
+    return float2(as_type<float>(x), as_type<float>(y));
 }
 
 static __attribute__((always_inline)) float3 interpolateAttrib(const float3 attr1,
@@ -428,9 +717,10 @@ float2 sampleAperture(thread SamplerState& sampler, const constant Uniforms& par
     return p;
 }
 
-inline float3 clampIndirectContribution(float3 radiance, uint depth, float limit)
+inline float3 clampPathContribution(float3 radiance, uint depth, float directLimit, float indirectLimit)
 {
-    if (limit <= 0.0f || depth == 0u)
+    const float limit = depth == 0u ? directLimit : indirectLimit;
+    if (limit <= 0.0f)
     {
         return radiance;
     }
@@ -458,30 +748,10 @@ void generateCameraRay(uint2 pixelIndex,
         const float2 randomSample =
             random2<SampleDimension::ePixelX, SampleDimension::ePixelY>(samplerRnd, params.samplerType).value;
         const uint filter = (params.textureLodMode & RECONSTRUCTION_FILTER_MASK) >> RECONSTRUCTION_FILTER_SHIFT;
-        if (filter == RECONSTRUCTION_FILTER_TENT)
-        {
-            const ReconstructionFilterSample sx = sampleTent(randomSample.x);
-            const ReconstructionFilterSample sy = sampleTent(randomSample.y);
-            subpixel_jitter = float2(0.5f + sx.offset, 0.5f + sy.offset);
-        }
-        else if (filter == RECONSTRUCTION_FILTER_LANCZOS2)
-        {
-            const ReconstructionFilterSample sx = sampleLanczos2(randomSample.x);
-            const ReconstructionFilterSample sy = sampleLanczos2(randomSample.y);
-            subpixel_jitter = float2(0.5f + sx.offset, 0.5f + sy.offset);
-            reconstructionWeight = sx.weight * sy.weight;
-        }
-        else if (filter == RECONSTRUCTION_FILTER_MITCHELL)
-        {
-            const ReconstructionFilterSample sx = sampleMitchell(randomSample.x);
-            const ReconstructionFilterSample sy = sampleMitchell(randomSample.y);
-            subpixel_jitter = float2(0.5f + sx.offset, 0.5f + sy.offset);
-            reconstructionWeight = sx.weight * sy.weight;
-        }
-        else
-        {
-            subpixel_jitter = randomSample;
-        }
+        const ReconstructionFilterSample sampleX = reconstructionFilterSample(filter, randomSample.x);
+        const ReconstructionFilterSample sampleY = reconstructionFilterSample(filter, randomSample.y);
+        subpixel_jitter = float2(0.5f + sampleX.offset, 0.5f + sampleY.offset);
+        reconstructionWeight = sampleX.weight * sampleY.weight;
     }
     float2 pixelPos{ pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y) };
 
@@ -539,6 +809,8 @@ void generateCameraRay(uint2 pixelIndex,
         origin += camRight * lensSample.x + camUp * lensSample.y;
         direction = normalize(focalPoint - origin);
     }
+
+    origin += direction * params.cameraNear;
 }
 
 // Geometry-only half of surface initialisation. Native OpenPBR materials use
@@ -650,6 +922,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
 
     // Sample metallic-roughness texture (glTF: G = roughness, B = metallic)
     float resolvedRoughness = material.roughness;
+    float resolvedClearcoatRoughness = material.clearcoat_roughness;
     float resolvedMetallic = material.metallic;
     if ((materialFeatures & MATERIAL_TEX_METALLIC_ROUGHNESS) != 0u && !is_null_texture(material.metallicRoughnessTexture))
     {
@@ -663,22 +936,19 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
 
     if ((materialFeatures & MATERIAL_TEX_NORMAL) != 0u && !is_null_texture(material.normalTexture))
     {
-        float2 bumpXY = (hasLod ? material.normalTexture.sample(
-                                      texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) :
-                                  material.normalTexture.sample(texSampler, tuv))
-                                .xy *
-                            2.0f -
-                        1.0f;
+        const float4 normalSample = hasLod ? material.normalTexture.sample(
+                                                texSamplerMip, tuv, level(texLod(material.normalTexture, lodBase, hasLod))) :
+                                            material.normalTexture.sample(texSampler, tuv);
+        float2 bumpXY = normalSample.xy * 2.0f - 1.0f;
         // glTF scales X and Y and leaves Z, so Z is rebuilt before the scale.
         const float bumpZ = sqrt(saturate(1.0f - dot(bumpXY, bumpXY)));
+        resolvedRoughness = normal_filter_roughness(resolvedRoughness, normalSample.a, material.normal_scale);
+        resolvedClearcoatRoughness =
+            normal_filter_roughness(resolvedClearcoatRoughness, normalSample.a, material.normal_scale);
         float3 bumpNormal = float3(bumpXY * material.normal_scale, bumpZ);
         float3x3 TBN = float3x3(worldTangent, worldBinormal, worldNormal);
         si.shading_normal = normalize(TBN * bumpNormal);
-        // What the map asked for, kept before anything bends it: the test in
-        // standard_pbr_eval compares the two, and comparing against the
-        // pre-bump normal instead would reject directions no map ever moved.
         si.bump_normal = si.shading_normal;
-
         if (dot(si.shading_normal, si.wo) <= 0.0f)
         {
             const float3 facingGeom = (dot(si.geometry_normal, si.wo) > 0.0f) ? si.geometry_normal : -si.geometry_normal;
@@ -716,7 +986,7 @@ void initSurfaceInteraction(thread SurfaceInteraction& si,
     if ((materialFeatures & MATERIAL_FEATURE_CLEARCOAT) != 0u)
     {
         matParams.clearcoat = material.clearcoat;
-        matParams.clearcoat_roughness = material.clearcoat_roughness;
+        matParams.clearcoat_roughness = resolvedClearcoatRoughness;
         matParams.clearcoat_ior = material.clearcoat_ior;
     }
     if ((materialFeatures & MATERIAL_FEATURE_ANISOTROPY) != 0u)
@@ -1221,7 +1491,8 @@ static EmissiveTriangleGeometry fetchEmissiveTriangle(constant Uniforms& uniform
             objectPoint = mix(float3(*(device const packed_float3*)previous), objectPoint, motionTime);
         }
         *points[k] = (objectToWorld * float4(objectPoint, 1.0f)).xyz;
-        *uvs[k] = unpackUV(*(device const uint32_t*)(current + uvOffset));
+        *uvs[k] = unpackUV(*(device const uint32_t*)(current + uvOffset),
+                           *(device const uint32_t*)(current + uvOffset + 4u));
     }
     return triangle;
 }

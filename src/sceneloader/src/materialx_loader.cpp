@@ -66,6 +66,8 @@ Folded foldScalar(float x)
     return f;
 }
 
+TexColorSpace colorSpaceFromName(const std::string& raw, const std::string& forInput);
+
 /// Component i, with a one-component value broadcast across all of them --
 /// which is what makes multiply(color3, float) mean what a shading artist
 /// expects it to.
@@ -757,6 +759,226 @@ Resolved resolveInput(const mx::InputPtr& input, const mx::FilePath& docDir)
     return out;
 }
 
+Folded nodeValue(const mx::NodePtr& node, const char* name, Folded fallback)
+{
+    return foldOperand(node, name, 0, fallback);
+}
+
+void readLayeredTexture(const mx::NodePtr& node, const mx::FilePath& docDir, MaterialXMaterial& out)
+{
+    OpenPBRLayeredTextureParams p{};
+    for (int i = 0; i < 4; ++i)
+    {
+        p.uv_scale_x[i] = 1.0f;
+        p.uv_scale_y[i] = 1.0f;
+        p.data_uv_scale_x[i] = 1.0f;
+        p.data_uv_scale_y[i] = 1.0f;
+        p.color_saturation[i] = 1.0f;
+        p.color_value[i] = 1.0f;
+        p.color_gamma[i] = 1.0f;
+        p.color_factor_data_layer[i] = 4u;
+
+        const std::string fileName = "file" + std::to_string(i);
+        const mx::InputPtr sharedFile = node->getInput(fileName);
+        const auto readFile = [&](const std::string& inputName, unsigned int slot, TexColorSpace colorSpace) {
+            mx::InputPtr file = node->getInput(inputName);
+            if (!file || file->getValueString().empty())
+            {
+                file = sharedFile;
+            }
+            if (file && !file->getValueString().empty())
+            {
+                out.texPaths[slot] = (docDir / mx::FilePath(file->getValueString())).asString();
+                const TexColorSpace stated = colorSpaceFromName(file->getAttribute("colorspace"), inputName);
+                out.texColorSpace[slot] = stated == TexColorSpace::Unspecified ? colorSpace : stated;
+            }
+        };
+        readFile("color_file" + std::to_string(i), OPENPBR_TEX_LAYER_COLOR_0 + i, TexColorSpace::Srgb);
+        readFile("data_file" + std::to_string(i), OPENPBR_TEX_LAYER_DATA_0 + i, TexColorSpace::Linear);
+
+        const auto vector2Value = [&](const std::string& specific, const std::string& common,
+                                      Folded fallback) {
+            if (node->getInput(specific))
+            {
+                return nodeValue(node, specific.c_str(), fallback);
+            }
+            return nodeValue(node, common.c_str(), fallback);
+        };
+        const auto scalarValue = [&](const std::string& specific, const std::string& common,
+                                     Folded fallback) {
+            if (node->getInput(specific))
+            {
+                return nodeValue(node, specific.c_str(), fallback);
+            }
+            return nodeValue(node, common.c_str(), fallback);
+        };
+
+        const std::string scaleName = "uv_scale" + std::to_string(i);
+        const Folded scale = vector2Value("color_uv_scale" + std::to_string(i), scaleName,
+                                          Folded{ { 1.0f, 1.0f }, 2, false, true });
+        p.uv_scale_x[i] = component(scale, 0);
+        p.uv_scale_y[i] = component(scale, 1);
+        const Folded dataScale = vector2Value("data_uv_scale" + std::to_string(i), scaleName,
+                                              Folded{ { 1.0f, 1.0f }, 2, false, true });
+        p.data_uv_scale_x[i] = component(dataScale, 0);
+        p.data_uv_scale_y[i] = component(dataScale, 1);
+
+        const std::string offsetName = "uv_offset" + std::to_string(i);
+        const Folded offset = vector2Value("color_uv_offset" + std::to_string(i), offsetName,
+                                           Folded{ { 0.0f, 0.0f }, 2, false, true });
+        p.uv_offset_x[i] = component(offset, 0);
+        p.uv_offset_y[i] = component(offset, 1);
+        const Folded dataOffset = vector2Value("data_uv_offset" + std::to_string(i), offsetName,
+                                               Folded{ { 0.0f, 0.0f }, 2, false, true });
+        p.data_uv_offset_x[i] = component(dataOffset, 0);
+        p.data_uv_offset_y[i] = component(dataOffset, 1);
+
+        const std::string rotationName = "uv_rotation" + std::to_string(i);
+        p.uv_rotation[i] = component(
+            scalarValue("color_uv_rotation" + std::to_string(i), rotationName, foldScalar(0.0f)), 0);
+        p.data_uv_rotation[i] = component(
+            scalarValue("data_uv_rotation" + std::to_string(i), rotationName, foldScalar(0.0f)), 0);
+    }
+
+    if (node->getInput("color_base"))
+    {
+        const Folded base = nodeValue(node, "color_base", Folded{});
+        if (base.ok)
+        {
+            p.color_base[0] = component(base, 0);
+            p.color_base[1] = component(base, 1);
+            p.color_base[2] = component(base, 2);
+            p.color_has_base = 1u;
+        }
+    }
+    if (node->getInput("data_base"))
+    {
+        const Folded base = nodeValue(node, "data_base", Folded{});
+        if (base.ok)
+        {
+            p.data_base[0] = component(base, 0);
+            p.data_base[1] = component(base, 1);
+            p.data_base[2] = component(base, 2);
+            p.data_has_base = 1u;
+        }
+    }
+
+    const Folded colorOpacity =
+        nodeValue(node, "color_opacity", Folded{ { 1.0f, 0.0f, 0.0f, 0.0f }, 4, false, true });
+    const Folded dataOpacity =
+        nodeValue(node, "data_opacity", Folded{ { 1.0f, 0.0f, 0.0f, 0.0f }, 4, false, true });
+    const Folded dataBlendMode =
+        nodeValue(node, "data_blend_mode", Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 4, false, true });
+    const Folded colorBlendMode =
+        nodeValue(node, "color_blend_mode", Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 4, false, true });
+    const Folded colorFactorBase = nodeValue(node, "color_factor_base", colorOpacity);
+    const Folded colorFactorData =
+        nodeValue(node, "color_factor_data", Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 4, false, true });
+    const Folded colorFactorFacing =
+        nodeValue(node, "color_factor_facing", Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 4, false, true });
+    const Folded colorFactorFacingData =
+        nodeValue(node, "color_factor_facing_data", Folded{ { 0.0f, 0.0f, 0.0f, 0.0f }, 4, false, true });
+    const Folded colorFactorDataLayer =
+        nodeValue(node, "color_factor_data_layer", Folded{ { 4.0f, 4.0f, 4.0f, 4.0f }, 4, false, true });
+    for (int i = 0; i < 4; ++i)
+    {
+        p.color_opacity[i] = component(colorOpacity, i);
+        p.data_opacity[i] = component(dataOpacity, i);
+        p.data_blend_mode[i] = static_cast<unsigned int>(component(dataBlendMode, i));
+        p.color_blend_mode[i] = static_cast<unsigned int>(component(colorBlendMode, i));
+        p.color_factor_base[i] = component(colorFactorBase, i);
+        p.color_factor_data[i] = component(colorFactorData, i);
+        p.color_factor_facing[i] = component(colorFactorFacing, i);
+        p.color_factor_facing_data[i] = component(colorFactorFacingData, i);
+        p.color_factor_data_layer[i] = std::clamp(
+            static_cast<unsigned int>(component(colorFactorDataLayer, i)), 0u, 4u);
+    }
+
+    const Folded firstAdjust =
+        nodeValue(node, "first_adjust", Folded{ { 0.0f, 1.0f, 1.0f }, 3, false, true });
+    const Folded colorAdjust = nodeValue(node, "color_adjust", firstAdjust);
+    const Folded dataAdjust = nodeValue(node, "data_adjust", firstAdjust);
+    const Folded colorTone =
+        nodeValue(node, "color_tone", Folded{ { 1.0f, 0.0f, 0.0f }, 3, false, true });
+    const Folded dataTone =
+        nodeValue(node, "data_tone", Folded{ { 1.0f, 0.0f, 0.0f }, 3, false, true });
+    for (int i = 0; i < 4; ++i)
+    {
+        const std::string suffix = std::to_string(i);
+        const Folded adjust = nodeValue(
+            node, ("color_adjust" + suffix).c_str(),
+            i == 0 ? colorAdjust : Folded{ { 0.0f, 1.0f, 1.0f }, 3, false, true });
+        const Folded tone = nodeValue(
+            node, ("color_tone" + suffix).c_str(),
+            i == 0 ? colorTone : Folded{ { 1.0f, 0.0f, 0.0f }, 3, false, true });
+        p.color_hue[i] = component(adjust, 0);
+        p.color_saturation[i] = component(adjust, 1);
+        p.color_value[i] = component(adjust, 2);
+        p.color_gamma[i] = component(tone, 0);
+        p.color_brightness[i] = component(tone, 1);
+        p.color_contrast[i] = component(tone, 2);
+        const Folded dataLayerAdjust = nodeValue(
+            node, ("data_adjust" + suffix).c_str(),
+            i == 0 ? dataAdjust : Folded{ { 0.0f, 1.0f, 1.0f }, 3, false, true });
+        const Folded dataLayerTone = nodeValue(
+            node, ("data_tone" + suffix).c_str(),
+            i == 0 ? dataTone : Folded{ { 1.0f, 0.0f, 0.0f }, 3, false, true });
+        p.data_hue[i] = component(dataLayerAdjust, 0);
+        p.data_saturation[i] = component(dataLayerAdjust, 1);
+        p.data_value[i] = component(dataLayerAdjust, 2);
+        p.data_gamma[i] = component(dataLayerTone, 0);
+        p.data_brightness[i] = component(dataLayerTone, 1);
+        p.data_contrast[i] = component(dataLayerTone, 2);
+    }
+    const Folded postAdjust =
+        nodeValue(node, "color_post_adjust", Folded{ { 0.0f, 1.0f, 1.0f }, 3, false, true });
+    const Folded postTone =
+        nodeValue(node, "color_post_tone", Folded{ { 1.0f, 0.0f, 0.0f }, 3, false, true });
+    p.color_post_hue = component(postAdjust, 0);
+    p.color_post_saturation = component(postAdjust, 1);
+    p.color_post_value = component(postAdjust, 2);
+    p.color_post_gamma = component(postTone, 0);
+    p.color_post_brightness = component(postTone, 1);
+    p.color_post_contrast = component(postTone, 2);
+    p.specular_gain = component(nodeValue(node, "specular_gain", foldScalar(1.0f)), 0);
+    p.specular_ior_base = component(nodeValue(node, "specular_ior_base", foldScalar(1.0f)), 0);
+    p.specular_ior_mix = component(nodeValue(node, "specular_ior_mix", foldScalar(1.0f)), 0);
+    p.specular_ior_authored = component(nodeValue(node, "specular_ior_authored", foldScalar(1.5f)), 0);
+    p.specular_ior_uses_color = static_cast<unsigned int>(
+        component(nodeValue(node, "specular_ior_uses_color", foldScalar(0.0f)), 0) != 0.0f);
+    const Folded specularColorBase =
+        nodeValue(node, "specular_color_base", Folded{ { 1.0f, 1.0f, 1.0f }, 3, false, true });
+    p.specular_color_base[0] = component(specularColorBase, 0);
+    p.specular_color_base[1] = component(specularColorBase, 1);
+    p.specular_color_base[2] = component(specularColorBase, 2);
+    p.specular_color_mix = component(nodeValue(node, "specular_color_mix", foldScalar(1.0f)), 0);
+    p.specular_color_uses_color = static_cast<unsigned int>(
+        component(nodeValue(node, "specular_color_uses_color", foldScalar(0.0f)), 0) != 0.0f);
+    p.roughness_gain = component(nodeValue(node, "roughness_gain", foldScalar(1.0f)), 0);
+    p.roughness_base = component(nodeValue(node, "roughness_base", foldScalar(0.5f)), 0);
+    p.roughness_mix = component(nodeValue(node, "roughness_mix", foldScalar(1.0f)), 0);
+    p.bump_gain = component(nodeValue(node, "bump_gain", foldScalar(1.0f)), 0);
+    p.bump_scale = component(nodeValue(node, "bump_scale", foldScalar(1.0f)), 0);
+    p.bump_data_layer = std::clamp(
+        static_cast<unsigned int>(component(nodeValue(node, "bump_data_layer", foldScalar(4.0f)), 0)), 0u, 4u);
+    p.bump_procedural = static_cast<unsigned int>(
+        component(nodeValue(node, "bump_procedural", foldScalar(0.0f)), 0));
+    p.bump_procedural_scale = component(nodeValue(node, "bump_procedural_scale", foldScalar(1.0f)), 0);
+    p.bump_procedural_detail = component(nodeValue(node, "bump_procedural_detail", foldScalar(1.0f)), 0);
+    p.bump_procedural_roughness = component(nodeValue(node, "bump_procedural_roughness", foldScalar(0.5f)), 0);
+    p.bump_procedural_lacunarity = component(nodeValue(node, "bump_procedural_lacunarity", foldScalar(2.0f)), 0);
+    p.bump_texture_mix = component(nodeValue(node, "bump_texture_mix", foldScalar(1.0f)), 0);
+    p.opacity_base = component(nodeValue(node, "opacity_base", foldScalar(0.0f)), 0);
+    p.opacity_mix = component(nodeValue(node, "opacity_mix", foldScalar(1.0f)), 0);
+    p.opacity_facing_mix = component(nodeValue(node, "opacity_facing_mix", foldScalar(0.0f)), 0);
+    p.opacity_layer = std::clamp(
+        static_cast<unsigned int>(component(nodeValue(node, "opacity_layer", foldScalar(0.0f)), 0)), 0u, 3u);
+    p.layer_count = std::clamp(
+        static_cast<unsigned int>(component(nodeValue(node, "layer_count", foldScalar(4.0f)), 0)), 1u, 4u);
+    p.output_mask = out.layeredTexture.output_mask;
+    out.layeredTexture = p;
+}
+
 float asFloat(const mx::ValuePtr& v, float fallback)
 {
     if (!v)
@@ -1073,6 +1295,28 @@ MaterialXDocumentData loadMaterialXDocument(const std::string& path)
         for (const mx::InputPtr& input : shader->getInputs())
         {
             const std::string name = input->getName();
+            if (const mx::NodePtr source = upstreamNode(input);
+                source && source->getCategory() == "strelka_layered_texture")
+            {
+                readLayeredTexture(source, docDir, out);
+                if (name == "base_color")
+                    out.layeredTexture.output_mask |= OPENPBR_LAYER_OUTPUT_BASE_COLOR;
+                else if (name == "specular_weight")
+                    out.layeredTexture.output_mask |= OPENPBR_LAYER_OUTPUT_SPECULAR_WEIGHT;
+                else if (name == "specular_color")
+                    out.layeredTexture.output_mask |= OPENPBR_LAYER_OUTPUT_SPECULAR_COLOR;
+                else if (name == "specular_ior")
+                    out.layeredTexture.output_mask |= OPENPBR_LAYER_OUTPUT_SPECULAR_IOR;
+                else if (name == "specular_roughness")
+                    out.layeredTexture.output_mask |= OPENPBR_LAYER_OUTPUT_ROUGHNESS;
+                else if (name == "geometry_normal")
+                    out.layeredTexture.output_mask |= OPENPBR_LAYER_OUTPUT_NORMAL;
+                else if (name == "geometry_opacity")
+                    out.layeredTexture.output_mask |= OPENPBR_LAYER_OUTPUT_OPACITY;
+                else
+                    out.unsupported.push_back(name + "<-strelka_layered_texture(output)");
+                continue;
+            }
             const Resolved r = resolveInput(input, docDir);
 
             if (!r.unsupportedCategory.empty())
@@ -1227,6 +1471,7 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
                 continue;
             }
             desc.openpbr = m.params;
+            desc.openpbrLayeredTexture = m.layeredTexture;
             desc.openpbrTexPaths = m.texPaths;
             desc.openpbrTexColorSpace = m.texColorSpace;
             if (desc.params.alpha_mode != ALPHA_MODE_OPAQUE && desc.baseColorTexPath.empty() &&
@@ -1279,6 +1524,7 @@ int applyMaterialXDocument(Scene& scene, const std::string& path)
         desc.params.uv_scale_x = 1.0f;
         desc.params.uv_scale_y = 1.0f;
         desc.openpbr = found->params;
+        desc.openpbrLayeredTexture = found->layeredTexture;
         desc.openpbrTexPaths = found->texPaths;
         desc.openpbrTexColorSpace = found->texColorSpace;
         const uint32_t materialId = scene.addMaterial(desc);

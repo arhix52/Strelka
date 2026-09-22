@@ -311,9 +311,9 @@ void EditorApp::drawRenderSettingsPanel()
 
             if (ImGui::TreeNode("Display tonemap"))
             {
-                const char* const tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic" };
+                const char* const tonemapItems[] = { "None", "Reinhard", "ACES", "Filmic", "AgX" };
                 int currentTonemapItemId =
-                    (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 3u);
+                    (int)std::min(m_settingsManager->getAs<uint32_t>("render/pt/tonemapperType"), 4u);
                 if (ImGui::BeginCombo("Operator", tonemapItems[currentTonemapItemId]))
                 {
                     for (int n = 0; n < IM_ARRAYSIZE(tonemapItems); n++)
@@ -492,23 +492,54 @@ void EditorApp::drawRenderSettingsPanel()
                     }
                 }
 
-                if (m_render && m_render->denoiserKind() == Render::DenoiserKind::eMetalFx)
+                const char* const reconstructionFilterItems[] = {
+                    "Box", "Mitchell-Netravali", "Tent (2 px)", "Lanczos 2", "Gaussian", "Blackman-Harris"
+                };
+                int reconstructionFilter = static_cast<int>(
+                    std::min(m_settingsManager->getAs<uint32_t>("render/pt/reconstructionFilter"), 5u));
+                if (ImGui::Combo("Pixel filter", &reconstructionFilter, reconstructionFilterItems,
+                                 IM_ARRAYSIZE(reconstructionFilterItems)))
                 {
-                    const char* const filterItems[] = { "Box", "Mitchell", "Tent (2 px)", "Lanczos 2" };
-                    int filter = static_cast<int>(
-                        std::min(m_settingsManager->getAs<uint32_t>("render/pt/reconstructionFilter"), 3u));
-                    if (ImGui::Combo("Reconstruction filter", &filter, filterItems, IM_ARRAYSIZE(filterItems)))
-                    {
-                        m_settingsManager->setAs<uint32_t>(
-                            "render/pt/reconstructionFilter", static_cast<uint32_t>(filter));
-                    }
-                    if (ImGui::IsItemHovered())
-                    {
-                        ImGui::SetTooltip(
-                            "Tent matches Corona's documented 2 px filter radius.\n"
-                            "Mitchell and Lanczos 2 retain more detail using signed lobes.\n"
-                            "MetalFX temporal reconstruction and debug views use Box.");
-                    }
+                    m_settingsManager->setAs<uint32_t>("render/pt/reconstructionFilter",
+                                                       static_cast<uint32_t>(reconstructionFilter));
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Tent matches Corona's documented 2 px filter radius.\n"
+                        "Mitchell and Lanczos 2 retain detail using signed lobes.\n"
+                        "MetalFX temporal reconstruction and debug views use Box.");
+
+                bool textureLod = m_settingsManager->getAs<uint32_t>("render/pt/textureLod") != 0u;
+                if (ImGui::Checkbox("Texture mip LOD", &textureLod))
+                    m_settingsManager->setAs<uint32_t>("render/pt/textureLod", textureLod ? 1u : 0u);
+                float textureLodBias = m_settingsManager->getAs<float>("render/pt/textureLodBias");
+                if (ImGui::DragFloat("Texture LOD bias", &textureLodBias, 0.05f, -4.0f, 4.0f, "%.2f"))
+                    m_settingsManager->setAs<float>("render/pt/textureLodBias", textureLodBias);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Negative values keep sharper texture mips; -1 selects one level sharper.");
+
+                float indirectClamp = m_settingsManager->getAs<float>("render/pt/clampIndirect");
+                if (ImGui::DragFloat("Indirect firefly clamp", &indirectClamp, 0.05f, 0.0f, 1000.0f, "%.2f"))
+                {
+                    m_settingsManager->setAs<float>("render/pt/clampIndirect", indirectClamp);
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Maximum contribution from each indirect path; 0 disables it.\n"
+                        "Lower values remove fireflies but bias bright indirect lighting.");
+                }
+
+                float directClamp = m_settingsManager->getAs<float>("render/pt/clampDirect");
+                if (ImGui::DragFloat("Direct highlight clamp", &directClamp, 0.05f, 0.0f, 1000.0f, "%.2f"))
+                {
+                    m_settingsManager->setAs<float>("render/pt/clampDirect", directClamp);
+                }
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::SetTooltip(
+                        "Maximum contribution from a primary/direct-light sample; 0 disables it.\n"
+                        "Use this for isolated glossy fireflies; it biases clipped highlights.");
                 }
 
                 ImGui::SeparatorText("Denoiser");
@@ -560,6 +591,23 @@ void EditorApp::drawRenderSettingsPanel()
                     if (denoiserOn && fx.modeHint != nullptr)
                     {
                         ImGui::TextDisabled("%s", fx.modeHint);
+                    }
+
+                    if (fxMode.denoise)
+                    {
+                        float denoiseClamp = m_settingsManager->getAs<float>("render/pt/denoiseFireflyClamp");
+                        if (ImGui::DragFloat(
+                                "Denoiser firefly clamp", &denoiseClamp, 0.05f, 0.0f, 1000.0f, "%.2f"))
+                        {
+                            m_settingsManager->setAs<float>("render/pt/denoiseFireflyClamp", denoiseClamp);
+                            m_render->resetTemporalHistory();
+                        }
+                        if (ImGui::IsItemHovered())
+                        {
+                            ImGui::SetTooltip(
+                                "Maximum luminance sent to the denoiser; 0 disables it.\n"
+                                "This does not alter the raw path-traced accumulation.");
+                        }
                     }
 
                     // Temporal is a property of the network on OptiX rather than a mode of

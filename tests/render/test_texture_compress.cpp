@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <host/texture_compress.h>
+#include <strelka/material/normal_filter.h>
 
 #include "../support/sampling.h"
 
@@ -255,6 +256,31 @@ TEST_CASE("normalizeNormalMap keeps the direction of a non-unit texel")
         const Normal after = reconstructNormal(unorm8(rgba[0]), unorm8(rgba[1]));
         CHECK(angleDegrees(after, source) < 0.5f);
     }
+}
+
+TEST_CASE("normal mipmaps retain directional concentration for specular filtering")
+{
+    // Two unit normals whose mean is (0, 0, 0.8). A conventional normalized
+    // mip would keep only (0, 0, 1); the alpha moment must retain the missing
+    // 0.2 so shading can broaden the microfacet lobe.
+    std::vector<uint8_t> src = {
+        204, 128, 230, 17,
+        51, 128, 230, 93,
+    };
+    oka::bc::normalizeNormalMap(src.data(), 2, 1);
+    CHECK(src[3] == 255);
+    CHECK(src[7] == 255);
+
+    std::vector<uint8_t> mip(4);
+    oka::bc::downsampleNormalMoments(src.data(), 2, 1, mip.data(), 1, 1);
+    const Normal direction = unpackNormal(unorm8(mip[0]), unorm8(mip[1]), unorm8(mip[2]));
+    CHECK(direction.x == doctest::Approx(0.0f).epsilon(0.02f));
+    CHECK(direction.z == doctest::Approx(1.0f).epsilon(0.01f));
+    CHECK(unorm8(mip[3]) == doctest::Approx(0.8f).epsilon(0.02f));
+
+    CHECK(normal_filter_roughness(0.02f, 0.82f, 0.15f) == doctest::Approx(0.3f).epsilon(0.001f));
+    CHECK(normal_filter_roughness(0.2f, 1.0f, 0.15f) == doctest::Approx(0.2f));
+    CHECK(normal_filter_roughness(0.2f, 0.0f, 0.15f) == doctest::Approx(0.2f));
 }
 
 TEST_CASE("A flat normal map survives BC5 exactly")

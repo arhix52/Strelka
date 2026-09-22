@@ -36,7 +36,8 @@ struct RenderConfig
     // measure a shorter tail explicitly.
     uint32_t subsurfaceIterations = 64;
     uint32_t samplerType = 4;
-    uint32_t reconstructionFilter = 0; // 0 = box, 1 = Mitchell, 2 = tent radius 2, 3 = Lanczos 2
+    // 0=box, 1=Mitchell, 2=tent, 3=Lanczos 2, 4=Gaussian, 5=Blackman-Harris.
+    uint32_t reconstructionFilter = 0;
     // MetalFX denoising. Off by default: it is a temporal filter and a still
     // frame gives it one frame to work with, so whether it helps is a question
     // to be measured per scene rather than assumed.
@@ -57,7 +58,8 @@ struct RenderConfig
     std::string capturePath; // --capture: one steady-state frame to a .gputrace
     bool upscale = false;
     float upscaleFactor = 0.5f;
-    bool textureLod = false;
+    bool textureLod = true;
+    float textureLodBias = 0.0f;
     // Take the denoiser's material guides at the primary hit instead of walking
     // to the first rough surface. See Uniforms::guidePrimaryHit.
     bool guidePrimaryHit = false;
@@ -127,12 +129,17 @@ struct RenderConfig
     uint32_t textureMaxDim = 0;
     // Divide every texture's dimensions by this on load; 1 = full size.
     uint32_t textureDownscale = 1;
+    // Lossy block compression is an explicit memory/quality trade-off.
+    bool textureCompress = false;
     // Debug visualisation; 0 renders normally.
     uint32_t debugMode = 0;
     uint32_t blueNoiseSwitchSpp = 4;
     // Upper bound on one indirect path's contribution; 0 = unclamped, which is
     // the default because clamping is a bias the caller has to ask for.
     float clampIndirect = 0.0f;
+    // Separate primary/direct ceiling: Corona exposes highlight clamping apart
+    // from MSI, and glossy NEE outliers happen before the indirect bound applies.
+    float clampDirect = 0.0f;
 
     int cameraIndex = 0;
     // Frame this scene node exactly like the editor's F command. The optional
@@ -157,7 +164,7 @@ struct RenderConfig
     float cameraFocalLengthMm = 50.0f;
     std::optional<float> animationTime;
 
-    // 0=None, 1=Reinhard, 2=ACES, 3=Filmic
+    // 0=None, 1=Reinhard, 2=ACES, 3=Filmic, 4=AgX
     uint32_t tonemapType = 2;
     bool exposureOverridden = false;
     float gamma = 2.4f;

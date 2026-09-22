@@ -275,28 +275,124 @@ static __forceinline__ __device__ float3 mediumTransmittance(float3 origin,
     return make_float3(expf(-optical.x), expf(-optical.y), expf(-optical.z));
 }
 
-static __forceinline__ __device__ float hitOpacity(const HitGroupData* hit_data, int32_t matId)
+static __forceinline__ __device__ float4 primaryHitUvGradients(const HitGroupData* hit_data,
+                                                               uint32_t i0,
+                                                               uint32_t i1,
+                                                               uint32_t i2,
+                                                               float2 uv0,
+                                                               float2 uv1,
+                                                               float2 uv2)
+{
+    const uint32_t base = hit_data->vertexOffset;
+    const float3 p0 = params.scene.vb[base + i0].position;
+    const float3 p1 = params.scene.vb[base + i1].position;
+    const float3 p2 = params.scene.vb[base + i2].position;
+    const float3 edge1 = optixTransformVectorFromObjectToWorldSpace(p1 - p0);
+    const float3 edge2 = optixTransformVectorFromObjectToWorldSpace(p2 - p0);
+    const float3 area = cross(edge1, edge2);
+    const float areaSq = dot(area, area);
+    const float2 duv1 = uv1 - uv0;
+    const float2 duv2 = uv2 - uv0;
+    if (areaSq <= 1.0e-20f || fabsf(duv1.x * duv2.y - duv1.y * duv2.x) <= 0.0f)
+        return make_float4(0.0f);
+
+    const float3 normal = safe_normalize(area);
+    const float3 rayDir = optixGetWorldRayDirection();
+    const float3 camRight = make_float3(params.viewToWorld[0], params.viewToWorld[4], params.viewToWorld[8]);
+    const float3 camUp = make_float3(params.viewToWorld[1], params.viewToWorld[5], params.viewToWorld[9]);
+    const float3 camForward = make_float3(-params.viewToWorld[2], -params.viewToWorld[6], -params.viewToWorld[10]);
+    const float rayNormalization = fmaxf(dot(rayDir, camForward), 1.0e-4f);
+    const float dxScale = 2.0f * params.clipToView[0] / (float)max(params.image_width, 1u);
+    const float dyScale = -2.0f * params.clipToView[5] / (float)max(params.image_height, 1u);
+    const float3 dDdx = (camRight - rayDir * dot(rayDir, camRight)) * (dxScale * rayNormalization);
+    const float3 dDdy = (camUp - rayDir * dot(rayDir, camUp)) * (dyScale * rayNormalization);
+    const float distance = optixGetRayTmax() + params.cameraNear;
+    const float numerator = distance * dot(normal, rayDir);
+
+    const auto toUv = [&](float3 dP) {
+        const float db1 = dot(cross(dP, edge2), area) / areaSq;
+        const float db2 = dot(cross(edge1, dP), area) / areaSq;
+        return duv1 * db1 + duv2 * db2;
+    };
+    float2 dx = make_float2(0.0f);
+    float2 dy = make_float2(0.0f);
+    const float denomX = dot(normal, rayDir + dDdx);
+    const float denomY = dot(normal, rayDir + dDdy);
+    if (fabsf(denomX) > 1.0e-6f)
+        dx = toUv((rayDir + dDdx) * (numerator / denomX) - rayDir * distance);
+    if (fabsf(denomY) > 1.0e-6f)
+        dy = toUv((rayDir + dDdy) * (numerator / denomY) - rayDir * distance);
+    const float lodScale = params.textureLodMode != 0u ? exp2f(params.textureLodBias) : 0.0f;
+    return make_float4(dx.x, dx.y, dy.x, dy.y) * lodScale;
+}
+
+static __forceinline__ __device__ float hitOpacity(const HitGroupData* hit_data, int32_t matId, bool primary)
 {
     const OptixAlphaMaterialData& material = params.alphaMaterials[matId];
     const unsigned int primitiveId = optixGetPrimitiveIndex();
-    float2 sourceUv;
+    const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
+    const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
+    const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
+    const uint32_t baseVbOffset = hit_data->vertexOffset;
+    float2 uv0, uv1, uv2;
     if (params.hasPrimitiveAlphaData)
     {
         const OptixPrimitiveAlphaData& primitive =
             params.scene.primitiveAlphaData[hit_data->alphaPrimitiveOffset + primitiveId];
-        sourceUv = interpolateAttrib(unpackUV(primitive.uv0), unpackUV(primitive.uv1), unpackUV(primitive.uv2),
-                                     optixGetTriangleBarycentrics());
+        uv0 = unpackUV(primitive.uv0);
+        uv1 = unpackUV(primitive.uv1);
+        uv2 = unpackUV(primitive.uv2);
     }
     else
     {
-        const uint32_t i0 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 0];
-        const uint32_t i1 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 1];
-        const uint32_t i2 = params.scene.ib[hit_data->indexOffset + primitiveId * 3 + 2];
-        const uint32_t baseVbOffset = hit_data->vertexOffset;
-        sourceUv = interpolateAttrib(unpackUV(params.scene.vb[baseVbOffset + i0].uv),
-                                     unpackUV(params.scene.vb[baseVbOffset + i1].uv),
-                                     unpackUV(params.scene.vb[baseVbOffset + i2].uv),
-                                     optixGetTriangleBarycentrics());
+        const Vertex& v0 = params.scene.vb[baseVbOffset + i0];
+        const Vertex& v1 = params.scene.vb[baseVbOffset + i1];
+        const Vertex& v2 = params.scene.vb[baseVbOffset + i2];
+        uv0 = unpackUV(v0.uv, v0.uv1);
+        uv1 = unpackUV(v1.uv, v1.uv1);
+        uv2 = unpackUV(v2.uv, v2.uv1);
+    }
+    const float2 sourceUv = interpolateAttrib(uv0, uv1, uv2, optixGetTriangleBarycentrics());
+    const float4 gradients = primary ? primaryHitUvGradients(
+        hit_data, i0, i1, i2, uv0, uv1, uv2) : make_float4(0.0f);
+
+    if (params.openpbrTextures != nullptr)
+    {
+        const OpenPBRTextures& layered = params.openpbrTextures[matId];
+        if ((layered.layered.output_mask & OPENPBR_LAYER_OUTPUT_OPACITY) != 0u)
+        {
+            const unsigned int layer = layered.layered.opacity_layer;
+            const cudaTextureObject_t tex = layered.tex[OPENPBR_TEX_LAYER_DATA_0 + layer];
+            if (tex != 0ull)
+            {
+                float3 n0 = unpackNormal(params.scene.vb[baseVbOffset + i0].normal);
+                float3 n1 = unpackNormal(params.scene.vb[baseVbOffset + i1].normal);
+                float3 n2 = unpackNormal(params.scene.vb[baseVbOffset + i2].normal);
+                if (params.enableMotionBlur)
+                {
+                    const float t = optixGetRayTime();
+                    n0 = lerp(unpackNormal(params.scene.vb_prev[baseVbOffset + i0].normal), n0, t);
+                    n1 = lerp(unpackNormal(params.scene.vb_prev[baseVbOffset + i1].normal), n1, t);
+                    n2 = lerp(unpackNormal(params.scene.vb_prev[baseVbOffset + i2].normal), n2, t);
+                }
+                const float3 normal = safe_normalize(optixTransformNormalFromObjectToWorldSpace(
+                    interpolateAttrib(n0, n1, n2, optixGetTriangleBarycentrics())));
+                const float3 view = -safe_normalize(optixGetWorldRayDirection());
+                const float facing = 1.0f - saturate(fabsf(dot(normal, view)));
+                const float2 dx = layered_transform_direction(
+                    layered.layered, layer, make_float2(gradients.x, gradients.y), true);
+                const float2 dy = layered_transform_direction(
+                    layered.layered, layer, make_float2(gradients.z, gradients.w), true);
+                const float4 value = texture_sample_2d(
+                    tex, layered_transform_uv(layered.layered, layer, sourceUv, true),
+                    make_float4(dx.x, dx.y, dy.x, dy.y));
+                const float alpha = layered.layered.opacity_base +
+                                    (value.x + value.y + value.z) * (1.0f / 3.0f) *
+                                        layered.layered.opacity_mix +
+                                    facing * layered.layered.opacity_facing_mix;
+                return resolve_opacity(params.materials[matId], alpha);
+            }
+        }
     }
     const float2 uv = make_float2(sourceUv.x * material.uvTransformX.x +
                                       sourceUv.y * material.uvTransformY.x + material.uvOffset.x,
@@ -320,12 +416,17 @@ extern "C" __global__ void __anyhit__occlusion()
 
     const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const int32_t matId = hit_data->materialId;
+    if (params.alphaMaterials[matId].alphaMode == ALPHA_MODE_SHADOW_TRANSPARENT)
+    {
+        optixIgnoreIntersection();
+        return;
+    }
     if (params.alphaMaterials[matId].alphaMode == ALPHA_MODE_OPAQUE)
     {
         return; // accepted; TERMINATE_ON_FIRST_HIT ends the ray here
     }
 
-    const float opacity = hitOpacity(hit_data, matId);
+    const float opacity = hitOpacity(hit_data, matId, false);
 
     const float transmittance = __uint_as_float(optixGetPayload_0()) * (1.0f - opacity);
     if (transmittance <= SHADOW_TRANSMITTANCE_CUTOFF)
@@ -351,12 +452,13 @@ extern "C" __global__ void __anyhit__radiance()
 
     const HitGroupData* hit_data = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const int32_t matId = hit_data->materialId;
-    if (params.alphaMaterials[matId].alphaMode == ALPHA_MODE_OPAQUE)
+    if (params.alphaMaterials[matId].alphaMode == ALPHA_MODE_OPAQUE ||
+        params.alphaMaterials[matId].alphaMode == ALPHA_MODE_SHADOW_TRANSPARENT)
     {
         return;
     }
 
-    const float opacity = hitOpacity(hit_data, matId);
+    const float opacity = hitOpacity(hit_data, matId, prd->depth == 0u);
     if (opacity < 1.0f && opacitySample(prd->sampler, launchPixelIndex(params), prd->passthrough) >= opacity)
     {
         ++prd->passthrough;
@@ -673,9 +775,9 @@ static __forceinline__ __device__ EmissiveTriangleGeometry fetchEmissiveTriangle
     triangle.p0 = transformEmissivePoint(mesh.instanceId, p0, motionTime);
     triangle.p1 = transformEmissivePoint(mesh.instanceId, p1, motionTime);
     triangle.p2 = transformEmissivePoint(mesh.instanceId, p2, motionTime);
-    triangle.uv0 = unpackUV(v0.uv);
-    triangle.uv1 = unpackUV(v1.uv);
-    triangle.uv2 = unpackUV(v2.uv);
+    triangle.uv0 = unpackUV(v0.uv, v0.uv1);
+    triangle.uv1 = unpackUV(v1.uv, v1.uv1);
+    triangle.uv2 = unpackUV(v2.uv, v2.uv1);
     return triangle;
 }
 
@@ -1003,7 +1105,7 @@ static __device__ float3 estimateDirectLighting(PerRayData* prd,
     {
         survived *= mediumTransmittance(origin, visibility.direction, visibility.maxDistance, mediumAtVertex);
     }
-    return clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
+    return clampPathContribution(weight * survived, prd->depth, params.clampDirect, params.clampIndirect);
 }
 
 // Get curve hit-point in world coordinates.
@@ -1029,14 +1131,51 @@ struct SurfaceHitData
     /// World-space radius of the strand at the hit. Zero for a triangle, and the
     /// one thing the fibre chord needs that a curve hit does not hand back.
     float curveRadius;
+    /// Normalized-UV screen derivatives: xy = dUV/dx, zw = dUV/dy. Zero keeps level 0.
+    float4 textureGradients;
+    /// Cycles' compact/isotropic UV differentials used to evaluate Bump. These
+    /// deliberately stay independent of texture LOD bias.
+    float4 bumpGradients;
+    /// World-space compact surface differentials paired with bumpGradients.
+    float3 dPdx;
+    float3 dPdy;
 };
+
+static __forceinline__ __device__ float2 worldDifferentialToUv(float3 dP,
+                                                                float3 worldEdge1,
+                                                                float3 worldEdge2,
+                                                                float3 worldAreaVector,
+                                                                float worldAreaSq,
+                                                                float2 duv1,
+                                                                float2 duv2)
+{
+    const float db1 = dot(cross(dP, worldEdge2), worldAreaVector) / worldAreaSq;
+    const float db2 = dot(cross(worldEdge1, dP), worldAreaVector) / worldAreaSq;
+    return duv1 * db1 + duv2 * db2;
+}
+
+static __forceinline__ __device__ void cyclesCompactDifferentials(float3 normal,
+                                                                   float footprint,
+                                                                   float3& dPdx,
+                                                                   float3& dPdy)
+{
+    // differential_from_compact() in Cycles: the ray cone becomes an
+    // isotropic pair on the geometric tangent plane. Projecting an exact
+    // screen differential onto a grazing surface here grossly amplifies Bump.
+    const float3 seed = (normal.x != normal.y || normal.x != normal.z) ? make_float3(1.0f) :
+                                                                        make_float3(-1.0f, 1.0f, 1.0f);
+    const float3 x = safe_normalize(cross(seed, normal));
+    dPdx = x * footprint;
+    dPdy = cross(normal, x) * footprint;
+}
 
 static __forceinline__ __device__ float3 vertexColorOf(const Vertex& v)
 {
-    return unpack_vertex_color(__float_as_uint(v.pad1));
+    return unpack_vertex_color(v.color);
 }
 
-static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitGroupData* hit_data)
+static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitGroupData* hit_data,
+                                                                      const PerRayData* prd)
 {
     const float2 barycentrics = optixGetTriangleBarycentrics();
     const unsigned int primitiveId = optixGetPrimitiveIndex();
@@ -1081,9 +1220,9 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
         t1 = lerp(unpackNormal(v1_0.tangent), unpackNormal(v1_1.tangent), t);
         t2 = lerp(unpackNormal(v2_0.tangent), unpackNormal(v2_1.tangent), t);
 
-        uv0 = lerp(unpackUV(v0_0.uv), unpackUV(v0_1.uv), t);
-        uv1 = lerp(unpackUV(v1_0.uv), unpackUV(v1_1.uv), t);
-        uv2 = lerp(unpackUV(v2_0.uv), unpackUV(v2_1.uv), t);
+        uv0 = lerp(unpackUV(v0_0.uv, v0_0.uv1), unpackUV(v0_1.uv, v0_1.uv1), t);
+        uv1 = lerp(unpackUV(v1_0.uv, v1_0.uv1), unpackUV(v1_1.uv, v1_1.uv1), t);
+        uv2 = lerp(unpackUV(v2_0.uv, v2_0.uv1), unpackUV(v2_1.uv, v2_1.uv1), t);
 
         // Vertex colour is not skinned and does not animate, so it is read from
         // the current frame even when the rest is motion-interpolated.
@@ -1109,9 +1248,9 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
         t1 = unpackNormal(v1.tangent);
         t2 = unpackNormal(v2.tangent);
 
-        uv0 = unpackUV(v0.uv);
-        uv1 = unpackUV(v1.uv);
-        uv2 = unpackUV(v2.uv);
+        uv0 = unpackUV(v0.uv, v0.uv1);
+        uv1 = unpackUV(v1.uv, v1.uv1);
+        uv2 = unpackUV(v2.uv, v2.uv1);
 
         c0 = vertexColorOf(v0);
         c1 = vertexColorOf(v1);
@@ -1141,6 +1280,108 @@ static __forceinline__ __device__ SurfaceHitData fillTriangleGeomData(const HitG
     res.worldBinormal = worldBinormal;
     res.vertexColor = interpolateAttrib(c0, c1, c2, barycentrics);
     res.curveRadius = 0.0f;
+    res.textureGradients = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    res.bumpGradients = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    res.dPdx = make_float3(0.0f);
+    res.dPdy = make_float3(0.0f);
+    {
+        // Bump follows Cycles' compact ray differential. Texture filtering is
+        // different: CUDA expects the actual screen-space UV ellipse. Feeding
+        // it the compact/isotropic Bump pair loses the image axes and selects
+        // mips that are too coarse on oblique and off-centre surfaces.
+        const float2 duv1 = uv1 - uv0;
+        const float2 duv2 = uv2 - uv0;
+        const float uvArea2 = fabsf(duv1.x * duv2.y - duv1.y * duv2.x);
+        const float3 worldEdge1 = optixTransformVectorFromObjectToWorldSpace(p1 - p0);
+        const float3 worldEdge2 = optixTransformVectorFromObjectToWorldSpace(p2 - p0);
+        const float3 worldAreaVector = cross(worldEdge1, worldEdge2);
+        const float worldAreaSq = dot(worldAreaVector, worldAreaVector);
+        if (uvArea2 > 0.0f && worldAreaSq > 1.0e-20f)
+        {
+            float footprint = 0.0f;
+            float3 textureDPdx = make_float3(0.0f);
+            float3 textureDPdy = make_float3(0.0f);
+            if (prd->depth == 0u)
+            {
+                const float3 camRight = make_float3(params.viewToWorld[0], params.viewToWorld[4], params.viewToWorld[8]);
+                const float3 camUp = make_float3(params.viewToWorld[1], params.viewToWorld[5], params.viewToWorld[9]);
+                const float3 rayDir = optixGetWorldRayDirection();
+                if (params.projectionType == PROJECTION_ORTHOGRAPHIC)
+                {
+                    const float3 dOdx = camRight * (2.0f * params.orthoHalfWidth / (float)max(params.image_width, 1u));
+                    const float3 dOdy = camUp * (-2.0f * params.orthoHalfHeight / (float)max(params.image_height, 1u));
+                    footprint = 0.5f * (length(dOdx) + length(dOdy));
+                    const float planeDenom = dot(geomNormal, rayDir);
+                    if (fabsf(planeDenom) > 1.0e-6f)
+                    {
+                        textureDPdx = dOdx - rayDir * (dot(geomNormal, dOdx) / planeDenom);
+                        textureDPdy = dOdy - rayDir * (dot(geomNormal, dOdy) / planeDenom);
+                    }
+                }
+                else
+                {
+                    const float3 camForward =
+                        make_float3(-params.viewToWorld[2], -params.viewToWorld[6], -params.viewToWorld[10]);
+                    // If W is the unnormalised camera ray, |W| = 1 / dot(D,F),
+                    // hence d(normalize(W)) carries dot(D,F), not its inverse.
+                    const float rayNormalization = fmaxf(dot(rayDir, camForward), 1.0e-4f);
+                    const float dxScale = 2.0f * params.clipToView[0] / (float)max(params.image_width, 1u);
+                    const float dyScale = -2.0f * params.clipToView[5] / (float)max(params.image_height, 1u);
+                    const float3 dDdx =
+                        (camRight - rayDir * dot(rayDir, camRight)) * (dxScale * rayNormalization);
+                    const float3 dDdy =
+                        (camUp - rayDir * dot(rayDir, camUp)) * (dyScale * rayNormalization);
+                    const float cameraDistance = optixGetRayTmax() + prd->misDistance + params.cameraNear;
+                    footprint = cameraDistance * 0.5f * (length(dDdx) + length(dDdy));
+
+                    // Intersect the neighbouring primary rays with the local
+                    // triangle plane. This preserves the anisotropic footprint
+                    // which tex2DGrad uses for mip and anisotropy selection.
+                    const float planeNumerator = cameraDistance * dot(geomNormal, rayDir);
+                    const float denomX = dot(geomNormal, rayDir + dDdx);
+                    const float denomY = dot(geomNormal, rayDir + dDdy);
+                    if (fabsf(denomX) > 1.0e-6f)
+                        textureDPdx = (rayDir + dDdx) * (planeNumerator / denomX) - rayDir * cameraDistance;
+                    if (fabsf(denomY) > 1.0e-6f)
+                        textureDPdy = (rayDir + dDdy) * (planeNumerator / denomY) - rayDir * cameraDistance;
+                }
+            }
+            else
+            {
+                const float pixelSpread =
+                    2.0f * fabsf(params.clipToView[5]) / (float)max(params.image_height, 1u);
+                footprint = pixelSpread * optixGetRayTmax();
+            }
+
+            if (footprint > 0.0f)
+            {
+                cyclesCompactDifferentials(geomNormal, footprint, res.dPdx, res.dPdy);
+                const float2 dUVdx = worldDifferentialToUv(
+                    res.dPdx, worldEdge1, worldEdge2, worldAreaVector, worldAreaSq, duv1, duv2);
+                const float2 dUVdy = worldDifferentialToUv(
+                    res.dPdy, worldEdge1, worldEdge2, worldAreaVector, worldAreaSq, duv1, duv2);
+                res.bumpGradients = make_float4(dUVdx.x, dUVdx.y, dUVdy.x, dUVdy.y);
+                if (params.textureLodMode != 0u)
+                {
+                    const float lodScale = exp2f(params.textureLodBias);
+                    if (prd->depth == 0u &&
+                        (dot(textureDPdx, textureDPdx) > 0.0f || dot(textureDPdy, textureDPdy) > 0.0f))
+                    {
+                        const float2 textureDUVdx = worldDifferentialToUv(
+                            textureDPdx, worldEdge1, worldEdge2, worldAreaVector, worldAreaSq, duv1, duv2);
+                        const float2 textureDUVdy = worldDifferentialToUv(
+                            textureDPdy, worldEdge1, worldEdge2, worldAreaVector, worldAreaSq, duv1, duv2);
+                        res.textureGradients =
+                            make_float4(textureDUVdx.x, textureDUVdx.y, textureDUVdy.x, textureDUVdy.y) * lodScale;
+                    }
+                    else
+                    {
+                        res.textureGradients = res.bumpGradients * lodScale;
+                    }
+                }
+            }
+        }
+    }
     return res;
 }
 
@@ -1179,6 +1420,10 @@ static __forceinline__ __device__ SurfaceHitData fillCubicCurveGeomData(const Hi
     // Same radial-vector reasoning as the linear arm below; a cubic strand needs
     // the chord for fibre_exit() exactly as much as a linear one does.
     res.curveRadius = length(optixTransformVectorFromObjectToWorldSpace(objectNormal * interpolator.radius(u)));
+    res.textureGradients = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    res.bumpGradients = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    res.dPdx = make_float3(0.0f);
+    res.dPdy = make_float3(0.0f);
 
     return res;
 }
@@ -1213,6 +1458,10 @@ static __forceinline__ __device__ SurfaceHitData fillLinearCurveGeomData(const H
     res.worldBinormal = worldBinormal;
     res.vertexColor = make_float3(1.0f);
     res.curveRadius = length(optixTransformVectorFromObjectToWorldSpace(objectNormal * interpolator.radius(u)));
+    res.textureGradients = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    res.bumpGradients = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    res.dPdx = make_float3(0.0f);
+    res.dPdy = make_float3(0.0f);
 
     return res;
 }
@@ -1310,7 +1559,8 @@ static __device__ void scatterInMedium(PerRayData* prd,
         const float3 Le = mm.medium_emission;
         if (Le.x > 0.0f || Le.y > 0.0f || Le.z > 0.0f)
         {
-            prd->radiance += clampIndirectContribution(prd->throughput * Le, prd->depth, params.clampIndirect);
+            prd->radiance +=
+                clampPathContribution(prd->throughput * Le, prd->depth, params.clampDirect, params.clampIndirect);
         }
 
         if (didNee)
@@ -1349,7 +1599,9 @@ static __device__ void scatterInMedium(PerRayData* prd,
                             survived *= mediumTransmittance(
                                 scatterPoint, visibility.direction, visibility.maxDistance, prd->medium);
                         }
-                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
+                        prd->radiance +=
+                            clampPathContribution(weight * survived, prd->depth, params.clampDirect,
+                                                  params.clampIndirect);
                     }
                 }
             }
@@ -1427,7 +1679,8 @@ static __device__ void scatterInFog(PerRayData* prd, const float3 rayOrigin, con
                                           0.0f;
                 if (visible > 0.0f)
                 {
-                    prd->radiance += clampIndirectContribution(weight * visible, prd->depth, params.clampIndirect);
+                    prd->radiance +=
+                        clampPathContribution(weight * visible, prd->depth, params.clampDirect, params.clampIndirect);
                 }
             }
         }
@@ -1514,7 +1767,9 @@ static __device__ void exitMedium(PerRayData* prd,
                         {
                             survived *= mediumTransmittance(exitOrigin, visibility.direction, visibility.maxDistance, 0u);
                         }
-                        prd->radiance += clampIndirectContribution(weight * survived, prd->depth, params.clampIndirect);
+                        prd->radiance +=
+                            clampPathContribution(weight * survived, prd->depth, params.clampDirect,
+                                                  params.clampIndirect);
                     }
                 }
             }
@@ -1623,7 +1878,7 @@ static __forceinline__ __device__ void shadeAnalyticAreaLightHit(PerRayData* prd
                 prd->throughput * Le * computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
         }
     }
-    prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
+    prd->radiance += clampPathContribution(radiance, prd->depth, params.clampDirect, params.clampIndirect);
     prd->throughput = make_float3(0.0f);
 }
 
@@ -1782,7 +2037,7 @@ extern "C" __global__ void __miss__ms()
         radiance += prd->throughput * make_float3(light.color) * misWeight;
     }
 
-    prd->radiance += clampIndirectContribution(radiance, prd->depth, params.clampIndirect);
+    prd->radiance += clampPathContribution(radiance, prd->depth, params.clampDirect, params.clampIndirect);
 
     prd->throughput = make_float3(0.0f);
     prd->depth = params.max_depth;
@@ -2004,7 +2259,7 @@ static __forceinline__ __device__ void closestHitRadiance()
     const bool isCurveHit = isCubicCurve || (params.hasCurves && primType == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR);
     if (primType == OPTIX_PRIMITIVE_TYPE_TRIANGLE)
     {
-        surfaceHit = fillTriangleGeomData(hit_data);
+        surfaceHit = fillTriangleGeomData(hit_data, prd);
     }
     else if (isCubicCurve)
     {
@@ -2148,7 +2403,7 @@ static __forceinline__ __device__ void closestHitRadiance()
     SurfaceInteraction si;
     initSurfaceInteraction(si, matParams, textures, surfaceHit.position, surfaceHit.normal, surfaceHit.geom_normal,
                            surfaceHit.worldTangent, surfaceHit.worldBinormal, surfaceHit.uv, ray_dir,
-                           surfaceHit.vertexColor);
+                           surfaceHit.vertexColor, surfaceHit.textureGradients);
 
     const bool isOpenPBR = Mode == RadianceMaterialMode::OpenPBR || Mode == RadianceMaterialMode::OpenPBRBase ? true :
                            Mode == RadianceMaterialMode::Gltf ? false :
@@ -2159,8 +2414,9 @@ static __forceinline__ __device__ void closestHitRadiance()
         openpbrMat = params.openpbrParams[matId];
         if (openpbrMat.texture_mask != 0u && params.openpbrTextures != nullptr)
         {
-            openpbr_apply_textures(openpbrMat, &params.openpbrTextures[matId * MAX_OPENPBR_TEXTURES], si,
-                                   surfaceHit.uv);
+            openpbr_apply_textures(openpbrMat, params.openpbrTextures[matId], si, surfaceHit.uv,
+                                   surfaceHit.textureGradients, surfaceHit.bumpGradients,
+                                   surfaceHit.dPdx, surfaceHit.dPdy);
         }
     }
 
@@ -2243,8 +2499,8 @@ static __forceinline__ __device__ void closestHitRadiance()
                 emissionMis = computeMisWeight(prd->lastBsdfPdf, lightPdf, params.misHeuristic);
             }
         }
-        prd->radiance +=
-            clampIndirectContribution(prd->throughput * si.emission * emissionMis, prd->depth, params.clampIndirect);
+        prd->radiance += clampPathContribution(prd->throughput * si.emission * emissionMis, prd->depth,
+                                               params.clampDirect, params.clampIndirect);
     }
 
     // Set exterior IOR from the IOR stack for nested dielectrics

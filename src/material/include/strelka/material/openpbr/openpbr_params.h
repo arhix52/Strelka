@@ -10,6 +10,18 @@ struct OpenPBRColor
     float b;
 };
 
+/// The imported MAX_Color_Correction group feeds Blender's Gamma node with
+/// 1 / authoredGamma.  Keep that conversion here so CUDA and Metal cannot
+/// silently disagree with the graph they are executing.
+#if defined(__CUDACC__)
+static __forceinline__ __host__ __device__ float max_color_correction_exponent(float authoredGamma)
+#else
+inline float max_color_correction_exponent(float authoredGamma)
+#endif
+{
+    return authoredGamma != 0.0f ? 1.0f / authoredGamma : 0.0f;
+}
+
 // Texture slots. The order is an ABI shared by the loader and both backends;
 // append only. Anything a MaterialX document can drive with an <image> and that
 // Strelka can consume per-pixel gets a slot; everything else is a constant.
@@ -34,8 +46,155 @@ enum OpenPBRTextureSlot : unsigned int
     OPENPBR_TEX_SUBSURFACE_WEIGHT = 16,
     OPENPBR_TEX_SUBSURFACE_RADIUS = 17,
     OPENPBR_TEX_FUZZ_COLOR = 18,
-    MAX_OPENPBR_TEXTURES = 19
+    // A four-layer MaterialX texture graph keeps colour and data views separate:
+    // the same JPEG is transfer-decoded for base colour and read verbatim for
+    // roughness / height. These are source images, not OpenPBR inputs, so the
+    // ordinary slot loop deliberately ignores them.
+    OPENPBR_TEX_LAYER_COLOR_0 = 19,
+    OPENPBR_TEX_LAYER_COLOR_1 = 20,
+    OPENPBR_TEX_LAYER_COLOR_2 = 21,
+    OPENPBR_TEX_LAYER_COLOR_3 = 22,
+    OPENPBR_TEX_LAYER_DATA_0 = 23,
+    OPENPBR_TEX_LAYER_DATA_1 = 24,
+    OPENPBR_TEX_LAYER_DATA_2 = 25,
+    OPENPBR_TEX_LAYER_DATA_3 = 26,
+    MAX_OPENPBR_TEXTURES = 27
 };
+
+enum : unsigned int
+{
+    OPENPBR_LAYER_OUTPUT_BASE_COLOR = 1u << 0,
+    OPENPBR_LAYER_OUTPUT_SPECULAR_COLOR = 1u << 1,
+    OPENPBR_LAYER_OUTPUT_ROUGHNESS = 1u << 2,
+    OPENPBR_LAYER_OUTPUT_NORMAL = 1u << 3,
+    OPENPBR_LAYER_OUTPUT_SPECULAR_WEIGHT = 1u << 4,
+    OPENPBR_LAYER_OUTPUT_OPACITY = 1u << 5,
+    OPENPBR_LAYER_OUTPUT_SPECULAR_IOR = 1u << 6,
+};
+
+enum OpenPBRLayerBlendMode : unsigned int
+{
+    OPENPBR_LAYER_BLEND_MULTIPLY = 0,
+    OPENPBR_LAYER_BLEND_MIX = 1,
+    OPENPBR_LAYER_BLEND_OVERLAY = 2,
+    OPENPBR_LAYER_BLEND_SCREEN = 3,
+};
+
+enum OpenPBRLayerProcedural : unsigned int
+{
+    OPENPBR_LAYER_PROCEDURAL_NONE = 0,
+    OPENPBR_LAYER_PROCEDURAL_VORONOI_RIDGE = 1,
+    OPENPBR_LAYER_PROCEDURAL_NOISE = 2,
+};
+
+/// Compact runtime form of the MaterialX strelka_layered_texture node. It is a
+/// deliberately narrow Corona bitmap stack: four repeated images, Multiply
+/// blend, independent colour/data placement and correction, and the Output
+/// operations used by the source materials. Keeping it beside the texture
+/// handles avoids another bindless table in both ray-tracing backends.
+struct OpenPBRLayeredTextureParams
+{
+    // Colour and scalar/height branches may read different bitmaps and use
+    // different placements. 3ds Max's Corona materials do this routinely
+    // (albedo + a separate bump map), so sharing these transforms silently
+    // sampled the right files through the wrong UV footprint.
+    float uv_scale_x[4];
+    float uv_scale_y[4];
+    float uv_offset_x[4];
+    float uv_offset_y[4];
+    float uv_rotation[4];
+    float data_uv_scale_x[4];
+    float data_uv_scale_y[4];
+    float data_uv_offset_x[4];
+    float data_uv_offset_y[4];
+    float data_uv_rotation[4];
+    float color_opacity[4];
+    float data_opacity[4];
+    unsigned int data_blend_mode[4];
+
+    // Some Corona Composite stacks start from a literal colour and apply the
+    // bitmap layers after it.  A white implicit start is not equivalent for a
+    // partial Multiply, and was the reason walls and dark metal came out pale.
+    float color_base[3];
+    unsigned int color_has_base;
+    float data_base[3];
+    unsigned int data_has_base;
+
+    // Data layers need the same independent correction as colour layers.
+    // Applying layer zero's MAX_Color_Correction to the whole height stack
+    // turns low-opacity macro maps into dominant bump detail.
+    float data_hue[4];
+    float data_saturation[4];
+    float data_value[4];
+    float data_gamma[4];
+    float data_brightness[4];
+    float data_contrast[4];
+
+    float specular_gain;
+    float roughness_gain;
+    float roughness_base;
+    float roughness_mix;
+
+    float bump_gain;
+    float bump_scale;
+    float opacity_base;
+    float opacity_mix;
+
+    unsigned int opacity_layer;
+    unsigned int layer_count;
+    unsigned int output_mask;
+    // Corona Falloff / Blender Layer Weight at blend 0.5 is
+    // 1 - abs(dot(N, V)). Keeping its coefficient here preserves the
+    // view-dependent opacity of fabrics without baking it into camera UVs.
+    float opacity_facing_mix;
+
+    // Legacy documents written before reflection tint was represented exactly.
+    float specular_ior_base;
+    float specular_ior_mix;
+    float specular_ior_authored;
+    unsigned int specular_ior_uses_color;
+
+    // CoronaLegacy keeps Fresnel IOR independent, then multiplies the
+    // reflection by lerp(constant colour, map, map amount) * level.
+    float specular_color_base[3];
+    float specular_color_mix;
+    unsigned int specular_color_uses_color;
+
+    // The imported Composite graph may correct every bitmap independently and
+    // drive its factor from Facing and another bitmap.  Keeping these as four
+    // straight-line instructions is enough for the source scene and avoids a
+    // scene-specific bake or a general-purpose shader VM.
+    float color_hue[4];
+    float color_saturation[4];
+    float color_value[4];
+    float color_gamma[4];
+    float color_brightness[4];
+    float color_contrast[4];
+    unsigned int color_blend_mode[4];
+    float color_factor_base[4];
+    float color_factor_data[4];
+    float color_factor_facing[4];
+    float color_factor_facing_data[4];
+    unsigned int color_factor_data_layer[4];
+
+    float color_post_hue;
+    float color_post_saturation;
+    float color_post_value;
+    float color_post_gamma;
+    float color_post_brightness;
+    float color_post_contrast;
+
+    // Blender procedural heights used by the two remaining imported graphs.
+    // They are evaluated from the original UVs, never raster-baked.
+    unsigned int bump_data_layer;
+    unsigned int bump_procedural;
+    float bump_procedural_scale;
+    float bump_procedural_detail;
+    float bump_procedural_roughness;
+    float bump_procedural_lacunarity;
+    float bump_texture_mix;
+};
+static_assert(sizeof(OpenPBRLayeredTextureParams) == 664, "layered texture ABI changed");
 
 struct OpenPBRParams
 {
@@ -114,7 +273,19 @@ struct OpenPBRParams
     float uv_scale_y; //  4  -- 256
 
     float uv_rotation; //  4
-    float _pad[3]; // 12  -- 272
+    // Low two bits select the glTF roughness channel; the remaining flags keep
+    // glTF's texture-times-factor semantics. Native OpenPBR/MaterialX leaves
+    // them 0 and treats a connected image as the authored input value.
+    unsigned int texture_scalar_flags;
+    float texture_normal_scale;
+    float _pad; // 4  -- 272
+};
+
+enum : unsigned int
+{
+    OPENPBR_ROUGHNESS_CHANNEL_MASK = 3u,
+    OPENPBR_ROUGHNESS_MULTIPLY = 1u << 2,
+    OPENPBR_TEXTURES_GLTF = 1u << 3,
 };
 
 #if defined(__METAL_VERSION__)
@@ -224,6 +395,7 @@ inline OpenPBRParams openpbr_make_default_params()
     p.uv_scale_x = 1.0f;
     p.uv_scale_y = 1.0f;
     p.uv_rotation = 0.0f;
+    p.texture_normal_scale = 1.0f;
 
     return p;
 }

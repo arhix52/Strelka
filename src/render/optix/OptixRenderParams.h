@@ -48,8 +48,8 @@ struct Vertex
 
     uint32_t normal;
     uint32_t uv;
-    float pad0;
-    float pad1;
+    uint32_t uv1;
+    uint32_t color;
 };
 
 // Exact packed UVs for one cutout triangle. Any-hit reads one contiguous record
@@ -99,6 +99,15 @@ struct OptixAlphaMaterialData
     float2 uvTransformX;
     float2 uvTransformY;
 };
+
+struct OpenPBRTextures
+{
+    cudaTextureObject_t tex[MAX_OPENPBR_TEXTURES];
+    OpenPBRLayeredTextureParams layered;
+};
+static_assert(sizeof(OpenPBRTextures) == MAX_OPENPBR_TEXTURES * sizeof(cudaTextureObject_t) +
+                                             sizeof(OpenPBRLayeredTextureParams),
+              "OpenPBR texture table ABI changed");
 static_assert(sizeof(OptixAlphaMaterialData) == 40, "OptiX alpha material ABI changed");
 
 /// How `AovSample::depth` is encoded. Mirrors kDenoiseDepth* in the Metal
@@ -215,8 +224,12 @@ struct Params
     float prevWorldToClip[16];
 
     uint32_t projectionType;
+    uint32_t textureLodMode;
+    float textureLodBias;
+    uint32_t reconstructionFilter;
     float orthoHalfWidth;
     float orthoHalfHeight;
+    float cameraNear;
 
     OptixTraversableHandle handle;
     SceneData scene;
@@ -227,10 +240,7 @@ struct Params
     cudaTextureObject_t* materialTextures; // flat array: [materialId * MAX_MATERIAL_TEXTURES + slot]
 
     OpenPBRParams* openpbrParams;
-    /// Flat, like materialTextures: [materialId * MAX_OPENPBR_TEXTURES + slot].
-    /// Nineteen slots rather than six, and a wider set of transfer functions; the
-    /// mapping lives in OptixRender.cpp beside its Metal counterpart's.
-    cudaTextureObject_t* openpbrTextures;
+    OpenPBRTextures* openpbrTextures;
 
     bool enableAccumulation;
     // developers settings:
@@ -273,6 +283,8 @@ struct Params
     uint32_t estimatorMode;
     /// Upper bound on what one indirect path may contribute; 0 disables it.
     float clampIndirect;
+    /// Upper bound on primary/direct contributions; 0 disables it.
+    float clampDirect;
 
     uint32_t subsurfaceIterations;
     /// Whether any material in the scene is a medium boundary. Gates the second

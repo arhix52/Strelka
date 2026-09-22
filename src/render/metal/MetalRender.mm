@@ -328,6 +328,9 @@ bool MetalRender::readDisplayReferred(std::vector<float>& rgba, uint32_t& width,
             case oka::tonemap::ToneMapperType::eFilmic:
                 c = oka::tonemap::ACESFilm(c, headroom);
                 break;
+            case oka::tonemap::ToneMapperType::eAgX:
+                c = oka::tonemap::AgX(c, headroom);
+                break;
             case oka::tonemap::ToneMapperType::eNone:
                 break;
             }
@@ -835,7 +838,7 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, envPdfTable) == 1120);
     static_assert(offsetof(Uniforms, widthDivMultiplier) == 1128);
     static_assert(offsetof(Uniforms, widthDivShiftAdd) == 1132);
-    static_assert(sizeof(Uniforms) == 1136, "Uniforms host/Metal ABI changed");
+    static_assert(sizeof(Uniforms) == 1152, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
     // The hot record is what every live path streams on every bounce. Medium

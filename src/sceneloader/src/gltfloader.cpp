@@ -86,35 +86,48 @@ uint32_t& lodSkipCounter()
 // packNormal(), packUV(), unpackNormal(), unpackUV() provided by <strelka/scene/vertex_packing.h>
 // packTangent uses same format as packNormal (tangents are unit vectors in [-1,1])
 
-void computeTangent(Scene::Vertex* vertices, const uint32_t* indices, size_t indexCount)
+void computeTangents(Scene::Vertex* vertices, size_t vertexCount, const uint32_t* indices, size_t indexCount)
 {
-    const size_t lastIndex = indexCount;
-    Scene::Vertex& v0 = vertices[indices[lastIndex - 3]];
-    Scene::Vertex& v1 = vertices[indices[lastIndex - 2]];
-    Scene::Vertex& v2 = vertices[indices[lastIndex - 1]];
-
-    const glm::float2 uv0 = unpackUV(v0.uv);
-    const glm::float2 uv1 = unpackUV(v1.uv);
-    const glm::float2 uv2 = unpackUV(v2.uv);
-
-    const glm::float3 deltaPos1 = v1.pos - v0.pos;
-    const glm::float3 deltaPos2 = v2.pos - v0.pos;
-    const glm::vec2 deltaUV1 = uv1 - uv0;
-    const glm::vec2 deltaUV2 = uv2 - uv0;
-
-    glm::vec3 tangent{ 0.0f, 0.0f, 1.0f };
-    const float d = deltaUV1.x * deltaUV2.y - deltaUV1.y * deltaUV2.x;
-    if (abs(d) > 1e-6)
+    std::vector<glm::vec3> tangentSum(vertexCount, glm::vec3(0.0f));
+    std::vector<glm::vec3> bitangentSum(vertexCount, glm::vec3(0.0f));
+    for (size_t i = 0; i < indexCount; i += 3)
     {
+        const uint32_t i0 = indices[i];
+        const uint32_t i1 = indices[i + 1];
+        const uint32_t i2 = indices[i + 2];
+        const glm::vec3 e1 = vertices[i1].pos - vertices[i0].pos;
+        const glm::vec3 e2 = vertices[i2].pos - vertices[i0].pos;
+        const glm::vec2 duv1 = unpackUV(vertices[i1].uv, vertices[i1].uv1) -
+                               unpackUV(vertices[i0].uv, vertices[i0].uv1);
+        const glm::vec2 duv2 = unpackUV(vertices[i2].uv, vertices[i2].uv1) -
+                               unpackUV(vertices[i0].uv, vertices[i0].uv1);
+        const float d = duv1.x * duv2.y - duv1.y * duv2.x;
+        if (std::abs(d) <= 1e-8f)
+            continue;
         const float r = 1.0f / d;
-        tangent = (deltaPos1 * deltaUV2.y - deltaPos2 * deltaUV1.y) * r;
+        const glm::vec3 tangent = (e1 * duv2.y - e2 * duv1.y) * r;
+        const glm::vec3 bitangent = (e2 * duv1.x - e1 * duv2.x) * r;
+        tangentSum[i0] += tangent;
+        tangentSum[i1] += tangent;
+        tangentSum[i2] += tangent;
+        bitangentSum[i0] += bitangent;
+        bitangentSum[i1] += bitangent;
+        bitangentSum[i2] += bitangent;
     }
 
-    const uint32_t packedTangent = packNormal(tangent);
-
-    v0.tangent = packedTangent;
-    v1.tangent = packedTangent;
-    v2.tangent = packedTangent;
+    for (size_t i = 0; i < vertexCount; ++i)
+    {
+        const glm::vec3 normal = unpackNormal(vertices[i].normal);
+        glm::vec3 tangent = tangentSum[i] - normal * glm::dot(normal, tangentSum[i]);
+        const float lenSq = glm::dot(tangent, tangent);
+        if (lenSq > 1e-12f)
+            tangent *= glm::inversesqrt(lenSq);
+        else
+            tangent = glm::normalize(glm::cross(
+                std::abs(normal.z) < 0.999f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0), normal));
+        const float handedness = glm::dot(glm::cross(normal, tangent), bitangentSum[i]) < 0.0f ? -1.0f : 1.0f;
+        vertices[i].tangent = packTangent(tangent, handedness);
+    }
 }
 
 // Maps a glTF (mesh, primitive) onto the oka mesh built for it, so geometry
@@ -590,7 +603,10 @@ void processPrimitive(const tinygltf::Model& model,
             glm::vec3(normalsData ? glm::make_vec3(&normalsData[v * normalStride]) : glm::vec3(0.0f));
         vertex.pos = vPos;
         vertex.normal = packNormal(glm::normalize(vNorm));
-        vertex.uv = packUV(texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec3(0.0f));
+        const glm::uvec2 uv = packUVFloat(
+            texCoord0Data ? glm::make_vec2(&texCoord0Data[v * texCoord0Stride]) : glm::vec2(0.0f));
+        vertex.uv = uv.x;
+        vertex.uv1 = uv.y;
         if (colorData)
         {
             glm::float4 c(1.0f);
@@ -738,7 +754,7 @@ void processPrimitive(const tinygltf::Model& model,
         }
         if (!tangentData)
         {
-            computeTangent(vertices.data() + vbOffset, indicesOut.data() + ibOffset, indexCount);
+            computeTangents(vertices.data() + vbOffset, vertexCount, indicesOut.data() + ibOffset, indexCount);
         }
     }
 
@@ -1211,6 +1227,8 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.alpha_mode = material.alphaMode == "MASK"  ? ALPHA_MODE_MASK :
                    material.alphaMode == "BLEND" ? ALPHA_MODE_BLEND :
                                                    ALPHA_MODE_OPAQUE;
+    if (material.extensions.contains("STRELKA_materials_shadow_transparent"))
+        p.alpha_mode = ALPHA_MODE_SHADOW_TRANSPARENT;
 
     // Metallic / roughness
     p.roughness = (float)material.pbrMetallicRoughness.roughnessFactor;
@@ -1410,7 +1428,9 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     p.emission_tex = -1;
     p.occlusion_tex = -1;
     p.transmission_tex = -1;
-    p.thin_walled = 0;
+    // KHR_materials_transmission alone is a thin surface. Only
+    // KHR_materials_volume gives it a finite interior.
+    p.thin_walled = p.transmission > 0.0f ? 1u : 0u;
     {
         const auto vit = material.extensions.find("KHR_materials_volume");
         if (vit != material.extensions.end() && vit->second.IsObject())
@@ -1432,6 +1452,14 @@ oka::Scene::MaterialDescription convertToStandardPBR(const tinygltf::Model& mode
     desc.normalTexPath = getTextureUri(model, material.normalTexture.index, modelPath);
     desc.emissionTexPath = getTextureUri(model, material.emissiveTexture.index, modelPath);
     desc.occlusionTexPath = getTextureUri(model, material.occlusionTexture.index, modelPath);
+
+    // Scene-wide OpenPBR conversion happens in the renderer. Carry the glTF
+    // maps that have direct OpenPBR equivalents so that conversion does not
+    // silently turn every textured opaque material into flat constants.
+    desc.openpbrTexPaths[OPENPBR_TEX_BASE_COLOR] = desc.baseColorTexPath;
+    desc.openpbrTexPaths[OPENPBR_TEX_SPECULAR_ROUGHNESS] = desc.metallicRoughnessTexPath;
+    desc.openpbrTexPaths[OPENPBR_TEX_GEOMETRY_NORMAL] = desc.normalTexPath;
+    desc.openpbrTexPaths[OPENPBR_TEX_EMISSION_COLOR] = desc.emissionTexPath;
 
     return desc;
 }

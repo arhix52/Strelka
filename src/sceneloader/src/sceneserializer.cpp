@@ -68,6 +68,14 @@ bool saveLightsJson(const Scene& scene, const std::string& gltfOrJsonPath)
         e["cm2_factor"] = exp->cm2Factor;
         root["exposure"] = e;
     }
+    if (const auto& presentation = scene.getPresentation(); presentation.has_value())
+    {
+        root["presentation"] = {
+            { "tonemapper", presentation->tonemapperType },
+            { "gamma", presentation->gamma },
+            { "materialModel", presentation->materialModel },
+        };
+    }
 
     std::ofstream out(jsonPath);
     if (!out)
@@ -91,7 +99,7 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
     json root;
     i >> root;
     if (!root.contains("lights") && !root.contains("environment") && !root.contains("atmosphere") &&
-        !root.contains("exposure"))
+        !root.contains("exposure") && !root.contains("presentation"))
     {
         STRELKA_WARNING("Light file {} has no lights, environment or atmosphere; ignoring",
                         lightJsonPath);
@@ -142,6 +150,19 @@ bool loadLightsJson(Scene& scene, const std::string& lightJsonPath)
         if (e.contains("cm2_factor"))
             desc.cm2Factor = e["cm2_factor"].get<float>();
         scene.setExposure(desc);
+    }
+
+    if (root.contains("presentation"))
+    {
+        const auto& p = root["presentation"];
+        Scene::PresentationDesc desc{};
+        if (p.contains("tonemapper"))
+            desc.tonemapperType = p["tonemapper"].get<uint32_t>();
+        if (p.contains("gamma"))
+            desc.gamma = p["gamma"].get<float>();
+        if (p.contains("materialModel"))
+            desc.materialModel = p["materialModel"].get<uint32_t>();
+        scene.setPresentation(desc);
     }
 
     if (root.contains("atmosphere"))
@@ -228,7 +249,7 @@ bool saveGltf(const Scene& scene, const std::string& outputPath)
             normals.push_back(n.x);
             normals.push_back(n.y);
             normals.push_back(n.z);
-            const glm::float2 uv = unpackUV(v.uv);
+            const glm::float2 uv = unpackUV(v.uv, v.uv1);
             uvs.push_back(uv.x);
             uvs.push_back(uv.y);
         }
