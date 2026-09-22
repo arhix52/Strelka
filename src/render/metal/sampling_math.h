@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 
@@ -31,5 +32,13 @@ inline void frameJitter(uint64_t frameIndex, uint32_t phaseCount, float& x, floa
     y = haltonAt(phase + 1, 3) - 0.5f;
 }
 
-} // namespace oka::metal
+// Apple's recommended bias is log2(render/display) for spatial scaling and
+// one mip sharper for temporal reconstruction. At native resolution the latter
+// is therefore -1, matching MetalFX's temporal-AA case.
+inline float metalFxMipBias(uint32_t renderWidth, uint32_t outputWidth, bool temporal)
+{
+    const float ratio = static_cast<float>(std::max(renderWidth, 1u)) / static_cast<float>(std::max(outputWidth, 1u));
+    return std::log2(ratio) - (temporal ? 1.0f : 0.0f);
+}
 
+} // namespace oka::metal

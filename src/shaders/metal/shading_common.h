@@ -15,6 +15,8 @@
 // deduction at all. Restating them by hand here is how the backends drifted.
 #include <nee_pairing.h>
 #include <light_alias_sampling.h>
+#include <reconstruction_filter.h>
+#include <temporal_reconstruction.h>
 #include <strelka/material/ior_stack.h>
 #include <strelka/material/volume.h>
 #include <strelka/material/bsdf.h>
@@ -441,12 +443,46 @@ void generateCameraRay(uint2 pixelIndex,
                        thread float3& origin,
                        thread float3& direction,
                        const constant Uniforms& params,
-                       float motionTime)
+                       float motionTime,
+                       thread float& reconstructionWeight)
 {
-    const float2 subpixel_jitter =
-        params.useFrameJitter ?
-            float2(params.jitterX + 0.5f, params.jitterY + 0.5f) :
+    float2 subpixel_jitter;
+    reconstructionWeight = 1.0f;
+    if (params.useFrameJitter)
+    {
+        subpixel_jitter =
+            float2(strelkaCameraSampleCoordinate(params.jitterX), strelkaCameraSampleCoordinate(params.jitterY));
+    }
+    else
+    {
+        const float2 randomSample =
             random2<SampleDimension::ePixelX, SampleDimension::ePixelY>(samplerRnd, params.samplerType).value;
+        const uint filter = (params.textureLodMode & RECONSTRUCTION_FILTER_MASK) >> RECONSTRUCTION_FILTER_SHIFT;
+        if (filter == RECONSTRUCTION_FILTER_TENT)
+        {
+            const ReconstructionFilterSample sx = sampleTent(randomSample.x);
+            const ReconstructionFilterSample sy = sampleTent(randomSample.y);
+            subpixel_jitter = float2(0.5f + sx.offset, 0.5f + sy.offset);
+        }
+        else if (filter == RECONSTRUCTION_FILTER_LANCZOS2)
+        {
+            const ReconstructionFilterSample sx = sampleLanczos2(randomSample.x);
+            const ReconstructionFilterSample sy = sampleLanczos2(randomSample.y);
+            subpixel_jitter = float2(0.5f + sx.offset, 0.5f + sy.offset);
+            reconstructionWeight = sx.weight * sy.weight;
+        }
+        else if (filter == RECONSTRUCTION_FILTER_MITCHELL)
+        {
+            const ReconstructionFilterSample sx = sampleMitchell(randomSample.x);
+            const ReconstructionFilterSample sy = sampleMitchell(randomSample.y);
+            subpixel_jitter = float2(0.5f + sx.offset, 0.5f + sy.offset);
+            reconstructionWeight = sx.weight * sy.weight;
+        }
+        else
+        {
+            subpixel_jitter = randomSample;
+        }
+    }
     float2 pixelPos{ pixelIndex.x + subpixel_jitter.x, params.height - (pixelIndex.y + subpixel_jitter.y) };
 
     float2 dimension{ (float)params.width, (float)params.height };

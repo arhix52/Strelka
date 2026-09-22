@@ -42,8 +42,7 @@ void drawFactTable(const char* id, const std::vector<std::pair<const char*, std:
 
 /// Vulkan/OptiX output settings: an HDR10 swapchain the application negotiates,
 /// with absolute nits for the metadata it attaches to it.
-void drawSwapchainOutputSettings(SettingsManager& settings,
-                                 const display_output::DisplayCapabilities& capabilities)
+void drawSwapchainOutputSettings(SettingsManager& settings, const display_output::DisplayCapabilities& capabilities)
 {
     const char* const outputModeItems[] = { "Auto", "HDR10", "SDR" };
     uint32_t storedMode = 0;
@@ -53,7 +52,7 @@ void drawSwapchainOutputSettings(SettingsManager& settings,
     bool vrrEnabled = false;
     float paperWhite = NAN;
     float peakNits = NAN;
-    const char *vrrStatus = nullptr;
+    const char* vrrStatus = nullptr;
 
     storedMode = settings.getAs<uint32_t>("render/post/outputMode");
     outputMode = static_cast<int>(std::min(storedMode, static_cast<uint32_t>(display_output::OutputMode::SDR)));
@@ -84,8 +83,7 @@ void drawSwapchainOutputSettings(SettingsManager& settings,
         settings.setAs<float>("render/post/paperWhiteNits", paperWhite);
         settings.setAs<float>("render/post/peakNits", peakNits);
     }
-    if (ImGui::DragFloat("HDR peak", &peakNits, 10.0f, paperWhite, 10000.0f, "%.0f nits",
-                         ImGuiSliderFlags_Logarithmic))
+    if (ImGui::DragFloat("HDR peak", &peakNits, 10.0f, paperWhite, 10000.0f, "%.0f nits", ImGuiSliderFlags_Logarithmic))
     {
         settings.setAs<float>("render/post/peakNits", peakNits);
     }
@@ -100,30 +98,28 @@ void drawSwapchainOutputSettings(SettingsManager& settings,
     vrrStatus = display_output::vrrStatusName(capabilities.vrrStatus);
     ImGui::SeparatorText("Capabilities");
     std::vector<std::pair<const char*, std::string>> facts = {
-        { "HDR10", fmt::format("{}  (selected {}, metadata {})",
-                               capabilities.output.hdr10 ? "supported" : "unavailable",
+        { "HDR10", fmt::format("{}  (selected {}, metadata {})", capabilities.output.hdr10 ? "supported" : "unavailable",
                                capabilities.output.hdrSelected ? "yes" : "no",
                                capabilities.output.hdrMetadata ? "supported" : "unavailable") },
         { "Present modes", fmt::format("FIFO{}{}{}", capabilities.present.fifoRelaxed ? ", FIFO_RELAXED" : "",
                                        capabilities.present.mailbox ? ", MAILBOX" : "",
                                        capabilities.present.immediate ? ", IMMEDIATE" : "") },
-        { "Present wait", fmt::format("{}  (present ID {}, timing {})",
-                                      capabilities.presentWait ? "available" : "unavailable",
-                                      capabilities.presentId ? "available" : "unavailable",
-                                      capabilities.displayTiming ? "available" : "unavailable") },
-        { "VRR", fmt::format("{}  (current {:.3f} Hz, Vulkan FIFO baseline)", vrrStatus,
-                             capabilities.currentRefreshRateHz) },
+        { "Present wait",
+          fmt::format("{}  (present ID {}, timing {})", capabilities.presentWait ? "available" : "unavailable",
+                      capabilities.presentId ? "available" : "unavailable",
+                      capabilities.displayTiming ? "available" : "unavailable") },
+        { "VRR",
+          fmt::format("{}  (current {:.3f} Hz, Vulkan FIFO baseline)", vrrStatus, capabilities.currentRefreshRateHz) },
     };
     if (capabilities.minRefreshRateHz > 0.0f && capabilities.maxRefreshRateHz > 0.0f)
     {
         facts.emplace_back("Compositor VRR", fmt::format("{:.3f}-{:.3f} Hz", capabilities.minRefreshRateHz,
-                                                          capabilities.maxRefreshRateHz));
+                                                         capabilities.maxRefreshRateHz));
     }
     drawFactTable("##swapchainCapabilities", facts);
 }
 
-void drawMetalOutputSettings(SettingsManager& settings,
-                             const display_output::DisplayCapabilities& capabilities)
+void drawMetalOutputSettings(SettingsManager& settings, const display_output::DisplayCapabilities& capabilities)
 {
     struct ModeItem
     {
@@ -153,9 +149,8 @@ void drawMetalOutputSettings(SettingsManager& settings,
           "reference preset -- pick one in System Settings > Displays before this\n"
           "entry becomes selectable." },
     };
-    const uint32_t storedMode =
-        std::min(settings.getAs<uint32_t>("render/post/outputMode"),
-                 static_cast<uint32_t>(display_output::OutputMode::ReferenceHDR));
+    const uint32_t storedMode = std::min(settings.getAs<uint32_t>("render/post/outputMode"),
+                                         static_cast<uint32_t>(display_output::OutputMode::ReferenceHDR));
     int selectedItem = 0;
     int n = 0;
     bool supported = false;
@@ -174,8 +169,7 @@ void drawMetalOutputSettings(SettingsManager& settings,
         }
     }
 
-    ImGui::TextDisabled("Display: %s",
-                        capabilities.displayName.empty() ? "unknown" : capabilities.displayName.c_str());
+    ImGui::TextDisabled("Display: %s", capabilities.displayName.empty() ? "unknown" : capabilities.displayName.c_str());
 
     if (ImGui::BeginCombo("Dynamic range", kModes[selectedItem].name))
     {
@@ -183,15 +177,14 @@ void drawMetalOutputSettings(SettingsManager& settings,
         {
             supported = display_output::outputModeSupported(kModes[n].mode, capabilities.edr);
             isSelected = n == selectedItem;
-            if (ImGui::Selectable(kModes[n].name, isSelected,
-                                  supported ? ImGuiSelectableFlags_None : ImGuiSelectableFlags_Disabled))
+            if (ImGui::Selectable(
+                    kModes[n].name, isSelected, supported ? ImGuiSelectableFlags_None : ImGuiSelectableFlags_Disabled))
             {
                 settings.setAs<uint32_t>("render/post/outputMode", static_cast<uint32_t>(kModes[n].mode));
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             {
-                ImGui::SetTooltip("%s%s", kModes[n].help,
-                                  supported ? "" : "\n\nThis display does not offer it.");
+                ImGui::SetTooltip("%s%s", kModes[n].help, supported ? "" : "\n\nThis display does not offer it.");
             }
             if (isSelected)
             {
@@ -203,8 +196,7 @@ void drawMetalOutputSettings(SettingsManager& settings,
 
     headroomLimit = settings.getAs<float>("display/edr/headroomLimit");
     ImGui::BeginDisabled(storedMode == static_cast<uint32_t>(display_output::OutputMode::SDR));
-    if (ImGui::DragFloat("Headroom limit", &headroomLimit, 0.05f, 0.0f,
-                         std::max(capabilities.edr.potentialHeadroom, 2.0f),
+    if (ImGui::DragFloat("Headroom limit", &headroomLimit, 0.05f, 0.0f, std::max(capabilities.edr.potentialHeadroom, 2.0f),
                          headroomLimit >= 1.0f ? "%.2fx" : "%.0f = display maximum"))
     {
         settings.setAs<float>("display/edr/headroomLimit", headroomLimit);
@@ -237,8 +229,7 @@ void drawMetalOutputSettings(SettingsManager& settings,
     }
 
     frameRateLimit = settings.getAs<float>("display/present/fpsLimit");
-    if (ImGui::DragFloat("Frame rate limit", &frameRateLimit, 1.0f, 0.0f,
-                         std::max(capabilities.maxRefreshRateHz, 240.0f),
+    if (ImGui::DragFloat("Frame rate limit", &frameRateLimit, 1.0f, 0.0f, std::max(capabilities.maxRefreshRateHz, 240.0f),
                          frameRateLimit >= 1.0f ? "%.0f fps" : "%.0f = display refresh"))
     {
         settings.setAs<float>("display/present/fpsLimit", std::max(frameRateLimit, 0.0f));
@@ -264,16 +255,16 @@ void drawMetalOutputSettings(SettingsManager& settings,
                                       capabilities.edr.potentialHeadroom) },
         { "EDR reference", referenceText },
         { "Tone curve", fmt::format("{:.2f}x SDR white", capabilities.appliedHeadroom) },
-        { "Colour space", fmt::format("{}{}", capabilities.colorSpaceName.empty() ? "unknown" :
-                                                                                     capabilities.colorSpaceName.c_str(),
-                                      capabilities.edr.wideGamut ? " (P3 capable)" : "") },
+        { "Colour space",
+          fmt::format("{}{}", capabilities.colorSpaceName.empty() ? "unknown" : capabilities.colorSpaceName.c_str(),
+                      capabilities.edr.wideGamut ? " (P3 capable)" : "") },
         { "Layer", capabilities.edr.edrRequested ? "extended sRGB, RGBA16F" : "sRGB, RGBA16F" },
         capabilities.vrrStatus == display_output::VrrStatus::Supported ?
-            std::pair<const char*, std::string>{ "Refresh", fmt::format("variable {:.1f}-{:.1f} Hz (up to {:.0f} fps)",
-                                                                        capabilities.minRefreshRateHz,
-                                                                        capabilities.maxRefreshRateHz,
-                                                                        capabilities.currentRefreshRateHz) } :
-            std::pair<const char*, std::string>{ "Refresh", fmt::format("fixed {:.1f} Hz", capabilities.maxRefreshRateHz) },
+            std::pair<const char*, std::string>{
+                "Refresh", fmt::format("variable {:.1f}-{:.1f} Hz (up to {:.0f} fps)", capabilities.minRefreshRateHz,
+                                       capabilities.maxRefreshRateHz, capabilities.currentRefreshRateHz) } :
+            std::pair<const char*, std::string>{ "Refresh",
+                                                 fmt::format("fixed {:.1f} Hz", capabilities.maxRefreshRateHz) },
         { "Present", fmt::format("{} drawables  (vsync {}, {})", capabilities.maxDrawableCount,
                                  capabilities.displaySync ? "on" : "off",
                                  capabilities.frameRateLimitHz > 0.0f ? "rate limited" : "display rate") },
@@ -501,6 +492,25 @@ void EditorApp::drawRenderSettingsPanel()
                     }
                 }
 
+                if (m_render && m_render->denoiserKind() == Render::DenoiserKind::eMetalFx)
+                {
+                    const char* const filterItems[] = { "Box", "Mitchell", "Tent (2 px)", "Lanczos 2" };
+                    int filter = static_cast<int>(
+                        std::min(m_settingsManager->getAs<uint32_t>("render/pt/reconstructionFilter"), 3u));
+                    if (ImGui::Combo("Reconstruction filter", &filter, filterItems, IM_ARRAYSIZE(filterItems)))
+                    {
+                        m_settingsManager->setAs<uint32_t>(
+                            "render/pt/reconstructionFilter", static_cast<uint32_t>(filter));
+                    }
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip(
+                            "Tent matches Corona's documented 2 px filter radius.\n"
+                            "Mitchell and Lanczos 2 retain more detail using signed lobes.\n"
+                            "MetalFX temporal reconstruction and debug views use Box.");
+                    }
+                }
+
                 ImGui::SeparatorText("Denoiser");
 
                 const editor_denoiser::Ui fx = editor_denoiser::uiFor(m_render->denoiserKind());
@@ -709,8 +719,7 @@ void EditorApp::drawRenderSettingsPanel()
                 }
 
                 bool accumulationEnabled = m_settingsManager->getAs<bool>("render/pt/enableAcc");
-                const char* accumulationLabel =
-                    perFrameDenoise ? "Stop at traced SPP limit" : "Accumulate while still";
+                const char* accumulationLabel = perFrameDenoise ? "Stop at traced SPP limit" : "Accumulate while still";
                 if (ImGui::Checkbox(accumulationLabel, &accumulationEnabled))
                 {
                     m_settingsManager->setAs<bool>("render/pt/enableAcc", accumulationEnabled);

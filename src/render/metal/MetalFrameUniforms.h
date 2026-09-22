@@ -198,6 +198,8 @@ private:
         uint32_t restirInitialVisibility = 0;
         uint32_t restirFinalVisibilityReuse = 0;
         uint32_t restirFinalVisibilityMaxAge = 0;
+        uint32_t reconstructionFilter = 0;
+        bool reconstructionFilterSuppressed = false;
     };
 
     MTL::Device* mDevice = nullptr;

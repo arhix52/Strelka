@@ -1271,9 +1271,11 @@ static inline PrimaryPathData initializePrimaryPath(uint2 pixel,
                                                     device AovSample* aov,
                                                     device MediumPathState* mediumPaths)
 {
+    const uint reconstructionFilter =
+        (uniforms.textureLodMode & RECONSTRUCTION_FILTER_MASK) >> RECONSTRUCTION_FILTER_SHIFT;
     if (sampleIdx == 0u)
     {
-        radianceOut[pixelIndex] = float4(0.0f);
+        radianceOut[pixelIndex] = float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
     if (SPEC_RESTIR && uniforms.restirDIEnabled != 0u && !SPEC_SHARC_UPDATE)
     {
@@ -1289,7 +1291,24 @@ static inline PrimaryPathData initializePrimaryPath(uint2 pixel,
     const float motionTime = motionTimeFromSampler(uniforms, sampleIdx, rng);
 
     float3 origin, direction;
-    generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime);
+    float reconstructionWeight;
+    generateCameraRay(pixel, rng, origin, direction, uniforms, motionTime, reconstructionWeight);
+    const bool signedReconstruction = reconstructionFilter == RECONSTRUCTION_FILTER_MITCHELL ||
+                                      reconstructionFilter == RECONSTRUCTION_FILTER_LANCZOS2;
+    if (signedReconstruction)
+    {
+        if (sampleIdx == 0u)
+        {
+            radianceOut[pixelIndex].w = reconstructionWeight;
+        }
+        else
+        {
+            float4 encoded = radianceOut[pixelIndex];
+            encoded.xyz *= reconstructionBatchScale(encoded.w, reconstructionWeight);
+            encoded.w = reconstructionWeight;
+            radianceOut[pixelIndex] = encoded;
+        }
+    }
     if (shouldWriteAov(uniforms, sampleIdx))
     {
         AovSample a;
@@ -1939,10 +1958,11 @@ static bool storeSurfaceGeometry(constant Uniforms& uniforms,
     const uint32_t depth = pathDepth(pathFlags);
     const float coneSpread = (depth == 0u || (pathFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
     const float coneWidthHere = coneSpread * hit.distance;
-    if (SPEC_TEXTURE_LOD_CODE && uniforms.textureLodMode != 0u && uvArea2 > 0.0f && coneWidthHere > 0.0f)
+    if (SPEC_TEXTURE_LOD_CODE && (uniforms.textureLodMode & TEXTURE_LOD_MODE_MASK) != 0u && uvArea2 > 0.0f &&
+        coneWidthHere > 0.0f)
     {
         const float ndotd = max(abs(dot(geometryNormal, rayDirection)), 1e-4f);
-        lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+        lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd) + uniforms.textureLodBias;
     }
 
     packSurfaceGeometry(shadingNormal, geometryNormal, tangent, uv, tangentSign, lodBase, payload);
@@ -2659,8 +2679,8 @@ static inline ScreenMotion screenMotion(constant Uniforms& uniforms, float4 prev
     // This is the raster location of the world-space hit under the current
     // unjittered camera. Using the centre here would make a still scene report
     // exactly the jitter as motion, which is not a dejittered vector.
-    const float2 currPixel = float2((float)pixel.x + 0.5f + uniforms.jitterX, (float)pixel.y + 0.5f + uniforms.jitterY);
-    const float2 motion = prevPixel - currPixel;
+    const float2 motion = float2(strelkaScreenMotionAxis(prevPixel.x, (float)pixel.x + 0.5f, uniforms.jitterX),
+                                 strelkaScreenMotionAxis(prevPixel.y, (float)pixel.y + 0.5f, uniforms.jitterY));
     const float limit = (float)(uniforms.width + uniforms.height);
     result.offset = clamp(motion, -limit, limit);
     return result;
@@ -4086,11 +4106,11 @@ static inline void wavefrontShadeImpl(uint gid,
             const float pixelSpread = 2.0f * abs(uniforms.clipToView[1][1]) / float(max(uniforms.height, 1u));
             const float coneSpread = (depth == 0u || (p.depthAndFlags & PATH_FLAG_SPECULAR) != 0u) ? pixelSpread : 1.0f;
             const float coneWidthHere = coneSpread * rec.distance;
-            if (SPEC_TEXTURE_LOD_CODE && uniforms.textureLodMode != 0u && uvArea2 > 0.0f && worldArea2 > 1e-20f &&
-                coneWidthHere > 0.0f)
+            if (SPEC_TEXTURE_LOD_CODE && (uniforms.textureLodMode & TEXTURE_LOD_MODE_MASK) != 0u && uvArea2 > 0.0f &&
+                worldArea2 > 1e-20f && coneWidthHere > 0.0f)
             {
                 const float ndotd = max(abs(dot(shadingGeomNormal, rayDir)), 1e-4f);
-                lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd);
+                lodBase = 0.5f * log2(uvArea2 / worldArea2) + log2(coneWidthHere) - log2(ndotd) + uniforms.textureLodBias;
             }
         }
     }
@@ -7536,7 +7556,12 @@ kernel void wavefrontResolve(uint tid [[thread_position_in_grid]],
         return;
     }
 
-    float3 result = radianceIn[tid].xyz / (float)max(sampleCount, 1u);
+    const uint reconstructionFilter =
+        (uniforms.textureLodMode & RECONSTRUCTION_FILTER_MASK) >> RECONSTRUCTION_FILTER_SHIFT;
+    const bool signedReconstruction = reconstructionFilter == RECONSTRUCTION_FILTER_MITCHELL ||
+                                      reconstructionFilter == RECONSTRUCTION_FILTER_LANCZOS2;
+    const float reconstructionWeight = signedReconstruction ? radianceIn[tid].w : 1.0f;
+    float3 result = radianceIn[tid].xyz * reconstructionWeight / (float)max(sampleCount, 1u);
 
     if (uniforms.enableAccumulation)
     {
@@ -7578,7 +7603,12 @@ kernel void wavefrontAovResolve(uint2 tid [[thread_position_in_grid]],
     const uint32_t i = tid.y * uniforms.width + tid.x;
     const AovSample a = aov[i];
 
-    float3 color = radiance[i].xyz / (float)max(sampleCount, 1u);
+    const uint reconstructionFilter =
+        (uniforms.textureLodMode & RECONSTRUCTION_FILTER_MASK) >> RECONSTRUCTION_FILTER_SHIFT;
+    const bool signedReconstruction = reconstructionFilter == RECONSTRUCTION_FILTER_MITCHELL ||
+                                      reconstructionFilter == RECONSTRUCTION_FILTER_LANCZOS2;
+    const float reconstructionWeight = signedReconstruction ? radiance[i].w : 1.0f;
+    float3 color = radiance[i].xyz * reconstructionWeight / (float)max(sampleCount, 1u);
 
     if (uniforms.denoiseFireflyClamp > 0.0f)
     {

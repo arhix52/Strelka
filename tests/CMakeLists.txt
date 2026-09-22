@@ -71,6 +71,7 @@ add_executable(unit_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/display/test_output_policy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/display/test_output_probe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_frame_jitter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/test_reconstruction_filter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_integrator_features.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_asset.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/render/test_texture_cache_key.cpp

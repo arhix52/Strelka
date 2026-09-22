@@ -82,6 +82,27 @@ uint32_t parseSamplerName(const std::string& name)
     throw std::invalid_argument("Unknown sampler: " + name + " (halton|pcg|sobol|sobol_bn|hybrid|sobol_notable)");
 }
 
+uint32_t parseReconstructionFilterName(const std::string& name)
+{
+    if (name == "box")
+    {
+        return 0;
+    }
+    if (name == "mitchell")
+    {
+        return 1;
+    }
+    if (name == "tent")
+    {
+        return 2;
+    }
+    if (name == "lanczos2" || name == "lanczos")
+    {
+        return 3;
+    }
+    throw std::invalid_argument("Unknown reconstruction filter: " + name + " (box|tent|mitchell|lanczos2)");
+}
+
 uint32_t parseTonemapName(const std::string& name)
 {
     if (name == "none")
@@ -226,6 +247,8 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
         cfg.upscaleMode = (*v == "temporal") ? 1u : 0u;
     if (auto v = tbl["render"]["texture_lod"].value<bool>())
         cfg.textureLod = *v;
+    if (auto v = tbl["render"]["reconstruction_filter"].value<std::string>())
+        cfg.reconstructionFilter = parseEnumOrDefault(*v, parseReconstructionFilterName, 0, "reconstruction filter");
     if (auto v = tbl["render"]["guide_primary_hit"].value<bool>())
         cfg.guidePrimaryHit = *v;
     if (auto v = tbl["render"]["denoise_firefly_clamp"].value<double>())
@@ -366,9 +389,55 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
                 glm::vec3(arr->get(0)->value_or(0.0), arr->get(1)->value_or(0.0), arr->get(2)->value_or(0.0));
         }
     }
+    if (auto* arr = tbl["camera"]["up"].as_array())
+    {
+        if (arr->size() == 3)
+        {
+            cfg.cameraUp = glm::vec3(arr->get(0)->value_or(0.0), arr->get(1)->value_or(0.0), arr->get(2)->value_or(0.0));
+        }
+    }
+    if (auto* arr = tbl["camera"]["orientation"].as_array())
+    {
+        if (arr->size() == 4)
+        {
+            cfg.cameraOrientation = glm::quat(arr->get(3)->value_or(1.0), arr->get(0)->value_or(0.0),
+                                              arr->get(1)->value_or(0.0), arr->get(2)->value_or(0.0));
+        }
+    }
+    if (auto v = tbl["camera"]["projection"].value<std::string>())
+    {
+        if (*v == "orthographic" || *v == "ortho")
+        {
+            cfg.cameraProjection = Camera::ProjectionType::orthographic;
+        }
+        else if (*v == "perspective" || *v == "persp")
+        {
+            cfg.cameraProjection = Camera::ProjectionType::perspective;
+        }
+        else
+        {
+            throw std::invalid_argument("Unknown camera projection: " + *v + " (perspective|orthographic)");
+        }
+    }
     if (auto v = tbl["camera"]["fov"].value<double>())
     {
         cfg.cameraFov = static_cast<float>(*v);
+    }
+    if (auto v = tbl["camera"]["xmag"].value<double>())
+    {
+        cfg.cameraXMag = static_cast<float>(*v);
+    }
+    if (auto v = tbl["camera"]["ymag"].value<double>())
+    {
+        cfg.cameraYMag = static_cast<float>(*v);
+    }
+    if (auto v = tbl["camera"]["znear"].value<double>())
+    {
+        cfg.cameraNear = static_cast<float>(*v);
+    }
+    if (auto v = tbl["camera"]["zfar"].value<double>())
+    {
+        cfg.cameraFar = static_cast<float>(*v);
     }
     if (auto v = tbl["camera"]["focal_distance"].value<double>())
     {
@@ -524,6 +593,7 @@ void HeadlessApp::populateSettings()
     m_settings->setAs<float>("render/pt/denoiseFireflyClamp", m_config.denoiseFireflyClamp);
     m_settings->setAs<float>("render/pt/clampIndirect", m_config.clampIndirect);
     m_settings->setAs<uint32_t>("render/pt/textureLod", m_config.textureLod ? 1u : 0u);
+    m_settings->setAs<uint32_t>("render/pt/reconstructionFilter", m_config.reconstructionFilter);
     m_settings->setAs<uint32_t>("render/pt/guidePrimaryHit", m_config.guidePrimaryHit ? 1u : 0u);
     m_settings->setAs<uint32_t>("render/validate/estimatorMode", m_config.estimatorMode);
     // Absorption convention for transmissive media: 0 = glTF, 1 = Cycles.
@@ -790,20 +860,65 @@ int HeadlessApp::run()
     if (m_config.cameraIndex >= 0 && static_cast<size_t>(m_config.cameraIndex) < m_scene->getCameraCount())
     {
         Camera& cam = m_scene->getCamera(static_cast<uint32_t>(m_config.cameraIndex));
+        const float aspect =
+            m_config.height != 0 ? static_cast<float>(m_config.width) / static_cast<float>(m_config.height) : 1.0f;
 
-        if (m_config.cameraFov)
+        const Camera::ProjectionType projection = m_config.cameraProjection.value_or(cam.projection);
+        const float nearClip = m_config.cameraNear.value_or(cam.znear);
+        const float farClip = m_config.cameraFar.value_or(cam.zfar);
+        const bool invalidNear =
+            projection == Camera::ProjectionType::perspective ? !(nearClip > 0.0f) : !(nearClip >= 0.0f);
+        if (!std::isfinite(nearClip) || !std::isfinite(farClip) || invalidNear || !(farClip > nearClip))
         {
-            cam.fov = *m_config.cameraFov;
+            STRELKA_FATAL("camera.znear/zfar must be finite and ordered; perspective znear must be positive");
+            return 1;
+        }
+
+        if (projection == Camera::ProjectionType::orthographic)
+        {
+            const float xmag = m_config.cameraXMag.value_or(cam.xmag);
+            const float ymag = m_config.cameraYMag.value_or(cam.ymag);
+            if (!std::isfinite(xmag) || !std::isfinite(ymag) || !(xmag > 0.0f) || !(ymag > 0.0f))
+            {
+                STRELKA_FATAL("camera.xmag and camera.ymag must be finite and positive");
+                return 1;
+            }
+            cam.setOrthographic(xmag, ymag, nearClip, farClip);
+        }
+        else
+        {
+            const float fov = m_config.cameraFov.value_or(cam.fov);
+            if (!std::isfinite(fov) || !(fov > 0.0f) || !(fov < 180.0f))
+            {
+                STRELKA_FATAL("camera.fov must be finite and between 0 and 180 degrees");
+                return 1;
+            }
+            cam.setPerspective(fov, aspect, nearClip, farClip);
         }
         if (m_config.cameraPosition)
         {
             cam.position = *m_config.cameraPosition;
         }
-        if (m_config.cameraTarget)
+        if (m_config.cameraOrientation)
+        {
+            const float length = glm::length(*m_config.cameraOrientation);
+            if (!(length > 0.0f) || !std::isfinite(length))
+            {
+                STRELKA_FATAL("camera.orientation must be a finite non-zero quaternion");
+                return 1;
+            }
+            cam.mOrientation = *m_config.cameraOrientation / length;
+        }
+        else if (m_config.cameraTarget)
         {
             // firstperson view = R * T(-p); upper-left of lookAt is that R.
-            const glm::mat4 view = glm::lookAt(cam.position, *m_config.cameraTarget, glm::vec3(0.0f, 1.0f, 0.0f));
+            const glm::vec3 up = m_config.cameraUp.value_or(glm::vec3(0.0f, 1.0f, 0.0f));
+            const glm::mat4 view = glm::lookAt(cam.position, *m_config.cameraTarget, up);
             cam.mOrientation = glm::normalize(glm::quat_cast(glm::mat3(view)));
+        }
+        if (m_config.cameraUp)
+        {
+            cam.setWorldUp(*m_config.cameraUp);
         }
         if (m_config.cameraFocalDistance)
         {
@@ -822,9 +937,6 @@ int HeadlessApp::run()
             glm::float3 worldMax(0.0f);
             if (computeNodeWorldBounds(*m_scene, *m_config.frameNode, m_config.frameInstance, worldMin, worldMax))
             {
-                const float aspect = m_config.height != 0 ?
-                                         static_cast<float>(m_config.width) / static_cast<float>(m_config.height) :
-                                         1.0f;
                 editor_camera_framing::frameCamera(cam, worldMin, worldMax, aspect);
                 cam.updateAspectRatio(aspect);
                 STRELKA_INFO("ACTION frame_selection node={} instance={} camera={} projection={}", *m_config.frameNode,

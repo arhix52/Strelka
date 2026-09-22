@@ -27,6 +27,7 @@
 #include "MetalScenePreparation.h"
 #include "MetalWavefrontIntegrator.h"
 #include "sampling_math.h"
+#include <temporal_reconstruction.h>
 #include "integrator_features.h"
 #include "temporal_history_policy.h"
 #include <host/render_resolution.h>
@@ -825,6 +826,7 @@ void MetalRender::init()
     static_assert(offsetof(Material, baseColorTexture) == 256);
     static_assert(offsetof(Uniforms, baseLightConnections) == 1032);
     static_assert(offsetof(Uniforms, geometryTransformBase) == 1040);
+    static_assert(offsetof(Uniforms, textureLodBias) == 1044);
     static_assert(offsetof(Uniforms, cameraRayRight) == 1056);
     static_assert(offsetof(Uniforms, cameraRayUp) == 1072);
     static_assert(offsetof(Uniforms, cameraRayForward) == 1088);
@@ -1979,8 +1981,8 @@ void MetalRender::render(Buffer* output)
                 {
                     mIntegrator.resetStageProfilingMetal4();
                 }
-                const bool textureLodCode =
-                    pUniformData->textureLodMode != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
+                const bool textureLodCode = (pUniformData->textureLodMode & TEXTURE_LOD_MODE_MASK) != 0u ||
+                                            envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
                 mIntegrator.variantFor(features | metal::WavefrontFeatures::kMetal4, textureLodCode);
                 if (featureIn.hasSharc)
                 {
@@ -2443,9 +2445,8 @@ void MetalRender::render(Buffer* output)
                 in.reactive = mPost.guides().reactive;
                 in.denoiseStrength = mPost.guides().denoiseStrength;
                 in.output = mPost.denoisedTexture();
-                const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
-                in.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
-                in.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
+                in.jitterX = strelkaMetalFxJitterOffset(pUniformData->jitterX);
+                in.jitterY = strelkaMetalFxJitterOffset(pUniformData->jitterY);
                 // MetalFX accepts one exposure scalar; the renderer's current
                 // white point is neutral, but luminance remains correct if that
                 // becomes chromatic later.
@@ -2483,9 +2484,8 @@ void MetalRender::render(Buffer* output)
                 tin.depth = mPost.guides().depth;
                 tin.motion = mPost.guides().motion;
                 tin.output = mPost.denoisedTexture();
-                const uint32_t jitterSign = settings.getAs<uint32_t>("render/pt/jitterSign");
-                tin.jitterX = (jitterSign & 1u) ? -pUniformData->jitterX : pUniformData->jitterX;
-                tin.jitterY = (jitterSign & 2u) ? -pUniformData->jitterY : pUniformData->jitterY;
+                tin.jitterX = strelkaMetalFxJitterOffset(pUniformData->jitterX);
+                tin.jitterY = strelkaMetalFxJitterOffset(pUniformData->jitterY);
                 tin.depthReversed = denoiseDepthReversed(pUniformData->denoiseDepthMode, pUniformData->projectionType);
                 tin.resetHistory = mResetDenoiseHistory;
                 mResetDenoiseHistory = false;

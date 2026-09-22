@@ -1257,11 +1257,13 @@ void EditorApp::dumpCameraSettings()
     s.useDof = cam.useDof;
     s.focalDistance = cam.focalDistance;
     s.fStopDof = cam.fStopDof;
+    s.focalLengthMm = cam.focalLengthMm;
 
     s.spp = m_settingsManager->getAs<uint32_t>("render/pt/sppTotal");
     s.sppPerLaunch = m_settingsManager->getAs<uint32_t>("render/pt/spp");
     s.maxDepth = m_settingsManager->getAs<uint32_t>("render/pt/depth");
     s.samplerType = m_settingsManager->getAs<uint32_t>("render/pt/samplerType");
+    s.reconstructionFilter = m_settingsManager->getAs<uint32_t>("render/pt/reconstructionFilter");
     s.debugView = m_settingsManager->getAs<uint32_t>("render/pt/debug");
     s.denoise = m_settingsManager->getAs<bool>("render/pt/denoise");
     s.upscale = m_settingsManager->getAs<bool>("render/pt/enableUpscale");

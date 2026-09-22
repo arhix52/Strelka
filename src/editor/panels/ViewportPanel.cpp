@@ -262,7 +262,20 @@ void EditorApp::drawViewportPanel()
         const ImVec2 topLeft = ImGui::GetCursorScreenPos();
         if (viewportTexture != nullptr)
         {
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            ImGuiPlatformIO& platformIo = ImGui::GetPlatformIO();
+            const bool nearest = m_viewportPresentation == editor_viewport::PresentationMode::OneToOne &&
+                                 platformIo.DrawCallback_SetSamplerNearest != nullptr &&
+                                 platformIo.DrawCallback_SetSamplerLinear != nullptr;
+            if (nearest)
+            {
+                drawList->AddCallback(platformIo.DrawCallback_SetSamplerNearest);
+            }
             ImGui::Image((ImTextureID)viewportTexture, viewportSize);
+            if (nearest)
+            {
+                drawList->AddCallback(platformIo.DrawCallback_SetSamplerLinear);
+            }
         }
         else
         {

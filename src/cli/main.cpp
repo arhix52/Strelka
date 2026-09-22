@@ -41,6 +41,7 @@ int main(int argc, const char* argv[])
         ("w,width",      "Render width",                    cxxopts::value<uint32_t>())
         ("height",       "Render height",                   cxxopts::value<uint32_t>())
         ("spp",          "Samples per pixel",               cxxopts::value<uint32_t>())
+        ("spp-per-launch", "Samples grouped into one render launch", cxxopts::value<uint32_t>())
         ("checkpoint-spp", "Publish <stem>.checkpoint.<ext> after crossing each N-SPP boundary (0 disables)",
                                                             cxxopts::value<uint32_t>())
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
@@ -51,6 +52,7 @@ int main(int argc, const char* argv[])
         ("clamp",        "Clamp each indirect path's contribution (0 = off)",
                                                             cxxopts::value<float>())
         ("sampler",      "Sampler: halton, pcg, sobol, sobol_bn, hybrid, sobol_notable", cxxopts::value<std::string>())
+        ("reconstruction-filter", "Pixel reconstruction: box, tent, mitchell, lanczos2", cxxopts::value<std::string>())
         ("bn-switch",    "Hybrid: spp before switching blue-noise -> Sobol", cxxopts::value<uint32_t>())
         ("restir-di",    "Enable ReSTIR DI",                 cxxopts::value<bool>()->implicit_value("true"))
         ("restir-candidates", "ReSTIR initial candidates",   cxxopts::value<uint32_t>())
@@ -154,6 +156,10 @@ int main(int argc, const char* argv[])
     if (result.count("spp"))
     {
         cfg.spp = result["spp"].as<uint32_t>();
+    }
+    if (result.count("spp-per-launch"))
+    {
+        cfg.sppPerLaunch = std::max(result["spp-per-launch"].as<uint32_t>(), 1u);
     }
     if (result.count("checkpoint-spp"))
     {
@@ -303,6 +309,11 @@ int main(int argc, const char* argv[])
         if (result.count("sampler"))
         {
             cfg.samplerType = oka::parseSamplerName(result["sampler"].as<std::string>());
+        }
+        if (result.count("reconstruction-filter"))
+        {
+            cfg.reconstructionFilter =
+                oka::parseReconstructionFilterName(result["reconstruction-filter"].as<std::string>());
         }
         if (result.count("capture"))
         {

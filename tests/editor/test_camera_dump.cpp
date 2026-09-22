@@ -53,9 +53,16 @@ TEST_CASE("the dump emits the sections and keys the CLI parses")
     CHECK(contains(d, "debug = "));
     CHECK(contains(d, "[camera]"));
     CHECK(contains(d, "index = 0"));
+    CHECK(contains(d, "projection = \"perspective\""));
     CHECK(contains(d, "position = ["));
     CHECK(contains(d, "target = ["));
+    CHECK(contains(d, "up = ["));
+    CHECK(contains(d, "orientation = ["));
     CHECK(contains(d, "fov = "));
+    CHECK(contains(d, "xmag = "));
+    CHECK(contains(d, "ymag = "));
+    CHECK(contains(d, "znear = "));
+    CHECK(contains(d, "zfar = "));
     CHECK(contains(d, "[tonemap]"));
     CHECK(contains(d, "exposure_iso = "));
     CHECK(contains(d, "exposure_fstop = "));
@@ -102,6 +109,10 @@ TEST_CASE("sampler and tonemapper are spelled the way the CLI parses them")
     CHECK(std::string(oka::cameraDumpSamplerName(2)) == "sobol");
     CHECK(std::string(oka::cameraDumpSamplerName(3)) == "sobol_bn");
     CHECK(std::string(oka::cameraDumpSamplerName(4)) == "hybrid");
+    CHECK(std::string(oka::cameraDumpReconstructionFilterName(0)) == "box");
+    CHECK(std::string(oka::cameraDumpReconstructionFilterName(1)) == "mitchell");
+    CHECK(std::string(oka::cameraDumpReconstructionFilterName(2)) == "tent");
+    CHECK(std::string(oka::cameraDumpReconstructionFilterName(3)) == "lanczos2");
 
     CHECK(std::string(oka::cameraDumpTonemapName(0)) == "none");
     CHECK(std::string(oka::cameraDumpTonemapName(1)) == "reinhard");
@@ -120,47 +131,41 @@ TEST_CASE("booleans are TOML booleans, not C++ ones")
     CHECK_FALSE(contains(d, "denoise = 1"));
 }
 
-TEST_CASE("the pose the CLI cannot carry is printed rather than dropped")
+TEST_CASE("the exact rolled pose is emitted as CLI input")
 {
-    // position/target go through glm::lookAt against world up, so a rolled
-    // viewport is not reproduced by them. Saying so in the block is the
-    // difference between a known limitation and a mystery.
     oka::CameraDumpState s = sample_state();
     s.orientation[0] = 0.1f;
     s.orientation[3] = 0.99f;
     const std::string d = oka::formatCameraDump(s);
-    CHECK(contains(d, "orientation"));
-    CHECK(contains(d, "0.99"));
-    CHECK(contains(d, "lookAt"));
+    CHECK(contains(d, "orientation = [0.1, 0, 0, 0.99]"));
+    CHECK_FALSE(contains(d, "lookAt"));
 }
 
-TEST_CASE("an orthographic viewport says the block cannot reproduce it")
+TEST_CASE("an orthographic viewport emits its live film extent")
 {
-    // There is no camera.projection key. A perspective config emitted for an
-    // orthographic viewport frames something else entirely, and would be read
-    // as a renderer bug rather than a dump one.
     oka::CameraDumpState s = sample_state();
     s.orthographic = true;
     s.xmag = 3.5f;
+    s.ymag = 1.25f;
     const std::string d = oka::formatCameraDump(s);
-    CHECK(contains(d, "ORTHOGRAPHIC"));
-    CHECK(contains(d, "3.5"));
-    CHECK(contains(d, "camera.index"));
+    CHECK(contains(d, "projection = \"orthographic\""));
+    CHECK(contains(d, "xmag = 3.5"));
+    CHECK(contains(d, "ymag = 1.25"));
 }
 
-TEST_CASE("depth of field is reported, with where it actually lives")
+TEST_CASE("depth of field is emitted as CLI input only when enabled")
 {
     oka::CameraDumpState s = sample_state();
     s.useDof = true;
     s.focalDistance = 12.25f;
     s.fStopDof = 1.8f;
+    s.focalLengthMm = 42.5f;
     const std::string d = oka::formatCameraDump(s);
-    CHECK(contains(d, "12.25"));
-    CHECK(contains(d, "1.8"));
-    CHECK(contains(d, "_camera.json"));
+    CHECK(contains(d, "focal_distance = 12.25"));
+    CHECK(contains(d, "fstop = 1.8"));
+    CHECK(contains(d, "focal_length_mm = 42.5"));
 
-    // And is silent when it is off, so the block stays short enough to read.
-    CHECK_FALSE(contains(oka::formatCameraDump(sample_state()), "depth of field"));
+    CHECK_FALSE(contains(oka::formatCameraDump(sample_state()), "focal_distance"));
 }
 
 TEST_CASE("every printed float reads back as the float that went in")
@@ -168,9 +173,8 @@ TEST_CASE("every printed float reads back as the float that went in")
     // The property the shortest-round-trip spelling exists for. Shortening is
     // only allowed while it is lossless -- an f-stop may print as "1.8", but a
     // camera position may not lose its ninth digit to the same rule.
-    const float values[] = { 1.8f,         23.1552734f, 47.5601234f, 0.921875f, 39.5977783f,
-                             0.000012345f, -0.1f,       1e7f,        3.5f,      100.0f,
-                             0.0f,         -47.5601234f };
+    const float values[] = { 1.8f,  23.1552734f, 47.5601234f, 0.921875f, 39.5977783f, 0.000012345f,
+                             -0.1f, 1e7f,        3.5f,        100.0f,    0.0f,        -47.5601234f };
     for (float v : values)
     {
         const std::string s = oka::cameraDumpFloat(v);

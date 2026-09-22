@@ -36,6 +36,7 @@ struct RenderConfig
     // measure a shorter tail explicitly.
     uint32_t subsurfaceIterations = 64;
     uint32_t samplerType = 4;
+    uint32_t reconstructionFilter = 0; // 0 = box, 1 = Mitchell, 2 = tent radius 2, 3 = Lanczos 2
     // MetalFX denoising. Off by default: it is a temporal filter and a still
     // frame gives it one frame to work with, so whether it helps is a question
     // to be measured per scene rather than assumed.
@@ -141,7 +142,14 @@ struct RenderConfig
     std::optional<uint32_t> frameInstance;
     std::optional<glm::vec3> cameraPosition;
     std::optional<glm::vec3> cameraTarget;
+    std::optional<glm::vec3> cameraUp;
+    std::optional<glm::quat> cameraOrientation;
+    std::optional<Camera::ProjectionType> cameraProjection;
     std::optional<float> cameraFov;
+    std::optional<float> cameraXMag;
+    std::optional<float> cameraYMag;
+    std::optional<float> cameraNear;
+    std::optional<float> cameraFar;
     // Depth of field, off unless the config states a focal distance: an offline
     // still is graded against a pinhole everywhere else in this tree.
     std::optional<float> cameraFocalDistance;
@@ -161,6 +169,7 @@ struct RenderConfig
 /// Parse named enum values used by both TOML and CLI flags.
 /// Throws std::invalid_argument on unknown names.
 uint32_t parseSamplerName(const std::string& name);
+uint32_t parseReconstructionFilterName(const std::string& name);
 uint32_t parseTonemapName(const std::string& name);
 
 /// Parse a TOML config file into a RenderConfig, starting from defaults.

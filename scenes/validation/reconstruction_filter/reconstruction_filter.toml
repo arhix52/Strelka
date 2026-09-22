@@ -1,0 +1,26 @@
+[scene]
+path = "reconstruction_filter.gltf"
+
+[output]
+path = "output/reconstruction_filter.png"
+width = 768
+height = 512
+
+[render]
+spp = 256
+spp_per_launch = 16
+max_depth = 1
+sampler = "hybrid"
+blue_noise_switch_spp = 64
+reconstruction_filter = "box"
+denoise = false
+
+[camera]
+index = 0
+
+[tonemap]
+type = "none"
+gamma = 2.2
+exposure_iso = 100
+exposure_fstop = 1
+exposure_shutter = 1

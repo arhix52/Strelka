@@ -116,6 +116,28 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     const uint32_t accumulatedSamples = in.subframeIndex;
     const uint32_t remainingSamples = accumulatedSamples < sspTotal ? sspTotal - accumulatedSamples : 0u;
     const bool accumulationActive = effectiveAccumulation && remainingSamples > 0u;
+    const bool temporalOn = denoising || temporalUpscaling;
+    const bool outputScaled = width != outWidth || height != outHeight;
+    const bool metalFxActive = temporalOn || outputScaled;
+    const uint32_t requestedReconstructionFilter =
+        std::min(settings.getAs<uint32_t>("render/pt/reconstructionFilter"), RECONSTRUCTION_FILTER_LANCZOS2);
+    // MetalFX temporal reconstruction owns a single frame-wide jitter that it
+    // later removes. Per-pixel filter offsets cannot be expressed through that
+    // API. Spatial scaling and non-accumulating playback have no such conflict.
+    const uint32_t reconstructionFilter =
+        !temporalOn && debug == 0u ? requestedReconstructionFilter : RECONSTRUCTION_FILTER_BOX;
+    const bool reconstructionFilterSuppressed =
+        requestedReconstructionFilter != RECONSTRUCTION_FILTER_BOX && reconstructionFilter == RECONSTRUCTION_FILTER_BOX;
+    if (reconstructionFilterSuppressed && (!mPrevSettings.reconstructionFilterSuppressed ||
+                                           mPrevSettings.reconstructionFilter != requestedReconstructionFilter))
+    {
+        const char* filterName = requestedReconstructionFilter == RECONSTRUCTION_FILTER_MITCHELL ? "Mitchell" :
+                                 requestedReconstructionFilter == RECONSTRUCTION_FILTER_TENT     ? "Tent" :
+                                                                                                   "Lanczos 2";
+        STRELKA_WARNING(
+            "Reconstruction filter '{}' is bypassed because MetalFX temporal jitter or a debug view owns camera sampling",
+            filterName);
+    }
 
     MTL::Buffer* pUniformBuffer = mUniformBuffers[in.frameSlot % kFrameUniformSlots];
     MTL::Buffer* pUniformTMBuffer = mUniformTMBuffers[in.frameSlot % kFrameUniformSlots];
@@ -157,7 +179,9 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // 0 = balance, 1 = power. The same key OptiX reads, so the two backends can
     // be compared under either heuristic.
     pUniformData->misHeuristic = settings.getAs<uint32_t>("render/pt/misHeuristic");
-    pUniformData->textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod");
+    const uint32_t textureLodMode = settings.getAs<uint32_t>("render/pt/textureLod") & TEXTURE_LOD_MODE_MASK;
+    pUniformData->textureLodMode = textureLodMode | (reconstructionFilter << RECONSTRUCTION_FILTER_SHIFT);
+    pUniformData->textureLodBias = metalFxActive ? metal::metalFxMipBias(width, outWidth, temporalOn) : 0.0f;
     pUniformData->missColor = float3(0.0f);
     pUniformData->maxDepth = maxDepth;
     pUniformData->subsurfaceIterations =
@@ -166,8 +190,6 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     // Denoiser guides. Off unless something downstream consumes them: writing
     // them costs a 64-byte store per pixel at the primary hit.
     // Looking at a guide implies producing it, and so does denoising.
-    const bool denoiseOn = denoising;
-    const bool temporalOn = denoiseOn || temporalUpscaling;
     pUniformData->writeAov = settings.getAs<uint32_t>("render/pt/writeAov") || DEBUG_MODE_IS_AOV(debug) || temporalOn;
     pUniformData->guidePrimaryHit = settings.getAs<uint32_t>("render/pt/guidePrimaryHit");
     pUniformData->restirDIEnabled = settings.getAs<bool>("render/pt/restirDIEnabled") ? 1u : 0u;
@@ -508,6 +530,7 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     settingsChanged |= (mPrevSettings.restirInitialVisibility != pUniformData->restirInitialVisibility);
     settingsChanged |= (mPrevSettings.restirFinalVisibilityReuse != pUniformData->restirFinalVisibilityReuse);
     settingsChanged |= (mPrevSettings.restirFinalVisibilityMaxAge != pUniformData->restirFinalVisibilityMaxAge);
+    settingsChanged |= (mPrevSettings.reconstructionFilter != requestedReconstructionFilter);
 
     mPrevSettings.rectLightSamplingMethod = rectLightSamplingMethod;
     mPrevSettings.samplerType = samplerType;
@@ -545,6 +568,8 @@ MetalFrameUniforms::FillResult MetalFrameUniforms::fill(const FillInput& in)
     mPrevSettings.restirInitialVisibility = pUniformData->restirInitialVisibility;
     mPrevSettings.restirFinalVisibilityReuse = pUniformData->restirFinalVisibilityReuse;
     mPrevSettings.restirFinalVisibilityMaxAge = pUniformData->restirFinalVisibilityMaxAge;
+    mPrevSettings.reconstructionFilter = requestedReconstructionFilter;
+    mPrevSettings.reconstructionFilterSuppressed = reconstructionFilterSuppressed;
 
     /* settingsChanged reported via FillResult; orchestrator resets subframe/history */
 

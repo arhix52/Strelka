@@ -732,7 +732,8 @@ void MetalWavefrontIntegrator::encodeMetal4(MTL4::ComputeCommandEncoder*& enc,
     Buffer* output = frame.output;
 
     const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
-    const bool textureLodCode = uniforms->textureLodMode != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
+    const bool textureLodCode =
+        (uniforms->textureLodMode & TEXTURE_LOD_MODE_MASK) != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
     const WavefrontVariant* variant = variantFor(features | WavefrontFeatures::kMetal4, textureLodCode);
     if (!variant)
     {
@@ -1579,7 +1580,8 @@ MTL::ComputeCommandEncoder* MetalWavefrontIntegrator::encode(MTL::CommandBuffer*
 
     const uint32_t pixels = frame.pathCount != 0u ? frame.pathCount : width * height;
     const auto* uniforms = static_cast<const Uniforms*>(uniformBuffer->contents());
-    const bool textureLodCode = uniforms->textureLodMode != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
+    const bool textureLodCode =
+        (uniforms->textureLodMode & TEXTURE_LOD_MODE_MASK) != 0u || envFlag("STRELKA_FORCE_TEXTURE_LOD_CODE");
     const WavefrontVariant* variant = variantFor(features, textureLodCode);
     const uint32_t bounceIterations = frame.bounceIterations;
     const MTL::Buffer* outputBuffer = ((MetalBuffer*)output)->getNativePtr();

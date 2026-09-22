@@ -24,8 +24,7 @@ struct CameraDumpState
     /// position + forward, i.e. what the CLI's `target` means.
     float target[3] = { 0.0f, 0.0f, -1.0f };
     float up[3] = { 0.0f, 1.0f, 0.0f };
-    /// x, y, z, w -- the pose the CLI cannot take, printed so the roll is not
-    /// lost silently.
+    /// x, y, z, w.
     float orientation[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     bool orthographic = false;
@@ -38,11 +37,13 @@ struct CameraDumpState
     bool useDof = false;
     float focalDistance = 10.0f;
     float fStopDof = 2.8f;
+    float focalLengthMm = 50.0f;
 
     uint32_t spp = 0;
     uint32_t sppPerLaunch = 1;
     uint32_t maxDepth = 4;
     uint32_t samplerType = 0;
+    uint32_t reconstructionFilter = 0;
     uint32_t debugView = 0;
     bool denoise = false;
     bool upscale = false;
@@ -72,6 +73,11 @@ inline const char* cameraDumpSamplerName(uint32_t samplerType)
     default:
         return "sobol";
     }
+}
+
+inline const char* cameraDumpReconstructionFilterName(uint32_t filter)
+{
+    return filter == 1u ? "mitchell" : filter == 2u ? "tent" : filter == 3u ? "lanczos2" : "box";
 }
 
 /// `tonemap.type` likewise.
@@ -120,6 +126,12 @@ inline std::string cameraDumpVec3(const float v[3])
     return "[" + cameraDumpFloat(v[0]) + ", " + cameraDumpFloat(v[1]) + ", " + cameraDumpFloat(v[2]) + "]";
 }
 
+inline std::string cameraDumpVec4(const float v[4])
+{
+    return "[" + cameraDumpFloat(v[0]) + ", " + cameraDumpFloat(v[1]) + ", " + cameraDumpFloat(v[2]) + ", " +
+           cameraDumpFloat(v[3]) + "]";
+}
+
 /// The viewport as a config file StrelkaCLI can render.
 inline std::string formatCameraDump(const CameraDumpState& s)
 {
@@ -127,28 +139,6 @@ inline std::string formatCameraDump(const CameraDumpState& s)
     os << "# --- Strelka camera dump ---------------------------------------\n"
        << "# Paste into a .toml and render it with:\n"
        << "#     StrelkaCLI -c <that file>\n";
-
-    if (s.orthographic)
-    {
-        // There is no `camera.projection` key, so an orthographic viewport
-        // cannot be reproduced by the block below at all. Saying so beats
-        // emitting a perspective config that quietly frames something else.
-        os << "# NOTE: this camera is ORTHOGRAPHIC (xmag " << cameraDumpFloat(s.xmag) << ", ymag "
-           << cameraDumpFloat(s.ymag) << ").\n"
-           << "#       The CLI has no key for that -- render it through camera.index instead.\n";
-    }
-    os << "# orientation (x, y, z, w) = " << cameraDumpFloat(s.orientation[0]) << ", "
-       << cameraDumpFloat(s.orientation[1]) << ", " << cameraDumpFloat(s.orientation[2]) << ", "
-       << cameraDumpFloat(s.orientation[3]) << "\n"
-       << "#       up = " << cameraDumpVec3(s.up) << "\n"
-       << "#       The CLI rebuilds the view with lookAt against world up, so any roll\n"
-       << "#       in the viewport is not carried by position/target alone.\n"
-       << "# znear/zfar = " << cameraDumpFloat(s.znear) << " / " << cameraDumpFloat(s.zfar) << "\n";
-    if (s.useDof)
-    {
-        os << "# depth of field is ON: focal distance " << cameraDumpFloat(s.focalDistance) << ", f/"
-           << cameraDumpFloat(s.fStopDof) << " -- carried by <stem>_camera.json, not by this block.\n";
-    }
 
     os << "\n[scene]\npath = \"" << s.scenePath << "\"\n"
        << "\n[output]\npath = \"dump.exr\"\n"
@@ -160,16 +150,30 @@ inline std::string formatCameraDump(const CameraDumpState& s)
        << "spp_per_launch = " << s.sppPerLaunch << "\n"
        << "max_depth = " << s.maxDepth << "\n"
        << "sampler = \"" << cameraDumpSamplerName(s.samplerType) << "\"\n"
+       << "reconstruction_filter = \"" << cameraDumpReconstructionFilterName(s.reconstructionFilter) << "\"\n"
        << "texture_downscale = " << s.textureDownscale << "\n"
        << "denoise = " << (s.denoise ? "true" : "false") << "\n"
        << "upscale = " << (s.upscale ? "true" : "false") << "\n"
        << "debug = " << s.debugView << "\n"
        << "\n[camera]\n"
        << "index = " << s.cameraIndex << "\n"
+       << "projection = \"" << (s.orthographic ? "orthographic" : "perspective") << "\"\n"
        << "position = " << cameraDumpVec3(s.position) << "\n"
        << "target = " << cameraDumpVec3(s.target) << "\n"
+       << "up = " << cameraDumpVec3(s.up) << "\n"
+       << "orientation = " << cameraDumpVec4(s.orientation) << "\n"
        << "fov = " << cameraDumpFloat(s.fov) << "\n"
-       << "\n[tonemap]\n"
+       << "xmag = " << cameraDumpFloat(s.xmag) << "\n"
+       << "ymag = " << cameraDumpFloat(s.ymag) << "\n"
+       << "znear = " << cameraDumpFloat(s.znear) << "\n"
+       << "zfar = " << cameraDumpFloat(s.zfar) << "\n";
+    if (s.useDof)
+    {
+        os << "focal_distance = " << cameraDumpFloat(s.focalDistance) << "\n"
+           << "fstop = " << cameraDumpFloat(s.fStopDof) << "\n"
+           << "focal_length_mm = " << cameraDumpFloat(s.focalLengthMm) << "\n";
+    }
+    os << "\n[tonemap]\n"
        << "type = \"" << cameraDumpTonemapName(s.tonemapperType) << "\"\n"
        << "gamma = " << cameraDumpFloat(s.gamma) << "\n"
        << "exposure_iso = " << cameraDumpFloat(s.filmIso) << "\n"

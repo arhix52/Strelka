@@ -131,6 +131,14 @@ static_assert(sizeof(BaseLightConnectionPayload) == 60, "Base light connection p
 #define SURFACE_GEOMETRY_VALID (1u << 31)
 #define SURFACE_GEOMETRY_TANGENT_NEGATIVE (1u << 30)
 
+#define TEXTURE_LOD_MODE_MASK 0xffu
+#define RECONSTRUCTION_FILTER_SHIFT 8u
+#define RECONSTRUCTION_FILTER_MASK (0xffu << RECONSTRUCTION_FILTER_SHIFT)
+#define RECONSTRUCTION_FILTER_BOX 0u
+#define RECONSTRUCTION_FILTER_MITCHELL 1u
+#define RECONSTRUCTION_FILTER_TENT 2u
+#define RECONSTRUCTION_FILTER_LANCZOS2 3u
+
 struct PrimitiveSurfaceData
 {
     uint32_t normal[3];
@@ -292,9 +300,8 @@ struct Uniforms
     uint32_t risCandidates;
     /// Which MIS heuristic weighs the two strategies: 0 = balance, 1 = power.
     uint32_t misHeuristic;
-    /// 0 = sample level 0 (what a compute kernel does by default), 1 = ray-cone
-    /// level of detail. A switch rather than a constant because the whole point
-    /// of it is a memory-pressure trade that has to be measured per scene.
+    /// Low byte: 0 = level 0, 1 = ray-cone LOD. The next byte stores the
+    /// reconstruction filter without growing this hot, shared ABI block.
     uint32_t textureLodMode;
     uint32_t guidePrimaryHit;
 
@@ -430,6 +437,8 @@ struct Uniforms
     /// First transform-only record after the real TLAS instance descriptors.
     /// A world-space baked geometry indexes this tail by GeometryEntry id.
     uint32_t geometryTransformBase;
+    // Consumes padding before the 16-byte-aligned camera basis.
+    float textureLodBias;
     // Perspective camera unprojection expanded on the CPU. Appended so the
     // existing pointer offsets above remain stable across the shared ABI.
     vector_float3 cameraRayRight;
