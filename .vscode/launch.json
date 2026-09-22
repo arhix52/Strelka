@@ -5,10 +5,10 @@
             "name": "Run StrelkaEditor",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Release/StrelkaEditor.exe",
+            "program": "${workspaceFolder}/build/Release/StrelkaEditor",
             "cwd": "${workspaceFolder}/build/Release",
             "env": {
-                "OPTIX_DIR": "C:\\ProgramData\\NVIDIA Corporation\\OptiX SDK 9.1.0"
+                "SPDLOG_LEVEL": "info"
             },
             "windows": {
                 "type": "lldb",
@@ -23,9 +23,12 @@
             "name": "Launch StrelkaEditor (Debug)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Release/StrelkaEditor.exe",
+            "program": "${workspaceFolder}/build/Debug/StrelkaEditor",
             "args": ["-s", "${input:sceneFile}"],
-            "cwd": "${workspaceFolder}/build/Release",
+            "cwd": "${workspaceFolder}/build/Debug",
+            "env": {
+                "SPDLOG_LEVEL": "trace"
+            },
             "stopAtEntry": false,
             "preLaunchTask": "Build StrelkaEditor (Debug)",
             "hidden": true,
@@ -50,9 +53,12 @@
             "name": "Launch StrelkaEditor (Release)",
             "type": "lldb",
             "request": "launch",
-            "program": "${workspaceFolder}/build/Release/StrelkaEditor.exe",
+            "program": "${workspaceFolder}/build/Release/StrelkaEditor",
             "args": ["-s", "${input:sceneFile}"],
             "cwd": "${workspaceFolder}/build/Release",
+            "env": {
+                "SPDLOG_LEVEL": "info"
+            },
             "stopAtEntry": false,
             "preLaunchTask": "Build StrelkaEditor (Release)",
             "hidden": true,
