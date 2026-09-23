@@ -16,6 +16,12 @@ if [[ ! -f compile_commands.json ]]; then
 fi
 
 CLANG_TIDY="${CLANG_TIDY:-clang-tidy}"
+if ! command -v "$CLANG_TIDY" >/dev/null 2>&1 && [[ "$CLANG_TIDY" == "clang-tidy" ]] && command -v brew >/dev/null 2>&1; then
+    LLVM_PREFIX="$(brew --prefix llvm 2>/dev/null || true)"
+    if [[ -x "$LLVM_PREFIX/bin/clang-tidy" ]]; then
+        CLANG_TIDY="$LLVM_PREFIX/bin/clang-tidy"
+    fi
+fi
 if ! command -v "$CLANG_TIDY" >/dev/null 2>&1; then
     echo "run_clang_tidy: clang-tidy not found (brew install llvm)" >&2
     exit 1
@@ -73,10 +79,9 @@ if [[ -n "$RUN_CLANG_TIDY" ]]; then
 fi
 
 status=0
-mapfile -d '' files < <(find src tests \( -name '*.cpp' -o -name '*.mm' \) -print0)
-for f in "${files[@]}"; do
+while IFS= read -r -d '' f; do
     if ! run_one "$f"; then
         status=1
     fi
-done
+done < <(find src tests \( -name '*.cpp' -o -name '*.mm' \) -print0)
 exit "$status"

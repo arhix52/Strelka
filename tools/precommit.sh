@@ -24,14 +24,12 @@ if [[ ! -f compile_commands.json ]]; then
     exit 1
 fi
 
-mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMRTUXB)
-
 tidy_files=()
-for path in "${staged[@]}"; do
+while IFS= read -r -d '' path; do
     case "$path" in
         src/*.cpp|src/*.mm|tests/*.cpp) tidy_files+=("$path") ;;
     esac
-done
+done < <(git diff --cached --name-only --diff-filter=ACMRTUXB -z)
 
 if [[ "${#tidy_files[@]}" -eq 0 ]]; then
     echo "precommit: no staged src/*.cpp, src/*.mm, or tests/*.cpp — nothing to check."
