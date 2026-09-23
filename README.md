@@ -61,10 +61,12 @@ SPDLOG_LEVEL=debug build/Release/StrelkaCLI ...
 ```
 
 `StrelkaCLI` accepts a TOML config (`-c` / `--config`); every flag overrides the
-matching key. Long renders can publish an atomically replaced intermediate image
-with `--checkpoint-spp N` or `[render].checkpoint_spp = N`; the latest snapshot
-is written as `<stem>.checkpoint.<ext>` between render batches. See `RenderConfig`
-in `src/cli/HeadlessApp.h`.
+matching key. `--checkpoint-spp N` writes both `<stem>.checkpoint.<ext>` and a
+resumable `<stem>.checkpoint.stc`. Continue with `--resume <stem>.checkpoint.stc
+--spp TOTAL`; `TOTAL` includes samples already saved. For a postproduction
+deliverable, `--postprocess-package` writes a scene-linear beauty EXR, a
+tonemapped PNG preview and `<stem>.render.json` with render/camera metadata.
+See [output and checkpoint details](docs/output-and-checkpoints.md).
 
 ## Package (macOS)
 

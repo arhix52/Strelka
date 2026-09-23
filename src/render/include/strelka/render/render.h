@@ -53,6 +53,13 @@ public:
         render(output);
     }
 
+    /// Restore a resolved scene-linear accumulation image before the next
+    /// sample. Backends without resumable accumulation reject the request.
+    virtual bool restoreAccumulation(Buffer*, uint32_t)
+    {
+        return false;
+    }
+
     virtual std::string renderWorkAuditJson() const
     {
         return {};

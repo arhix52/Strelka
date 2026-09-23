@@ -118,6 +118,36 @@ size_t processFootprintBytes()
 
 MetalRender::MetalRender(/* args */) = default;
 
+bool MetalRender::restoreAccumulation(Buffer* output, uint32_t spp)
+{
+    if (!output || !mAccumulationBuffer || mScenePrep.isBuilding() || spp == 0 || deviceError())
+    {
+        return false;
+    }
+    MTL::Buffer* source = static_cast<MetalBuffer*>(output)->getNativePtr();
+    const size_t bytes = static_cast<size_t>(output->width()) * output->height() * sizeof(simd::float4);
+    if (!source || bytes != source->length() || bytes != mAccumulationBuffer->length())
+    {
+        return false;
+    }
+    MTL::CommandBuffer* command = mCommandQueue->commandBuffer();
+    if (!command)
+    {
+        return false;
+    }
+    MTL::BlitCommandEncoder* blit = command->blitCommandEncoder();
+    blit->copyFromBuffer(source, 0, mAccumulationBuffer, 0, bytes);
+    blit->endEncoding();
+    command->commit();
+    command->waitUntilCompleted();
+    if (command->status() != MTL::CommandBufferStatusCompleted)
+    {
+        return false;
+    }
+    getSharedContext().mSubframeIndex = spp;
+    return true;
+}
+
 MetalRender::~MetalRender()
 {
     @autoreleasepool

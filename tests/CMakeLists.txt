@@ -10,6 +10,7 @@ add_executable(unit_tests
     ${CMAKE_SOURCE_DIR}/src/display/src/output_probe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/foundation/test_env.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/foundation/test_paths.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cli/test_checkpoint.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_bsdf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_energy_conservation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/material/test_anisotropy.cpp
@@ -252,6 +253,49 @@ if(TARGET StrelkaCLI)
             SKIP_RETURN_CODE 77
             TIMEOUT 300
     )
+
+    if(APPLE)
+        add_executable(metal_checkpoint_regression
+            ${CMAKE_CURRENT_SOURCE_DIR}/render/metal_checkpoint_regression.cpp
+        )
+        strelka_apply_warnings(metal_checkpoint_regression)
+        target_compile_definitions(metal_checkpoint_regression
+            PRIVATE
+                STRELKA_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/scenes/validation"
+                STRELKA_TEST_BINARY_DIR="${OUTPUT_DIRECTORY}"
+        )
+        add_dependencies(metal_checkpoint_regression StrelkaCLI)
+        add_test(NAME metal_checkpoint_regression COMMAND metal_checkpoint_regression)
+        set_tests_properties(metal_checkpoint_regression PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+        add_executable(metal_openpbr_opacity_regression
+            ${CMAKE_CURRENT_SOURCE_DIR}/render/metal_openpbr_opacity_regression.cpp
+        )
+        strelka_apply_warnings(metal_openpbr_opacity_regression)
+        target_compile_definitions(metal_openpbr_opacity_regression
+            PRIVATE
+                STRELKA_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/scenes/validation"
+                STRELKA_TEST_BINARY_DIR="${OUTPUT_DIRECTORY}"
+        )
+        target_link_libraries(metal_openpbr_opacity_regression PRIVATE tinyexr::tinyexr)
+        add_dependencies(metal_openpbr_opacity_regression StrelkaCLI)
+        add_test(NAME metal_openpbr_opacity_regression COMMAND metal_openpbr_opacity_regression)
+        set_tests_properties(metal_openpbr_opacity_regression PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+        add_executable(metal_reconstruction_filter_regression
+            ${CMAKE_CURRENT_SOURCE_DIR}/render/metal_reconstruction_filter_regression.cpp
+        )
+        strelka_apply_warnings(metal_reconstruction_filter_regression)
+        target_compile_definitions(metal_reconstruction_filter_regression
+            PRIVATE
+                STRELKA_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/scenes/validation"
+                STRELKA_TEST_BINARY_DIR="${OUTPUT_DIRECTORY}"
+        )
+        target_link_libraries(metal_reconstruction_filter_regression PRIVATE tinyexr::tinyexr)
+        add_dependencies(metal_reconstruction_filter_regression StrelkaCLI)
+        add_test(NAME metal_reconstruction_filter_regression COMMAND metal_reconstruction_filter_regression)
+        set_tests_properties(metal_reconstruction_filter_regression PROPERTIES TIMEOUT 300)
+    endif()
 endif()
 
 # The curve sidecar has a writer as well as a reader, and the writer is Python

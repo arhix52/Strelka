@@ -42,8 +42,11 @@ int main(int argc, const char* argv[])
         ("height",       "Render height",                   cxxopts::value<uint32_t>())
         ("spp",          "Samples per pixel",               cxxopts::value<uint32_t>())
         ("spp-per-launch", "Samples grouped into one render launch", cxxopts::value<uint32_t>())
-        ("checkpoint-spp", "Publish <stem>.checkpoint.<ext> after crossing each N-SPP boundary (0 disables)",
+        ("checkpoint-spp", "Publish preview and resumable .checkpoint.stc every N spp (0 disables)",
                                                             cxxopts::value<uint32_t>())
+        ("resume",       "Resume from a .checkpoint.stc state file", cxxopts::value<std::string>())
+        ("postprocess-package", "Write linear EXR with JSON metadata and tonemapped PNG preview",
+                                                            cxxopts::value<bool>()->implicit_value("true"))
         ("depth",        "Max ray depth",                   cxxopts::value<uint32_t>())
         ("sss-iterations", "Subsurface random-walk iteration limit (0..256)",
                                                             cxxopts::value<uint32_t>())
@@ -167,6 +170,14 @@ int main(int argc, const char* argv[])
     if (result.count("checkpoint-spp"))
     {
         cfg.checkpointSpp = result["checkpoint-spp"].as<uint32_t>();
+    }
+    if (result.count("resume"))
+    {
+        cfg.resumeCheckpoint = result["resume"].as<std::string>();
+    }
+    if (result.count("postprocess-package"))
+    {
+        cfg.postprocessPackage = result["postprocess-package"].as<bool>();
     }
     if (result.count("depth"))
     {

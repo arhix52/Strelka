@@ -41,6 +41,7 @@ public:
     }
     void render(Buffer* output) override;
     void renderSync(Buffer* output) override;
+    bool restoreAccumulation(Buffer* output, uint32_t spp) override;
     std::string renderWorkAuditJson() const override;
     void beginGpuCapture(const std::string& path) override;
     void endGpuCapture() override;

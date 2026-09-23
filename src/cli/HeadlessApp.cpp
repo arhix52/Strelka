@@ -1,4 +1,5 @@
 #include "HeadlessApp.h"
+#include "checkpoint.h"
 #include "editor_camera_framing.h"
 
 #include <tonemappers.h>
@@ -18,11 +19,16 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -47,6 +53,44 @@ uint32_t parseIntegratorName(const std::string& name)
         return 2;
     }
     throw std::invalid_argument("Unknown integrator: " + name);
+}
+
+std::string jsonString(const std::string& value)
+{
+    std::string result = "\"";
+    constexpr char hex[] = "0123456789abcdef";
+    for (const unsigned char c : value)
+    {
+        if (c == '"' || c == '\\')
+        {
+            result += '\\';
+            result += static_cast<char>(c);
+        }
+        else if (c == '\n')
+        {
+            result += "\\n";
+        }
+        else if (c == '\r')
+        {
+            result += "\\r";
+        }
+        else if (c == '\t')
+        {
+            result += "\\t";
+        }
+        else if (c < 0x20u)
+        {
+            result += "\\u00";
+            result += hex[c >> 4u];
+            result += hex[c & 0x0fu];
+        }
+        else
+        {
+            result += static_cast<char>(c);
+        }
+    }
+    result += '"';
+    return result;
 }
 } // namespace
 
@@ -96,8 +140,8 @@ uint32_t parseReconstructionFilterName(const std::string& name)
         return 4;
     if (name == "blackman-harris" || name == "blackman_harris")
         return 5;
-    throw std::invalid_argument(
-        "Unknown reconstruction filter: " + name + " (box|mitchell|tent|lanczos2|gaussian|blackman-harris)");
+    throw std::invalid_argument("Unknown reconstruction filter: " + name +
+                                " (box|mitchell|tent|lanczos2|gaussian|blackman-harris)");
 }
 
 uint32_t parseTonemapName(const std::string& name)
@@ -184,6 +228,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         cfg.height = static_cast<uint32_t>(*v);
     }
+    if (auto v = tbl["output"]["postprocess_package"].value<bool>())
+    {
+        cfg.postprocessPackage = *v;
+    }
 
     if (auto v = tbl["render"]["integrator"].value<std::string>())
     {
@@ -200,6 +248,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     if (auto v = tbl["render"]["checkpoint_spp"].value<int64_t>())
     {
         cfg.checkpointSpp = static_cast<uint32_t>(std::max<int64_t>(*v, 0));
+    }
+    if (auto v = tbl["render"]["resume_checkpoint"].value<std::string>())
+    {
+        cfg.resumeCheckpoint = *v;
     }
     if (auto v = tbl["render"]["max_depth"].value<int64_t>())
     {
@@ -791,8 +843,22 @@ bool HeadlessApp::saveCheckpoint(Buffer* buf, uint32_t accumulatedSpp)
     const fs::path checkpointPath = outputPath.parent_path() / (outputPath.stem().string() + ".checkpoint" + extension);
     const fs::path temporaryPath =
         outputPath.parent_path() / (outputPath.stem().string() + ".checkpoint.tmp" + extension);
+    const fs::path statePath = outputPath.parent_path() / (outputPath.stem().string() + ".checkpoint.stc");
     if (!saveOutput(buf, temporaryPath.string()))
     {
+        return false;
+    }
+
+    const size_t pixelCount = static_cast<size_t>(buf->width()) * buf->height() * 4u;
+    const float* pixels = static_cast<const float*>(buf->getHostPointer());
+    try
+    {
+        checkpoint::save(statePath, buf->width(), buf->height(), accumulatedSpp, m_checkpointSignature,
+                         std::span<const float>(pixels, pixelCount));
+    }
+    catch (const std::exception& error)
+    {
+        STRELKA_ERROR("Checkpoint state: {}", error.what());
         return false;
     }
 
@@ -808,8 +874,171 @@ bool HeadlessApp::saveCheckpoint(Buffer* buf, uint32_t accumulatedSpp)
         fs::remove(temporaryPath, cleanupError);
         return false;
     }
-    STRELKA_INFO("Checkpoint: {} spp -> {}", accumulatedSpp, checkpointPath.string());
+    STRELKA_INFO("Checkpoint: {} spp -> {} (resume: {})", accumulatedSpp, checkpointPath.string(), statePath.string());
     return true;
+}
+
+bool HeadlessApp::savePostprocessPackage(Buffer* buf)
+{
+    const fs::path beauty(m_config.outputPath);
+    const fs::path preview = beauty.parent_path() / (beauty.stem().string() + ".preview.png");
+    const fs::path metadata = beauty.parent_path() / (beauty.stem().string() + ".render.json");
+    const fs::path temporary = metadata.string() + ".tmp";
+    if (!saveOutput(buf, preview.string()))
+    {
+        return false;
+    }
+
+    const uint32_t cameraIndex =
+        m_config.cameraIndex >= 0 && static_cast<size_t>(m_config.cameraIndex) < m_scene->getCameraCount() ?
+            static_cast<uint32_t>(m_config.cameraIndex) :
+            0u;
+    const Camera& camera = m_scene->getCamera(cameraIndex);
+    constexpr const char* kTonemapNames[] = { "none", "reinhard", "aces", "filmic", "agx" };
+    constexpr const char* kSamplerNames[] = { "halton", "pcg", "sobol", "sobol_bn", "hybrid", "sobol_notable" };
+    constexpr const char* kFilterNames[] = { "box", "mitchell", "tent", "lanczos2", "gaussian", "blackman-harris" };
+    const auto tonemapName = kTonemapNames[std::min<size_t>(m_config.tonemapType, std::size(kTonemapNames) - 1u)];
+    const auto samplerName = kSamplerNames[std::min<size_t>(m_config.samplerType, std::size(kSamplerNames) - 1u)];
+    const auto filterName = kFilterNames[std::min<size_t>(m_config.reconstructionFilter, std::size(kFilterNames) - 1u)];
+    std::ofstream stream(temporary, std::ios::trunc);
+    stream << std::setprecision(std::numeric_limits<float>::max_digits10);
+    stream << "{\n"
+           << "  \"schema\": 1,\n"
+           << "  \"beauty\": {\"file\": " << jsonString(beauty.filename().string())
+           << ", \"encoding\": \"float32 RGBA\", \"color_space\": \"scene-linear Strelka RGB\", "
+              "\"chromaticities\": null, \"alpha\": \"opaque\"},\n"
+           << "  \"preview\": {\"file\": " << jsonString(preview.filename().string())
+           << ", \"encoding\": \"8-bit display RGB PNG\", \"tonemap\": " << jsonString(tonemapName)
+           << ", \"gamma\": " << m_config.gamma
+           << ", \"exposure_iso\": " << m_settings->getAs<float>("render/post/tonemapper/filmIso")
+           << ", \"exposure_fstop\": " << m_settings->getAs<float>("render/post/tonemapper/fStop")
+           << ", \"exposure_shutter\": " << m_settings->getAs<float>("render/post/tonemapper/shutterSpeed")
+           << ", \"cm2_factor\": " << m_settings->getAs<float>("render/post/tonemapper/cm2_factor") << "},\n"
+           << "  \"scene\": " << jsonString(fs::absolute(m_config.scenePath).lexically_normal().string()) << ",\n"
+           << "  \"render\": {\"width\": " << m_config.width << ", \"height\": " << m_config.height
+           << ", \"spp\": " << m_sharedCtx->mSubframeIndex << ", \"max_depth\": " << m_config.maxDepth
+           << ", \"sampler\": " << jsonString(samplerName) << ", \"reconstruction_filter\": " << jsonString(filterName)
+           << ", \"denoised\": " << (m_config.denoise ? "true" : "false") << "},\n"
+           << "  \"camera\": {\"index\": " << cameraIndex << ", \"projection\": "
+           << jsonString(camera.projection == Camera::ProjectionType::orthographic ? "orthographic" : "perspective")
+           << ", \"position\": [" << camera.position.x << ", " << camera.position.y << ", " << camera.position.z
+           << "], \"orientation_xyzw\": [" << camera.mOrientation.x << ", " << camera.mOrientation.y << ", "
+           << camera.mOrientation.z << ", " << camera.mOrientation.w << "], \"fov_degrees\": " << camera.fov
+           << ", \"xmag\": " << camera.xmag << ", \"ymag\": " << camera.ymag << ", \"znear\": " << camera.znear
+           << ", \"zfar\": " << camera.zfar << "}\n"
+           << "}\n";
+    stream.close();
+    if (!stream)
+    {
+        STRELKA_ERROR("Failed to write postprocess metadata: {}", temporary.string());
+        return false;
+    }
+    std::error_code error;
+    fs::rename(temporary, metadata, error);
+    if (error)
+    {
+        STRELKA_ERROR("Failed to publish postprocess metadata: {}", error.message());
+        fs::remove(temporary);
+        return false;
+    }
+    STRELKA_INFO("Postprocess package: {}, {}, {}", beauty.string(), preview.string(), metadata.string());
+    return true;
+}
+
+uint64_t HeadlessApp::checkpointSignature() const
+{
+    uint64_t signature = 14695981039346656037ull;
+    auto add = [&](const auto& value) { signature = checkpoint::hashBytes(&value, sizeof(value), signature); };
+    auto addString = [&](const std::string& value) {
+        signature = checkpoint::hashBytes(value.data(), value.size(), signature);
+    };
+
+    const fs::path scenePath = fs::absolute(m_config.scenePath).lexically_normal();
+    auto addFile = [&](const fs::path& path) {
+        const fs::path absolute = fs::absolute(path).lexically_normal();
+        addString(absolute.string());
+        const bool exists = fs::is_regular_file(absolute);
+        add(exists);
+        if (exists)
+        {
+            add(fs::file_size(absolute));
+            add(fs::last_write_time(absolute).time_since_epoch().count());
+        }
+    };
+    addFile(scenePath);
+    const fs::path stem = scenePath.parent_path() / scenePath.stem();
+    addFile(stem.string() + "_light.json");
+    addFile(stem.string() + "_openpbr.json");
+    addFile(stem.string() + "_curves.bin");
+    addFile(stem.string() + ".mtlx");
+    std::unordered_set<std::string> assetPaths;
+    auto addAsset = [&](const std::string& path) {
+        if (!path.empty() && assetPaths.insert(path).second)
+        {
+            addFile(scenePath.parent_path() / path);
+        }
+    };
+    for (const auto& material : m_scene->getMaterials())
+    {
+        addAsset(material.baseColorTexPath);
+        addAsset(material.metallicRoughnessTexPath);
+        addAsset(material.normalTexPath);
+        addAsset(material.emissionTexPath);
+        addAsset(material.occlusionTexPath);
+        for (const std::string& path : material.openpbrTexPaths)
+        {
+            addAsset(path);
+        }
+    }
+    if (const auto& environment = m_scene->getEnvLight(); environment)
+    {
+        addAsset(environment->texturePath);
+        addAsset(environment->backgroundTexturePath);
+    }
+    add(m_config.width);
+    add(m_config.height);
+    add(m_config.maxDepth);
+    add(m_config.subsurfaceIterations);
+    add(m_config.samplerType);
+    add(m_config.blueNoiseSwitchSpp);
+    add(m_config.reconstructionFilter);
+    add(m_config.risCandidates);
+    add(m_config.estimatorMode);
+    add(m_config.volumeModel);
+    add(m_config.materialModel);
+    add(m_config.textureLod);
+    add(m_config.textureLodBias);
+    add(m_config.textureMaxDim);
+    add(m_config.textureDownscale);
+    add(m_config.textureCompress);
+    add(m_config.clampIndirect);
+    add(m_config.clampDirect);
+    add(m_config.debugMode);
+    add(m_config.animationTime.value_or(-1.0f));
+
+    const uint32_t cameraIndex =
+        m_config.cameraIndex >= 0 && static_cast<size_t>(m_config.cameraIndex) < m_scene->getCameraCount() ?
+            static_cast<uint32_t>(m_config.cameraIndex) :
+            0u;
+    const Camera& camera = m_scene->getCamera(cameraIndex);
+    add(camera.projection);
+    add(camera.position.x);
+    add(camera.position.y);
+    add(camera.position.z);
+    add(camera.mOrientation.x);
+    add(camera.mOrientation.y);
+    add(camera.mOrientation.z);
+    add(camera.mOrientation.w);
+    add(camera.fov);
+    add(camera.xmag);
+    add(camera.ymag);
+    add(camera.znear);
+    add(camera.zfar);
+    add(camera.useDof);
+    add(camera.focalDistance);
+    add(camera.fStopDof);
+    add(camera.focalLengthMm);
+    return signature;
 }
 
 void HeadlessApp::printProgress(uint32_t current, uint32_t total, double lastItemMs, const char* unit)
@@ -1003,6 +1232,29 @@ int HeadlessApp::run()
         auditMovingLightIds.push_back(m_scene->createLight(light));
     }
 
+    const bool checkpointRequested = m_config.checkpointSpp != 0u || !m_config.resumeCheckpoint.empty();
+    if (m_config.postprocessPackage &&
+        (fs::path(m_config.outputPath).extension() != ".exr" || m_config.upscale || m_config.debugMode != 0u ||
+         (m_config.sharc && m_config.sharcDebug != 0u) || m_config.animationFrames != 0u || m_config.auditFrames != 0u ||
+         m_config.auditMovingLights != 0u || m_config.auditMovingNode || !m_config.auditFramePrefix.empty()))
+    {
+        STRELKA_FATAL("Postprocess package requires a single, full-resolution beauty .exr render without debug views");
+        return 1;
+    }
+    if (checkpointRequested &&
+        (m_config.denoise || m_config.upscale || m_config.restirDIEnabled || m_config.sharc || m_config.debugMode != 0u ||
+         m_config.animationFrames != 0u || m_config.auditFrames != 0u || m_config.auditMovingLights != 0u ||
+         m_config.auditMovingNode || !m_config.auditFramePrefix.empty() || !m_config.capturePath.empty()))
+    {
+        STRELKA_FATAL(
+            "Resumable checkpoints require a static, unscaled PT render without denoising, ReSTIR, SHaRC, "
+            "debug views, audit, or capture");
+        return 1;
+    }
+    if (checkpointRequested)
+    {
+        m_checkpointSignature = checkpointSignature();
+    }
     populateSettings();
 
     STRELKA_INFO("Initializing renderer ({}x{}, {} spp)...", m_config.width, m_config.height, m_config.spp);
@@ -1022,6 +1274,40 @@ int HeadlessApp::run()
     {
         STRELKA_FATAL("Failed to create the output buffer");
         return kExitRendererUnavailable;
+    }
+
+    if (!m_config.resumeCheckpoint.empty())
+    {
+        checkpoint::State saved;
+        try
+        {
+            saved = checkpoint::load(m_config.resumeCheckpoint, m_config.width, m_config.height, m_checkpointSignature);
+        }
+        catch (const std::exception& error)
+        {
+            STRELKA_FATAL("Cannot resume: {}", error.what());
+            return 1;
+        }
+        if (saved.spp > m_config.spp)
+        {
+            STRELKA_FATAL("Checkpoint has {} spp, above the requested total of {}", saved.spp, m_config.spp);
+            return 1;
+        }
+        // Finish the scene build without consuming a sample. Increasing the
+        // target from zero afterwards does not invalidate renderer settings.
+        m_settings->setAs<uint32_t>("render/pt/sppTotal", 0u);
+        do
+        {
+            m_render->renderSync(outputBuf.get());
+        } while (m_render->isBuildingScene() && !m_render->deviceError());
+        std::memcpy(outputBuf->getHostPointer(), saved.rgba.data(), saved.rgba.size() * sizeof(float));
+        if (m_render->deviceError() || !m_render->restoreAccumulation(outputBuf.get(), saved.spp))
+        {
+            STRELKA_FATAL("Cannot restore checkpoint accumulation to the Metal renderer");
+            return 2;
+        }
+        m_settings->setAs<uint32_t>("render/pt/sppTotal", m_config.spp);
+        STRELKA_INFO("Resumed {} spp from {} (target {} spp)", saved.spp, m_config.resumeCheckpoint, m_config.spp);
     }
 
     const auto startTime = high_resolution_clock::now();
@@ -1149,6 +1435,12 @@ int HeadlessApp::run()
     else
     {
         uint32_t nextCheckpoint = m_config.checkpointSpp;
+        if (nextCheckpoint != 0u)
+        {
+            const uint64_t next =
+                (static_cast<uint64_t>(m_sharedCtx->mSubframeIndex) / nextCheckpoint + 1u) * nextCheckpoint;
+            nextCheckpoint = next <= std::numeric_limits<uint32_t>::max() ? static_cast<uint32_t>(next) : 0u;
+        }
         while (m_sharedCtx->mSubframeIndex < m_config.spp)
         {
             const uint32_t samplesBeforeLaunch = static_cast<uint32_t>(m_sharedCtx->mSubframeIndex);
@@ -1173,15 +1465,17 @@ int HeadlessApp::run()
             }
             const uint32_t accumulatedSamples = static_cast<uint32_t>(m_sharedCtx->mSubframeIndex);
             const uint32_t launchSamples = std::max(accumulatedSamples - samplesBeforeLaunch, 1u);
-            if (m_config.checkpointSpp != 0u && accumulatedSamples < m_config.spp && accumulatedSamples >= nextCheckpoint)
+            if (nextCheckpoint != 0u && accumulatedSamples < m_config.spp && accumulatedSamples >= nextCheckpoint)
             {
                 std::cout << '\n';
-                saveCheckpoint(outputBuf.get(), accumulatedSamples);
+                if (!saveCheckpoint(outputBuf.get(), accumulatedSamples))
+                {
+                    return 3;
+                }
                 const uint64_t following =
                     (static_cast<uint64_t>(accumulatedSamples) / m_config.checkpointSpp + 1u) * m_config.checkpointSpp;
-                nextCheckpoint = following <= std::numeric_limits<uint32_t>::max() ?
-                                     static_cast<uint32_t>(following) :
-                                     std::numeric_limits<uint32_t>::max();
+                nextCheckpoint =
+                    following <= std::numeric_limits<uint32_t>::max() ? static_cast<uint32_t>(following) : 0u;
             }
             printProgress(accumulatedSamples, m_config.spp, m_render->getLastRenderTimeMs() / launchSamples);
         }
@@ -1194,14 +1488,18 @@ int HeadlessApp::run()
         // lighting problem; saying so and failing is the honest outcome.
         std::cout << '\n'; // close the progress line before the logger writes
         STRELKA_ERROR(
-            "GPU command buffer failed -- the render is not valid. The scene most likely does not fit on "
-            "the device. Try render.texture_downscale = 2 or render.texture_max_dim = 2048 in the config.");
+            "Renderer failed -- the image is not valid. Check the preceding scene or GPU diagnostic. "
+            "For an out-of-memory failure, try render.texture_downscale = 2 or render.texture_max_dim = 2048.");
         return 2;
     }
 
     if (!saveOutput(outputBuf.get()))
     {
         std::cout << '\n'; // close the progress line before the logger writes
+        return 3;
+    }
+    if (m_config.postprocessPackage && !savePostprocessPackage(outputBuf.get()))
+    {
         return 3;
     }
 

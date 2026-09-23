@@ -32,6 +32,12 @@ struct RenderConfig
     // of <stem>.checkpoint.<ext>. Boundaries are observed between launches so
     // checkpointing does not break the requested render batch size.
     uint32_t checkpointSpp = 0;
+    // Resume from the binary state beside a previously published checkpoint
+    // image. The output SPP remains the total target, not additional samples.
+    std::string resumeCheckpoint;
+    // Add a display preview and machine-readable render metadata beside the
+    // scene-linear beauty EXR. Off for benchmark and validation runs.
+    bool postprocessPackage = false;
     uint32_t maxDepth = 8;
     // Extra wavefront iterations reserved for subsurface random walks. The
     // conservative default preserves the reference image; performance runs can
@@ -201,6 +207,8 @@ private:
     void populateSettings();
     bool saveOutput(Buffer* buf, const std::string& path = {});
     bool saveCheckpoint(Buffer* buf, uint32_t accumulatedSpp);
+    bool savePostprocessPackage(Buffer* buf);
+    uint64_t checkpointSignature() const;
     void printProgress(uint32_t current, uint32_t total, double lastItemMs, const char* unit = "spp");
 
     RenderConfig m_config;
@@ -208,6 +216,7 @@ private:
     std::unique_ptr<Scene> m_scene;
     std::unique_ptr<SharedContext> m_sharedCtx;
     std::unique_ptr<Render> m_render;
+    uint64_t m_checkpointSignature = 0;
 };
 
 } // namespace oka
