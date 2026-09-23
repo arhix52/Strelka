@@ -102,6 +102,10 @@ public:
     {
         return mSceneHasAlphaMaterials;
     }
+    bool hasUnsupportedOpacity() const
+    {
+        return mSceneHasUnsupportedOpacity;
+    }
     bool allAlphaMaterialsBlend() const
     {
         return mSceneHasAlphaMaterials && mSceneAllAlphaMaterialsBlend;
@@ -156,6 +160,7 @@ private:
     bool mSceneAllOpenPBRMaterials = false;
     bool mSceneAllNativeOpenPBRMaterials = false;
     bool mSceneHasAlphaMaterials = false;
+    bool mSceneHasUnsupportedOpacity = false;
     bool mSceneAllAlphaMaterialsBlend = false;
     bool mSceneAllAlphaUvTransformsIdentity = false;
     bool mSceneAllAlphaBaseColorFactorsOne = false;

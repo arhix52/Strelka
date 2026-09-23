@@ -335,6 +335,7 @@ void MetalMaterials::release()
     mSceneAllOpenPBRMaterials = false;
     mSceneAllNativeOpenPBRMaterials = false;
     mSceneHasAlphaMaterials = false;
+    mSceneHasUnsupportedOpacity = false;
     mSceneAllAlphaMaterialsBlend = false;
     mSceneAllAlphaUvTransformsIdentity = false;
     mSceneAllAlphaBaseColorFactorsOne = false;
@@ -482,6 +483,7 @@ void MetalMaterials::publishParameters(Scene* scene)
     mMaterialNeedsSurfaceUv.clear();
     mMaterialNeedsSurfaceUv.reserve(matDescs.size());
     mSceneHasAlphaMaterials = false;
+    mSceneHasUnsupportedOpacity = false;
     mSceneAllAlphaMaterialsBlend = true;
     mSceneAllAlphaUvTransformsIdentity = true;
     mSceneAllAlphaBaseColorFactorsOne = true;
@@ -533,9 +535,7 @@ void MetalMaterials::publishParameters(Scene* scene)
             }
             else if (openpbrModel && p.material_type != MATERIAL_TYPE_HAIR)
             {
-                // Hair keeps its own BSDF: OpenPBR has no fibre model, and a
-                // strand shaded as a surface is the defect open-defects.md entry
-                // 3 was closed for.
+                // Hair keeps its own BSDF; OpenPBR has no fibre model.
                 OpenPBRParams converted = openpbr_from_material_params(p);
                 openpbrParams.push_back(converted);
                 st.gpuMaterials.back().material_type = MATERIAL_TYPE_OPENPBR;
@@ -574,6 +574,35 @@ void MetalMaterials::publishParameters(Scene* scene)
             {
                 const OpenPBRParams& o = openpbrParams.back();
                 Material& gm = st.gpuMaterials.back();
+
+                if (isNativeOpenPBRDescription(desc))
+                {
+                    const bool layeredOpacity =
+                        (desc.openpbrLayeredTexture.output_mask & OPENPBR_LAYER_OUTPUT_OPACITY) != 0u;
+                    const bool mappedOpacity = (o.texture_mask & (1u << OPENPBR_TEX_GEOMETRY_OPACITY)) != 0u;
+                    if (layeredOpacity)
+                    {
+                        STRELKA_ERROR(
+                            "OpenPBR material '{}': layered geometry opacity cannot be represented by "
+                            "Metal cutout traversal",
+                            desc.name);
+                        mSceneHasUnsupportedOpacity = true;
+                    }
+                    else if (mappedOpacity || o.geometry_opacity < 1.0f)
+                    {
+                        gm.alpha_mode = ALPHA_MODE_BLEND;
+                        gm.base_color_alpha = mappedOpacity ? 1.0f : std::clamp(o.geometry_opacity, 0.0f, 1.0f);
+                        const float uvCos = std::cos(o.uv_rotation);
+                        const float uvSin = std::sin(o.uv_rotation);
+                        gm.uv_offset = simd_make_float2(o.uv_offset_x, o.uv_offset_y);
+                        gm.uv_transform_x = simd_make_float2(o.uv_scale_x * uvCos, -o.uv_scale_y * uvSin);
+                        gm.uv_transform_y = simd_make_float2(o.uv_scale_x * uvSin, o.uv_scale_y * uvCos);
+                        if (mappedOpacity)
+                        {
+                            gm.features |= MATERIAL_TEX_BASE_COLOR | MATERIAL_FEATURE_OPENPBR_OPACITY_RED;
+                        }
+                    }
+                }
 
                 const OpenPBRColor& ec = o.emission_color;
                 gm.emission = packed_float3(simd_make_float3(ec.r, ec.g, ec.b));
@@ -662,14 +691,18 @@ void MetalMaterials::publishParameters(Scene* scene)
         mMaterialNeedsSurfaceUv.push_back(needsSurfaceUv ? 1u : 0u);
         ++shadeBucketCounts[shadeBucket];
 
-        if (p.alpha_mode != ALPHA_MODE_OPAQUE)
+        const Material& alphaMaterial = st.gpuMaterials.back();
+        if (alphaMaterial.alpha_mode != ALPHA_MODE_OPAQUE)
         {
             mSceneHasAlphaMaterials = true;
-            mSceneAllAlphaMaterialsBlend = mSceneAllAlphaMaterialsBlend && p.alpha_mode == ALPHA_MODE_BLEND;
-            mSceneAllAlphaUvTransformsIdentity = mSceneAllAlphaUvTransformsIdentity && p.uv_offset_x == 0.0f &&
-                                                 p.uv_offset_y == 0.0f && p.uv_scale_x == 1.0f &&
-                                                 p.uv_scale_y == 1.0f && p.uv_rotation == 0.0f;
-            mSceneAllAlphaBaseColorFactorsOne = mSceneAllAlphaBaseColorFactorsOne && p.base_color_alpha == 1.0f;
+            mSceneAllAlphaMaterialsBlend = mSceneAllAlphaMaterialsBlend && alphaMaterial.alpha_mode == ALPHA_MODE_BLEND;
+            mSceneAllAlphaUvTransformsIdentity =
+                mSceneAllAlphaUvTransformsIdentity && alphaMaterial.uv_offset.x == 0.0f &&
+                alphaMaterial.uv_offset.y == 0.0f && alphaMaterial.uv_transform_x.x == 1.0f &&
+                alphaMaterial.uv_transform_x.y == 0.0f && alphaMaterial.uv_transform_y.x == 0.0f &&
+                alphaMaterial.uv_transform_y.y == 1.0f;
+            mSceneAllAlphaBaseColorFactorsOne =
+                mSceneAllAlphaBaseColorFactorsOne && alphaMaterial.base_color_alpha == 1.0f;
         }
         // Both kinds of medium compile into the same free-flight path.
         if (p.subsurface > 0.0f || (p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
@@ -677,7 +710,7 @@ void MetalMaterials::publishParameters(Scene* scene)
         if ((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u)
             mSceneHasBoundedMedium = true;
         mMaterialIsMediumBoundary.push_back((p.medium_flags & MEDIUM_FLAG_BOUNDARY) != 0u ? 1u : 0u);
-        mMaterialIsCutout.push_back(p.alpha_mode != ALPHA_MODE_OPAQUE ? 1u : 0u);
+        mMaterialIsCutout.push_back(alphaMaterial.alpha_mode != ALPHA_MODE_OPAQUE ? 1u : 0u);
     }
     STRELKA_INFO("Material shade buckets: base {}, layer {}, translucent {}, tail {}", shadeBucketCounts[0],
                  shadeBucketCounts[1], shadeBucketCounts[2], shadeBucketCounts[3]);
@@ -771,7 +804,13 @@ bool MetalMaterials::step(Scene* scene, LoadProgress* progress, const std::strin
         ++st.cursor;
 
         Material& material = st.gpuMaterials[index];
-        material.baseColorTexture = loadTex(currMatDesc.baseColorTexPath, true);
+        const bool nativeOpacityMap =
+            isNativeOpenPBRDescription(currMatDesc) && (material.features & MATERIAL_FEATURE_OPENPBR_OPACITY_RED) != 0u;
+        const auto opacityKind = openpbrSlotKind(
+            OPENPBR_TEX_GEOMETRY_OPACITY, currMatDesc.openpbrTexColorSpace[OPENPBR_TEX_GEOMETRY_OPACITY]);
+        material.baseColorTexture = nativeOpacityMap ? loadTex(currMatDesc.openpbrTexPaths[OPENPBR_TEX_GEOMETRY_OPACITY],
+                                                               opacityKind.first, opacityKind.second) :
+                                                       loadTex(currMatDesc.baseColorTexPath, true);
         material.metallicRoughnessTexture = loadTex(currMatDesc.metallicRoughnessTexPath, false, TextureKind::NonColor);
         material.normalTexture = loadTex(currMatDesc.normalTexPath, false, TextureKind::Normal);
         material.emissionTexture = loadTex(currMatDesc.emissionTexPath, true);

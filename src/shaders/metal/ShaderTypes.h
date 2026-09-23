@@ -292,7 +292,6 @@ struct Uniforms
     /// denoiser. Zero disables it.
     float denoiseFireflyClamp;
     float clampIndirect;
-    float clampDirect;
     // Sub-pixel offset applied to every pixel of this frame, in pixels. Temporal
     // upscaling needs the whole image shifted by a known amount it can undo; the
     // per-pixel random jitter that antialiases a still frame is noise to it.
@@ -308,7 +307,6 @@ struct Uniforms
     /// Low byte: 0 = level 0, 1 = ray-cone LOD. The next byte stores the
     /// reconstruction filter without growing this hot, shared ABI block.
     uint32_t textureLodMode;
-    float textureLodBias;
     uint32_t guidePrimaryHit;
 
     uint32_t restirDIEnabled;
@@ -465,6 +463,8 @@ struct Uniforms
     uint32_t widthDivMultiplier;
     uint32_t widthDivShiftAdd;
     float cameraNear;
+    // Append-only: keep the established resource-pointer ABI stable.
+    float clampDirect;
 };
 static_assert(sizeof(Uniforms) == 1152, "Uniforms host/Metal ABI changed");
 
@@ -1018,6 +1018,7 @@ struct IesGpuProfileHeader
 // from glTF still needs the generic texture path before the OpenPBR BSDF, so
 // keep the two cases distinguishable after both use MATERIAL_TYPE_OPENPBR.
 #define MATERIAL_FEATURE_NATIVE_OPENPBR (1u << 16)
+#define MATERIAL_FEATURE_OPENPBR_OPACITY_RED (1u << 17)
 
 struct Material
 {

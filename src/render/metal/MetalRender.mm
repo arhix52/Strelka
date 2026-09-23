@@ -838,6 +838,8 @@ void MetalRender::init()
     static_assert(offsetof(Uniforms, envPdfTable) == 1120);
     static_assert(offsetof(Uniforms, widthDivMultiplier) == 1128);
     static_assert(offsetof(Uniforms, widthDivShiftAdd) == 1132);
+    static_assert(offsetof(Uniforms, cameraNear) == 1136);
+    static_assert(offsetof(Uniforms, clampDirect) == 1140);
     static_assert(sizeof(Uniforms) == 1152, "Uniforms host/Metal ABI changed");
     static_assert(sizeof(PathRay) == 24, "PathRay is what `extend` streams per path; keep it minimal");
     static_assert(sizeof(GuideRay) == 32, "GuideRay is a cold one-per-pixel continuation record");
@@ -1170,6 +1172,13 @@ void MetalRender::render(Buffer* output)
     if (mScenePrep.isBuilding())
     {
         const bool complete = stepSceneBuild(output);
+        if (mMaterials.hasUnsupportedOpacity())
+        {
+            mDeviceError = true;
+            mRenderBusy.store(false, std::memory_order_release);
+            pPool->release();
+            return;
+        }
         // Each slice that moved the scene forward is one more thing worth
         // showing; the clock decides how many of them are worth a frame.
         mPublishClock.noteArrivals();
