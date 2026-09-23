@@ -117,6 +117,25 @@ TEST_CASE("frameCamera on a perspective camera dollies along the view axis")
     CHECK(cam.position.z == doctest::Approx(expected).epsilon(1e-3));
 }
 
+TEST_CASE("framing an authored perspective camera moves its near plane before the selection")
+{
+    Camera cam;
+    cam.setPerspective(2.577875f, 1.0f, 10.0f, 30.0f);
+    cam.mOrientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    cam.updateViewMatrix();
+
+    const glm::float3 worldMin(-0.02f, -0.02f, -0.02f);
+    const glm::float3 worldMax(0.02f, 0.02f, 0.02f);
+    frameCamera(cam, worldMin, worldMax, 16.0f / 9.0f);
+
+    const float nearestDepth = cam.position.z - worldMax.z;
+    CHECK(nearestDepth < 10.0f);
+    CHECK(cam.znear > 0.0f);
+    CHECK(cam.znear < nearestDepth);
+    CHECK(cam.zfar > cam.position.z - worldMin.z);
+    CHECK(cam.matrices.invPerspective[0][0] > 0.0f);
+}
+
 TEST_CASE("frameCamera on an orthographic camera resizes the film, not the distance alone")
 {
     Camera cam = orthographicLookingDownZ();

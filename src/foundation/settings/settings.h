@@ -98,7 +98,7 @@ inline std::string animationTimeKey(size_t index)
 inline void seedCommonRenderSettings(SettingsManager& settings)
 {
     settings.setAs<uint32_t>("render/pt/rectLightSamplingMethod", 0);
-    settings.setAs<uint32_t>("render/pt/reconstructionFilter", 0);
+    settings.setAs<uint32_t>("render/pt/reconstructionFilter", 2);
     settings.setAs<float>("render/pt/textureLodBias", 0.0f);
     settings.setAs<bool>("render/pt/enableAcc", true);
     settings.setAs<bool>("render/enableCameraMotionBlur", false);

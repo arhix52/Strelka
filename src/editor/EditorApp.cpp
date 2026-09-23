@@ -914,6 +914,8 @@ void EditorApp::run()
             selectedCam.mOrientation = ctrlCam.mOrientation;
             selectedCam.xmag = ctrlCam.xmag;
             selectedCam.ymag = ctrlCam.ymag;
+            selectedCam.znear = ctrlCam.znear;
+            selectedCam.zfar = ctrlCam.zfar;
             selectedCam.matrices = ctrlCam.matrices;
             selectedCam.updated = ctrlCam.updated;
             selectedCam.isDirty = ctrlCam.isDirty;
@@ -1334,6 +1336,8 @@ void EditorApp::frameSelectionInView()
     selectedCam.mOrientation = ctrlCam.mOrientation;
     selectedCam.xmag = ctrlCam.xmag;
     selectedCam.ymag = ctrlCam.ymag;
+    selectedCam.znear = ctrlCam.znear;
+    selectedCam.zfar = ctrlCam.zfar;
     selectedCam.authoredAspect = ctrlCam.authoredAspect;
     selectedCam.matrices = ctrlCam.matrices;
     selectedCam.updateAspectRatio(aspect);

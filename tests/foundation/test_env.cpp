@@ -128,4 +128,5 @@ TEST_CASE("common render settings use production Metal traversal defaults")
     oka::seedCommonRenderSettings(settings);
     CHECK(settings.getAs<uint32_t>("render/pt/auditRenderWork") == 0u);
     CHECK(settings.getAs<bool>("render/pt/alphaIft"));
+    CHECK(settings.getAs<uint32_t>("render/pt/reconstructionFilter") == 2u);
 }

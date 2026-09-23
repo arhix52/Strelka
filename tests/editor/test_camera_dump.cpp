@@ -49,6 +49,7 @@ TEST_CASE("the dump emits the sections and keys the CLI parses")
     CHECK(contains(d, "spp = 256"));
     CHECK(contains(d, "max_depth = 4"));
     CHECK(contains(d, "spp_per_launch = "));
+    CHECK(contains(d, "reconstruction_filter = \"tent\""));
     CHECK(contains(d, "texture_downscale = "));
     CHECK(contains(d, "debug = "));
     CHECK(contains(d, "[camera]"));
@@ -101,6 +102,7 @@ TEST_CASE("a coordinate near zero does not print as a wall of zeroes")
 
 TEST_CASE("sampler and tonemapper are spelled the way the CLI parses them")
 {
+    CHECK(oka::CameraDumpState{}.reconstructionFilter == 2u);
     // HeadlessApp::parseSamplerName's order is not the obvious one -- halton is
     // 0 and sobol is 2 -- so an off-by-one here renders the report with a
     // different sampler than the one that showed the defect.

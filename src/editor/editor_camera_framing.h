@@ -143,9 +143,16 @@ inline void frameCamera(Camera& cam,
         const float fov = cam.fovForAspect(aspect);
         const float distance = perspectiveFitDistance(e.halfWidth, e.halfHeight, e.halfDepth, fov, aspect, padding);
         cam.position = center - front * distance;
+
+        // An authored camera may start far from the scene with a large near
+        // plane. After framing a small object, that same near plane can lie
+        // behind the object and make every camera ray miss it.
+        const float nearestDepth = distance - e.halfDepth;
+        const float nearClip = std::min(cam.znear, std::max(nearestDepth * 0.1f, 1e-6f));
+        const float farClip = std::max(cam.zfar, (distance + e.halfDepth) * 1.1f);
+        cam.setPerspective(cam.fov, aspect, nearClip, farClip);
     }
     cam.updateViewMatrix();
 }
 
 } // namespace oka::editor_camera_framing
-

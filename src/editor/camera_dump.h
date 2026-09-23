@@ -43,7 +43,7 @@ struct CameraDumpState
     uint32_t sppPerLaunch = 1;
     uint32_t maxDepth = 4;
     uint32_t samplerType = 0;
-    uint32_t reconstructionFilter = 0;
+    uint32_t reconstructionFilter = 2;
     uint32_t debugView = 0;
     bool denoise = false;
     bool upscale = false;

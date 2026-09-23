@@ -255,7 +255,7 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     if (auto v = tbl["render"]["texture_lod"].value<bool>())
         cfg.textureLod = *v;
     if (auto v = tbl["render"]["reconstruction_filter"].value<std::string>())
-        cfg.reconstructionFilter = parseEnumOrDefault(*v, parseReconstructionFilterName, 0, "reconstruction filter");
+        cfg.reconstructionFilter = parseEnumOrDefault(*v, parseReconstructionFilterName, 2, "reconstruction filter");
     if (auto v = tbl["render"]["texture_lod_bias"].value<double>())
         cfg.textureLodBias = static_cast<float>(std::clamp(*v, -4.0, 4.0));
     if (auto v = tbl["render"]["guide_primary_hit"].value<bool>())
@@ -409,8 +409,10 @@ RenderConfig parseTomlConfig(const std::string& tomlPath)
     {
         if (arr->size() == 4)
         {
-            cfg.cameraOrientation = glm::quat(arr->get(3)->value_or(1.0), arr->get(0)->value_or(0.0),
-                                              arr->get(1)->value_or(0.0), arr->get(2)->value_or(0.0));
+            cfg.cameraOrientation = glm::quat(static_cast<float>(arr->get(3)->value_or(1.0)),
+                                              static_cast<float>(arr->get(0)->value_or(0.0)),
+                                              static_cast<float>(arr->get(1)->value_or(0.0)),
+                                              static_cast<float>(arr->get(2)->value_or(0.0)));
         }
     }
     if (auto v = tbl["camera"]["projection"].value<std::string>())

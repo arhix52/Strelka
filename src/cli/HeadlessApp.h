@@ -13,6 +13,8 @@
 namespace oka
 {
 
+// This config is created once per CLI run; reordering its many option groups for padding does not improve the hot path.
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct RenderConfig
 {
     std::string scenePath;
@@ -37,7 +39,7 @@ struct RenderConfig
     uint32_t subsurfaceIterations = 64;
     uint32_t samplerType = 4;
     // 0=box, 1=Mitchell, 2=tent, 3=Lanczos 2, 4=Gaussian, 5=Blackman-Harris.
-    uint32_t reconstructionFilter = 0;
+    uint32_t reconstructionFilter = 2;
     // MetalFX denoising. Off by default: it is a temporal filter and a still
     // frame gives it one frame to work with, so whether it helps is a question
     // to be measured per scene rather than assumed.
